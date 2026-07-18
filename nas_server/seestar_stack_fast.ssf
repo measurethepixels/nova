@@ -1,0 +1,16 @@
+# SeeStar fast stacking script — no per-frame plate solve, image-based registration only.
+# Good for re-stacks and single-night sessions. convert -debayer avoids the Siril 1.4.2
+# headless calibrate finalization bug.
+
+requires 1.4.0
+
+cd light
+convert light -debayer -out=../process
+cd ../process
+
+register light -2pass
+seqapplyreg light
+
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -out=../result
+
+cd ..

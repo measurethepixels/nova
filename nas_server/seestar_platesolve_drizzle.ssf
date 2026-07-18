@@ -1,0 +1,12 @@
+# Drizzle Phase A: convert + plate solve only.
+# Expected to crash with execute_idle_and_wait_for_it on large sequences.
+# WCS data IS written to individual FITS headers before the crash.
+# Python checks log for "N images successfully platesolved" — if N>0, proceed to Phase B.
+
+requires 1.4.0
+
+cd light
+convert light -out=../process
+cd ../process
+
+seqplatesolve light -nocache -force -order=4 -radius=25

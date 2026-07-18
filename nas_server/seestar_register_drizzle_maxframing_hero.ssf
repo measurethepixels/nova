@@ -1,0 +1,11 @@
+# SeeStar drizzle hero max-framing register-only — pixfrac=0.4 + max framing, feeds ImageMM or PI.
+
+requires 1.4.0
+
+cd light
+convert light -out=../process
+cd ../process
+
+seqplatesolve light -nocache -force -order=4 -radius=25
+register light -drizzle -2pass -scale=2.0 -pixfrac=0.4 -kernel=square
+seqapplyreg light -drizzle -scale=2.0 -pixfrac=0.4 -kernel=square -interp=lanczos4 -framing=max

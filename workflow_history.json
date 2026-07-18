@@ -1,0 +1,1130 @@
+{
+ "current": "1.24.3",
+ "semver_policy": {
+  "major": "scoring model or step add/remove; scores no longer comparable across versions (resets the critique baseline)",
+  "minor": "param/threshold/gate tuning that changes output but keeps comparability",
+  "patch": "bug fix not expected to change good-run output"
+ },
+ "tool_versions": {
+  "detected": "2026-06-11",
+  "note": "Pinned engine dependencies of the pipeline. A minor engine update can silently change a headless process/default (PI DrizzleIntegration no-op; Siril 1.4.2 seqplatesolve crash), so treat these as part of the pipeline contract: update side-by-side, keep the old binary, and only promote after `python -m nas_server.canary check` passes against critiques/golden_baselines.json. These are environment state, not pipeline logic \u2014 updating them is NOT a semver bump (bump only when pipeline code changes in response). SASpro 1.15.0->1.18.0 promoted 2026-06-11: canary check passed with all three golden finals BIT-IDENTICAL (zero drift); no dependency churn (numpy/numba/scipy/astropy unchanged); abe_run gained backward-compatible correction_mode kwarg.",
+  "pixinsight": "1.9.3 Lockhart",
+  "siril": "1.4.3",
+  "setiastrosuitepro": "1.18.0",
+  "graxpert": "3.0.2 Umbriel"
+ },
+ "versions": [
+  {
+   "version": "1.0.0",
+   "date": "2026-06-05",
+   "bump": "baseline",
+   "summary": "Baseline snapshot of the current autoprocess pipeline.",
+   "rationale": "First versioned reference point for the critique-driven iteration loop. No code changes \u2014 establishes the line that subsequent runs are compared against.",
+   "critiques_evaluated": [],
+   "changes": []
+  },
+  {
+   "version": "1.1.0",
+   "date": "2026-06-07",
+   "bump": "minor",
+   "summary": "Seven quality fixes from the first critique batch: better HDR/stretch/background gating, DB-driven routing, NBN palette restore, grader background context, and data-integrity QA flags.",
+   "rationale": "Gate/threshold/param/prompt tuning driven by the 19-critique batch (runs 2026-06-05/06). No scoring step added or removed and the scoring model is unchanged, so 1.0.0 and 1.1.0 critiques remain comparable.",
+   "critiques_evaluated": [
+    "20260605_044714_seestar_nebula",
+    "20260605_060915_seestar_galaxy",
+    "20260605_125745_seestar_broadband",
+    "20260605_144330_seestar_broadband",
+    "20260605_153035_seestar_broadband",
+    "20260605_161754_seestar_nebula",
+    "20260606_005538_seestar_nebula",
+    "20260606_072328_seestar_globular",
+    "20260606_082048_seestar_broadband",
+    "20260606_090716_seestar_galaxy",
+    "20260606_122339_seestar_broadband",
+    "20260606_133203_seestar_broadband",
+    "20260606_142000_seestar_broadband",
+    "20260606_153821_seestar_nebula",
+    "20260606_160817_seestar_nebula",
+    "20260606_162829_seestar_nebula",
+    "20260606_220206_seestar_nebula",
+    "20260607_042147_seestar_nebula",
+    "20260607_044839_seestar_nebula_nbn",
+    "20260607_044855_seestar_nebula_nbn"
+   ],
+   "changes": [
+    "HDR gate (#84): also fire on a small intensely-blown core (near-white fraction lum>=0.98 >= 0.10%), not just a >=1% top-decile fraction \u2014 recovers HDR on compact blown cores like the M 42 Trapezium.",
+    "Stretch picker (#85): add a relative-grain (bg_noise/bg_level) tiebreaker, guarded to backgrounds above 0.04, to break ties away from grainy veralux_strong picks.",
+    "Background gate (#86): _objective_check now rejects a background step that WORSENS per-channel sky balance (sky_b/r, sky_g/r) and flags residual cast for a harder retry.",
+    "Workflow routing (#87): resolve object_type from DB targets.type before the name heuristic, fixing substring collisions (e.g. 'M 109' matching 'm 10' -> globular).",
+    "NBN palette (#88): post-NarrowbandNormalization HOO ColorSaturation restore in pi_postprocess.js so genuine Ha/OIII signal isn't left muted grey-tan (measured emission B/R 0.86-0.97 on M 42 / NGC 2244 NBN).",
+    "Grader context (#89): feed the measured background band into assess_stacked_image so it stops calling measured-correct backgrounds 'too dark'.",
+    "Data-integrity QA (#90): _data_integrity_flags surfaces wrong-field, pre-EQ pointing-spoof, and manual-source provenance issues to log/Telegram and run.log so a run isn't graded for problems it didn't cause."
+   ]
+  },
+  {
+   "version": "1.2.0",
+   "date": "2026-06-07",
+   "bump": "minor",
+   "summary": "Eight further quality fixes from re-examining the same 20-critique batch: crop/dark_enhance/noise gating, BXT-default deconvolution, S50 scale-hint injection, dense-field halo cap, per-channel grader colour context, and NBN neutralize completeness.",
+   "rationale": "Gate/threshold/param/default-fn/prompt tuning surfaced by a second pass over the 1.0.0 critiques. The deconvolution default swaps engine (cc_sharpen -> BXT) but the step itself is unchanged, the scoring model is unchanged, and no scoring step is added or removed, so 1.1.0 and 1.2.0 critiques remain comparable. (Recommendation #7, post-GHS sky pull, was already implemented in 1.1.x; #10 two-path HDR is deferred as a separate MAJOR initiative.)",
+   "critiques_evaluated": [
+    "20260605_044714_seestar_nebula",
+    "20260605_060915_seestar_galaxy",
+    "20260605_125745_seestar_broadband",
+    "20260605_144330_seestar_broadband",
+    "20260605_153035_seestar_broadband",
+    "20260605_161754_seestar_nebula",
+    "20260606_005538_seestar_nebula",
+    "20260606_072328_seestar_globular",
+    "20260606_082048_seestar_broadband",
+    "20260606_090716_seestar_galaxy",
+    "20260606_122339_seestar_broadband",
+    "20260606_133203_seestar_broadband",
+    "20260606_142000_seestar_broadband",
+    "20260606_153821_seestar_nebula",
+    "20260606_160817_seestar_nebula",
+    "20260606_162829_seestar_nebula",
+    "20260606_220206_seestar_nebula",
+    "20260607_042147_seestar_nebula",
+    "20260607_044839_seestar_nebula_nbn",
+    "20260607_044855_seestar_nebula_nbn"
+   ],
+   "changes": [
+    "Crop gate (#1): force a crop when measured corner spread/bg > 0.40 (vignette/uneven corners), not just on low coverage \u2014 recovers vignetted finals (NGC 6914, M 83, NGC 6334).",
+    "dark_enhance gate (#2): target-aware shadow-SNR floor (5 for galaxy/nebula vs 12 otherwise) so faint outer-halo / reflection veil is lifted instead of blanket-vetoed (IC 4592, M 109, NGC 4565, NGC 6914, SH 2-273).",
+    "noise_reduction gate (#3): keep a denoise that holds SNR when the result is still grainy (sigma/bg > 0.18) instead of reverting on a marginal linear 'no improvement' (NGC 7635, SH 2-273).",
+    "deconvolution default (#4): standard-mode default is now bxt_deconvolve (full BlurXTerminator), best-in-class for SeeStar; cc_sharpen_inprocess remains the automatic fallback when PixInsight is unavailable and an explicit experiment variant (NGC 6914 star-ringing halos).",
+    "Scale hints (#5): inject S50 FOCALLEN=250mm + XPIXSZ/YPIXSZ=2.9um into manual XISF->FITS masters lacking them so ImageSolver/SPCC gets a scale seed within the factor-2 window (IC 1805).",
+    "halo_suppression cap (#6): cap reduction_level at 1 in dense star fields (clusters or >1000 detected stars) so aggressive halo reduction doesn't eat stars / darken the field (NGC 6914 Cygnus).",
+    "Grader colour context (#8): feed the measured per-channel corner-sky R/G/B balance into assess_stacked_image so the vision grader stops missing real sky colour casts (NGC 2244 NBN blue cast B/R 1.46).",
+    "NBN neutralize completeness (#9): background_neutralize now adds a residual-cast top-up that equalises sky-patch per-channel medians when a cast remains after the pivot shift (NGC 2244 NBN sky B/R 1.46)."
+   ]
+  },
+  {
+   "version": "1.3.0",
+   "date": "2026-06-07",
+   "bump": "minor",
+   "summary": "Four fixes from Henry's review of the 1.2.0 reprocess batch: crop no longer over-crops small targets, no longer leaves vignetted finals uncropped, an over-bright stretch is pulled back to the per-type sky band, and SCNR no longer breaks SPCC calibration (skipped on SPCC-success) with a downstream channel-crush guard.",
+   "rationale": "Gate/threshold/param tuning and a conditional step skip surfaced by Henry's direct review of the 1.2.0 reprocess outputs (M 109/M 57 over-crop; NGC 6914/IC 1805/M 83 left uncropped; IC 434/SH 2-273 near-black coloured pedestal). The SCNR skip is conditional on the SPCC-success path (mirrors the existing narrowband SCNR skip) \u2014 no scoring step is added or removed and the scoring model is unchanged, so 1.2.0 and 1.3.0 critiques remain comparable.",
+   "critiques_evaluated": [],
+   "changes": [
+    "Crop over-crop floor (#102): crop_multi now enforces a native-resolution floor (short side >= max(900px, 0.45x native short)) and falls back to the largest-area candidate when the chosen candidate (usually canonical, sized from folio angular size) would downsample a small target below S50 resolution \u2014 fixes the ~76px M 57 / ~442px M 109 thumbnails.",
+    "Crop under-crop gate (#103): the post-stretch crop-force check now measures corner brightness on a stretched luminance (1/99.5 percentile + gamma) instead of linear data, and adds a black-edge band detector (>30% near-black in a 2% edge band) \u2014 recovers vignetted/stacking-border finals (NGC 6914, IC 1805, M 83) the linear-threshold gate silently passed.",
+    "Stretch background clamp (#104): after the stretch winner is picked, an additive sky-level clamp pulls the background into the per-object-type band when a variant (e.g. veralux_strong) overshoots above it, so the final sky lands in-band instead of washed bright.",
+    "SCNR-on-SPCC skip + channel-crush guard (#105): SCNR is skipped on the SPCC-success path (color_calibration applied and no .spcc_failed sentinel) because its non-linked Average-Neutral green clip breaks SPCC's linked white balance and crushes the neutral sky toward black (IC 434/SH 2-273 R=0.0/G=0.0019 'G/R=140' cast); SCNR still runs when SPCC failed or never ran. A belt-and-suspenders _guard_channel_crush at final save re-neutralises any residual coloured near-black pedestal left by a downstream step."
+   ]
+  },
+  {
+   "version": "1.4.0",
+   "date": "2026-06-07",
+   "bump": "minor",
+   "summary": "New artifact-trim crop candidate becomes the preferred crop: a stretched-luminance edge profile + noise trim that removes ragged/black/grainy edge stacking artifacts while keeping the full target, replacing canonical/LIR as the default selection.",
+   "rationale": "Surfaced by Henry's annotated review of IC 1805 (mosaic) and NGC 6334 crops: the strict LIR clipped the subject on tilted mosaics and canonical over-sized bordered targets, while the existing coverage maps didn't even match the stack dimensions. The new candidate is coverage-map-independent and is chosen by default; canonical/coverage/lir are still generated for the record and remain the fallback. The crop step is unchanged in identity and the scoring model is unchanged \u2014 no scoring step added or removed \u2014 so 1.3.0 and 1.4.0 critiques remain comparable.",
+   "critiques_evaluated": [],
+   "changes": [
+    "Artifact-trim crop candidate (preferred): crop_multi adds _artifact_trim_bounds \u2014 STF-stretches a luminance, then per edge scans inward and trims while the band is anomalous by EITHER brightness (median below 0.55x plateau = falloff/black band, or above plateau by 0.18 = residual gradient) OR high-frequency noise (above 1.6x interior = grainy low-frame-coverage border). Stops after a clean run, capped at 35% per edge, with a degenerate-box guard that falls back to the full frame. It keeps the FULL target while removing edge stacking artifacts and is now the default chosen candidate over canonical/LIR (which clipped tilted mosaics / over-sized bordered targets). Validated on IC 1805 master (full Heart kept, ~10% ragged bottom trimmed) and NGC 6334 (black/grainy borders removed: top 4% / bottom 25% / left 8% / right 13%). See [[feedback-crop-edge-artifacts]]."
+   ]
+  },
+  {
+   "version": "1.5.0",
+   "date": "2026-06-07",
+   "bump": "minor",
+   "summary": "Alignment outliers are dropped from stacking. Each sub's TRUE plate-solved sky position/rotation is stored in the DB; subs whose solved position sits far from their panel/target siblings (off-pointing \u2014 e.g. pre-EQ ALP-spoofed coords) are flagged solve_status='outlier' and excluded at stack-selection time so they can't drag registration off the cluster.",
+   "rationale": "Surfaced by the IC 1805 panel-drop investigation: one pre-EQ sub (RA 69.98/DEC 20.27, ~50 deg off-pointing) was a spoofed-coordinate frame that polluted the max-frame mosaic. Frame selection changes (an off-cluster sub is now dropped), but the scoring model and every processing step are unchanged \u2014 no scoring step added or removed \u2014 so 1.4.0 and 1.5.0 critiques remain comparable for well-pointed data.",
+   "critiques_evaluated": [],
+   "changes": [
+    "Per-sub plate-solve capture: light_files gains solved_ra/dec/rot/scale + solve_status (ok|failed|outlier|NULL) + solved_at. Populated three ways \u2014 harvest the WCS the stack pipeline already solves (near-zero cost), an idle-worker eager-solve of unsolved subs, and an on-demand POST /solve/{target}. Keys association/alignment QA on TRUE solved position instead of the spoofable/colliding header OBJECT name.",
+    "Alignment-outlier flagging (sub_solver.flag_alignment_outliers): per (target/panel) group, computes a robust circular-median solved position and stamps any sub > 2.0 deg off as solve_status='outlier'. Does NOT touch the manual exclude column.",
+    "Stack-time outlier exclusion (stacker.py): subs with solve_status='outlier' are dropped from qualifying_paths after the exptime filter, gated by setting exclude_alignment_outliers (default true). This changes which frames stack \u2014 an off-pointing sub no longer enters registration/integration.",
+    "Rotation visibility (alignment_summary): surfaces per-group rot_median + rot_spread (max deviation from median, deg) from solved_rot so subs rotated relative to each other are inspectable. Informational only \u2014 alt-az field rotation is expected and corrected by registration, so rotation does not auto-exclude."
+   ]
+  },
+  {
+   "version": "1.6.0",
+   "date": "2026-06-08",
+   "bump": "minor",
+   "summary": "NBN vibrancy overhaul: the NarrowbandNormalization step now drives PI's real o3Boost (OIII boost) on the HOO palette, auto-scaled from Ha dominance, paired with a dedicated warm-gold/teal saturation preset. Fixes the muddy yellow-brown nbn output caused by two latent no-op bugs. Also: nebula stretch picker now weights sky placement over grain, the galaxy/non-nebula picker gains a grain-cap (drops any candidate >1.5x grainier than the cleanest in-band one) to stop a bright-but-grainy stretch beating a clean one, and the crop step is now a remembered manual review (Claude veto removed).",
+   "rationale": "Surfaced by Henry's investigation into why auto nbn runs (IC 1805, NGC 2244) came out muddy grey-tan instead of the vibrant blue-OIII / warm-Ha palette he gets by hand. Root cause: (1) the pipeline set nbn.normalizationMode, which does NOT exist in PI 1.9.3 \u2014 o3Boost sat at its 1.0 default (silent no-op); (2) the color_boost step ran with the galaxy preset because the standard param build reads step_def 'parameters' while the ontology key is 'params'. Both fixed; o3Boost auto-scaled from ha_dominance_ratio and a new nbn color_boost preset added. nbn is an aesthetic step and is NOT score-gated, so this does not affect the scoring model \u2014 1.5.0 and 1.6.0 critiques remain comparable for non-nbn runs. Validated on IC 1805 (ratio 2.54 -> o3Boost 1.50) and Rosette (2.16 -> 1.35) trials matching Henry's reference image. The stretch-picker and crop-review changes were folded into this same entry (no separate version bump) because 1.6.0 has not yet produced any processing runs and its changes are uncommitted. Both are aesthetic/framing choices outside the score-gated model, so comparability is unaffected. See [[feedback-aesthetic-steps]], [[reference-seestar-lp-filter]], [[no-overcrop-s50]], [[crop-edge-artifacts]].",
+   "critiques_evaluated": [
+    "20260608_210325_seestar_nebula",
+    "20260608_214812_seestar_nebula",
+    "20260609_021519_seestar_galaxy",
+    "20260604_143439_seestar_galaxy"
+   ],
+   "changes": [
+    "NBN o3Boost lever (pi_postprocess.js): the NarrowbandNormalization block now sets nbn.palette=0 (HOO) and nbn.o3Boost=job.nbn_o3_boost (the real OIII-boost property), dropping the dead nbn.normalizationMode assignment that was a silent no-op in PI 1.9.3. o3Boost is the lever that surfaces the teal-blue OIII core; left at 1.0 it produced muddy yellow-brown.",
+    "Ratio-driven o3Boost (auto_process.py): narrowband_norm auto-scales o3Boost = clamp(0.50 + 0.395*ha_dominance_ratio, 1.25, 1.7) \u2014 a more Ha-dominant target gets more OIII boost to surface its weak teal core. Curve fitted to IC 1805 (2.54->1.50) and Rosette (2.16->1.35) visual sweet spots. Manual overrides nbn_o3_soft(1.3)/nbn_o3_strong(1.7). Measured ratio + chosen boost are logged per run for iteration.",
+    "NBN color_boost preset (seti_astro.py + auto_process.py + ontology): new 'nbn' color_boost preset (gold/copper dust 35deg/+0.40, amber bleed 18deg/+0.22, teal OIII core 195deg/+0.32, global_sat_lift 0.06) is routed in explicitly whenever narrowband_norm is forced \u2014 fixing the latent params/parameters key-mismatch bug that silently left nbn runs on the galaxy preset. This is now the SOLE saturation pass for nbn; the in-JS HOO ColorSaturation restore is disabled (hoo_boost=0) to avoid double/triple saturation.",
+    "Threaded params: nbn_o3_boost + nbn_hoo_boost through pixinsight.run_postprocess (signature + job dict); o3_boost + hoo_boost through seti_astro.narrowband_normalize. The /narrowband_norm branch endpoint method= now means auto (ratio-scaled) | soft (1.3) | strong (1.7) instead of the dead MaximumStars/Equalize.",
+    "Nebula stretch picker (auto_process._physics_pick_stretch): for nebula object_types the pick is now dominated by sky placement \u2014 the variant whose background sits closest to the per-type band with the least under-exposed/blown clipping wins (key = round((bg_dist+under+blown)/0.02)), and relative grain only breaks ties within that bucket. Previously grain could win outright and select an STF-overshoot variant that washed the sky bright. Galaxy/other types keep their existing picker. See [[galaxy-stretch-darker]], [[faint-nebula-too-dark]].",
+    "Crop is now a remembered manual review (Claude veto removed): on a target's FIRST auto-process the crop step opens a manual review (crop_review.py) presenting all crop_multi candidates (artifact-trim / canonical / coverage / intersection / LIR) each with an STF preview, plus a Cropper.js editor to draw/rotate a custom crop. The user's choice is persisted per target (target_crop.py / target_crops table) as a WCS sky-box (center RA/Dec + on-sky size + PA, primary) with fractional bounds + rotation as a no-WCS fallback, and reused on every later run via reproject onto the saved box (canonical_frame.reproject_to_canonical) \u2014 identical framing every session regardless of mosaic canvas growth. The old _claude_confirm_crop / _claude_crop_clips_subject vision veto is deleted. Review honors the standard grace->park->wait queue pattern (5-min grace, then releases the queue and waits indefinitely). See [[no-overcrop-s50]], [[crop-edge-artifacts]].",
+    "Crop clear/redo controls: per-target saved crop can be cleared from the target page ('Clear & redo crop' button -> POST /target/{target}/clear-crop) so the next run re-opens the review, and a per-run 'Re-crop (force fresh crop review)' queue flag (re_crop on /queue + queue-view add-job checkbox) forces a one-off fresh review without clearing the stored crop. Manual-crop geometry (incl. rotation) is persisted from the apply-crop endpoint, which knows the exact applied box.",
+    "Galaxy/non-nebula stretch grain-cap (auto_process._physics_pick_stretch): before the blended-cost sort, drop any candidate whose grain (bg_noise + 0.25*rel_grain) exceeds 1.5x the cleanest IN-BAND candidate's grain, then pick lowest cost among survivors. Fixes the M 51 6/9 regression where veralux (grain 0.248) beat the cleaner stat_bright (0.145) \u2014 both ON-TARGET sky \u2014 because veralux's brighter midtones lowered its under-exposure term more than noise_w*bg_noise penalized its grain; the final noise score tanked to 5.5 and a non-degradation restore had to ship an earlier checkpoint. Reference grain is taken from in-band candidates only, so a uniformly-grainy field (no clean in-band option) is left untouched. Distinct from the nebula picker change above (nebulae de-weight grain because their corners hold real Ha; galaxies need the opposite). See critiques 20260609_021519_seestar_galaxy + 20260604_143439_seestar_galaxy, [[galaxy-stretch-darker]]."
+   ]
+  },
+  {
+   "version": "1.6.1",
+   "date": "2026-06-09",
+   "bump": "patch",
+   "summary": "Three crop/queue bug fixes. (1) Manual crop rotation no longer leaves black corner wedges: the apply-crop endpoint and the saved-crop fractional fallback now rotate-then-crop (sample the rotated source directly into the axis-aligned output box) instead of crop-then-rotate-with-reshape. (2) Park-on-review now actually advances the queue: a parked crop review releases PIPELINE_LOCK while it waits on the user, so the next queued target runs instead of stalling on the lock. (3) A user-chosen crop is never discarded by objective stats: crop is the user's explicit framing choice from the manual review (or the persisted saved crop), so it is now fully exempt from both the post-step SNR stats-veto and the force_apply objective gate. Cropping reframes the image, so a whole-frame SNR before/after comparison is meaningless anyway.",
+   "rationale": "Bug fixes, not expected to change good-run output \u2192 patch. (1) Henry added a small rotation in the Cropper.js editor and the result wouldn't 'reset to a rectangle' \u2014 the old path cropped the axis-aligned box first, then scipy.ndimage.rotate(reshape=True, cval=0) rotated that box inside a larger canvas, leaving zero-filled triangular wedges. Fixed in target_crop.rotated_crop() (shared by main.py apply-crop and target_crop._apply_frac_crop) via scipy.ndimage.affine_transform that inverse-maps each output pixel into the rotated source, filling the whole box with real pixels; rotation direction preserved (matches prior scipy.ndimage.rotate(-rotate), Cropper +angle=CW). The WCS sky-box reuse path was already correct (folds rotation into PA). (2) When M 31's crop review grace elapsed it parked (released the queue slot) but its auto_process thread kept holding PIPELINE_LOCK at crop_review ev.wait(); the worker popped M 51, which logged 'starting' then blocked ~40 min on PIPELINE_LOCK until M 31 fully finished. Fix: PIPELINE_LOCK now tracks its owner thread (auto_process.mark/clear/release/reacquire helpers); crop_review._await_decision releases it on park and re-acquires before resuming, so a parked (idle) review never blocks other local autoprocess work while still serializing real PI execution. Laptop worker runs auto_process without the lock, so release is owner-guarded (no-op there). (3) Surfaced by Henry asking 'did it discard my crop?' for M 51: its coverage edge-crop (rotate=0, no wedges) was force-applied by geometry, then the generic post-step SNR stats-veto reverted it because whole-frame SNR dropped 102.7\u219259.0 (0.57, below the 0.85 guard) and logged 'crop \u2014 no improvement, skipped'. Henry's directive: 'Don't veto crop. I am choosing it.' Crop is now fully exempt from objective gating \u2014 _objective_check('crop') returns ok/improved=True, and the post-step stats-veto skips step_name=='crop' entirely. A crop the user chose in the manual review is always applied; the pipeline never second-guesses framing with stats.",
+   "changes": [
+    "Crop rotation wedge fix: new target_crop.rotated_crop(data, cx, cy, cw, ch, rotate_deg) uses scipy.ndimage.affine_transform to extract a cw\u00d7ch axis-aligned box from the rotated source \u2014 no black wedges. Replaces crop-then-ndrotate(reshape=True, cval=0.0) in main.py /review/{id}/apply-crop and target_crop._apply_frac_crop. Direction matches the old -rotate convention (verified \u22641px against scipy.ndimage.rotate).",
+    "Park-advance fix: PIPELINE_LOCK gains owner tracking (auto_process._pipeline_lock_owner + mark_pipeline_lock_held / clear_pipeline_lock_held / release_pipeline_lock_for_park / reacquire_pipeline_lock_after_park). queue_manager._run_job and main.py autoprocess set/clear the owner around their `with PIPELINE_LOCK`. crop_review._await_decision releases the lock when a review parks and re-acquires after the user responds, so the queue's next local job runs immediately instead of stalling on the lock held by the idle parked thread.",
+    "Crop objective-gate exemption: a user-chosen crop is never discarded by stats. auto_process._objective_check('crop') now returns ok=True/improved=True (framing, not gated), and the post-step SNR/gradient stats-veto skips step_name=='crop' (guard `and step_name != 'crop'`). Previously the 0.85 SNR guard reverted legitimate coverage/edge crops (M 51: 102.7\u219259.0) and logged 'crop \u2014 no improvement, skipped'. Crop is the user's explicit manual-review choice and is now always applied."
+   ]
+  },
+  {
+   "version": "1.7.0",
+   "date": "2026-06-10",
+   "bump": "minor",
+   "summary": "Galaxy workflow: detail-first stretch selection + masked sky mute. (1) The physics stretch picker gains a galaxy branch that ignores ALL sky terms (bg_dist, bg_noise, rel_grain, grain-cap) and selects on highlight health (under/blown, bucketed 0.05) + dead-channel reject, tie-broken by a faint-preserving preference order (mas > veralux_strong > veralux > stat_bright > stat > stf > ghs family). (2) PI MaskedStretch output is normalized to 0-1 (it writes int32-scaled FITS), so mas is finally a real candidate. (3) The galaxy path's post-combine sky mute is replaced by sky_mute_masked: an auto-tuned luminance mask (sigma-clipped sky, smoothstep sky+1.5sigma to sky+5sigma, gaussian feather, dilate blend) protects the extended galaxy while a black-point lift darkens only the sky. color_boost's existing midtone lum-mask blend already luminance-gates saturation (verified: mas M 51 mask lower 0.194 vs sky 0.149 - only the galaxy's ~10% of pixels boosted). (9) green_cap_masked: masked signal-only green-excess cap on the linear starless layer for galaxies (amount 0.7) - fixes the post-SPCC lime cast without touching the SPCC-neutral sky. (10) galaxy color_boost gains a 340deg Ha/HII pink band (+0.22 sat, +8% red lift) for visible HII knots in spiral arms.",
+   "rationale": "Henry's directive from the M 51 mas review: 'the key is to pick the good galaxy stretch and not worry about the sky' - galaxy detail looked awesome on mas but the picker could never choose it: (a) MaskedStretch wrote unnormalized int32 FITS (values to 4.27e9) so stats were garbage, and (b) even normalized, the sky terms killed it - mas/veralux leave the sky high (big bg_dist) and the 1.6.0 grain-cap cut them on sky-corner sigma, crowning ghs_strong, which crushes the faint arms/tidal bridge. Since sky_mute_masked darkens the sky AFTER stars are recombined, sky placement at stretch time is no longer the picker's problem; only galaxy-detail retention matters. Selection is physics-only (no Claude API call - Henry's explicit constraint) and validated against an in-session vision ground truth on 4 galaxies: M 51/M 81/M 101 -> mas, NGC 4565 -> veralux family (its mas is nearly black; the highlight-health gate rejects it and the preference order picks veralux_strong) - 4/4 reproduced offline. The old flat _mute_sky multiplied the whole frame down, dimming faint outskirts with the sky; the masked version keeps galaxy luminance untouched (M 51: sky 0.018->0.001, galaxy coverage 11.6%). Minor bump: gate/param tuning + step implementation swap on the existing sky_mute slot; no scoring step added/removed, scores remain comparable.",
+   "critiques_evaluated": [
+    "20260610_031009_seestar_galaxy"
+   ],
+   "changes": [
+    "Stretch picker galaxy branch (auto_process._physics_pick_stretch): for object_type containing 'galaxy', drop bg_dist/bg_noise/rel_grain/grain-cap entirely; sort by (round((under+blown)/0.05), _GAL_PREF index) where _GAL_PREF = [mas, veralux_strong, veralux, stat_bright, stat, stf, ghs_strong, ghs, ghs_soft]. Dead-channel reject still applies. Nebula and non-galaxy branches unchanged.",
+    "MAS normalization (auto_process._run_mas): PI MaskedStretch writes int32-scaled FITS (BITPIX=32, BZERO=2147483648); after _pi_pp returns, if max > 1.5 the data is divided by its max, clipped to 0-1, written back float32 with BZERO/BSCALE/DATAMIN/DATAMAX stripped. Without this, mas stats read p99~2.8e9 and the variant could never win.",
+    "sky_mute_masked (seti_astro): new function - luminance L = 0.2126R+0.7152G+0.0722B; sigma-clipped sky (5 iters, clip at med+2.5sigma); mask smoothstep from sky+1.5sigma to sky+5sigma; gaussian feather sigma 3; dilation blend (max_filter*0.5+M*0.5) to protect halo edges; black-point lift bp=sky-1sigma via (x-bp)/(1-bp); composite M*orig+(1-M)*dark. Returns sky_before/sky_after/galaxy_coverage.",
+    "Galaxy combine tail (auto_process): after combine_stars_screen, galaxy targets route to sky_mute_masked instead of the flat _mute_sky scale; step record stays 'sky_mute'. Non-galaxy types keep the existing _mute_sky behavior.",
+    "color_boost: NO code change - the existing _lum_mask_blend midtone mask (lower = clamp(median*1.3, 0.08, 0.30), computed from the post-stretch image) already luminance-gates saturation; measured on mas M 51 it boosts only the galaxy (9.8% of pixels above mask lower).",
+    "color_boost delta smoothing (seti_astro.color_boost): the hue-Gaussian saturation delta is now gaussian_filter(sigma=4) smoothed before applying. Hue is noisy in faint regions, so the per-pixel delta flipped adjacent pixels between the +0.30 blue boost and the -0.05 yellow damp, posterizing the color into hard orange/purple patches (Henry's zoomed M 51 report). Smoothing the boost FIELD (not the image) keeps luminance detail intact while the saturation transition becomes spatially gradual; verified on the M 51 mas stretch (speckle gone at sigma 4, blue arm boost preserved).",
+    "Manual crop editor apply fix (main.review_apply_crop + target_crop.cropper_box_to_array): the preview is flipped vertically for north-up stacks (CDELT2>0) and Cropper.js reports x/y in the rotated bounding-canvas frame, but apply-crop mapped both straight into the unflipped/unrotated array - every manual crop landed mirrored/displaced (M 31 -17deg, M 42 0deg). New mapping un-rotates the canvas box center, un-flips the row, negates the rotation angle in array space, then scales to full resolution. Poisoned saved crops for M 31/M 42 cleared.",
+    "Sky-only gradient metric (image_analyzer._background gradient_severity_sky + auto_process gate/scoring): the all-cells gradient metric is dominated by grid cells sitting on the target, so background_extraction was REJECTED on M 81 even though GraXpert flattened the sky perfectly (span 0.00022->0.00003; metric 0.176->0.248 because SPCC's bg_anchor dropped the denominator pedestal) - the leftover gradient was then amplified 9x by the mas stretch into the hazy 'green cast' top. New metric measures flatness over the object-excluded bg_cells only (M 81: 0.085->0.006 - correctly accepted); the BE/background_neutralize gate, the physics gradient score, AND the generic post-step stats veto now prefer it (the veto was a second independent guard on the old metric \u2014 it reverted the M 81 GraXpert result even after the gate fix). The weak sky_mute on M 81 (sky sigma +/-0.066) was a downstream symptom of the same uncorrected gradient.",
+    "green_cap_masked (seti_astro + auto_process star_split hook, galaxies only): SPCC's linked white balance neutralises the sky but left the galaxy SIGNAL ~10% green-heavy on S50 OSC data (M 81 trace: sky-subtracted galaxy G/R 1.04-1.12 post-SPCC where an Sab bulge should be ~0.9); the mas stretch then amplified it into the lime/yellow-green cast the grader scored color_balance 3.5. New step runs on the linear STARLESS layer right after star split: feathered luminance mask, SKY-SUBTRACTED green cap G_sig -> min(G_sig, (R_sig+B_sig)/2) at amount 0.7 (Henry's pick from the A/B; G/R 1.10 -> 1.00, warm cream bulge + blue arms). Sky pedestal is byte-identical on output and star colors keep SPCC calibration, so the SPCC-success SCNR skip (IC 434 sky-crush rule) is not violated. Self-gates: passes through when measured signal G/R <= 1.02.",
+    "Ha/HII knot boost in the galaxy color_boost preset (seti_astro): added a (340deg, 25deg, +0.22) pink-magenta saturation band plus an 8% red-channel lift where that band fires (original-hue field, same sigma-4 smoothing as the main delta so no posterization). Henry's pick from the M 51 arm-zoom A/B (+0.22 + red lift, closest to the Reddit 42h reference's pink HII regions); the preset previously only boosted blue 240/280 + a tiny 10deg red band, leaving Ha knots washed out."
+   ]
+  },
+  {
+   "version": "1.8.0",
+   "date": "2026-06-10",
+   "bump": "minor",
+   "summary": "NBN vibrancy restored: fix the silent revert of the nbn saturation pass. (1) pi_postprocess.js 'Ensure Float32' used SampleFormatConversion.To32Bit \u2014 32-bit UNSIGNED INTEGER, not float \u2014 so when the gate fired, PI saved full-range uint32 FITS (0..4.29e9); changed to ToFloat. (2) _lum_mask_blend now normalizes out-of-range inputs to [0,1] before computing the luminance mask \u2014 on raw uint32 data the midtone mask (0.15-0.85 band) evaluated to 0 everywhere and the blend silently replaced the step output with its input. (3) The nbn color_boost preset is exempted from the midtone lum-mask blend entirely: the pathfound vibrant SHO look (IC 1805 / Rosette trials 2026-06-08) was generated unmasked, and the mask's upper bound (~0.85) would exclude the bright cores where the restored saturation matters most; galaxy/nebula presets keep the mask. (4) narrowband_normalize gains a safety net that rewrites any non-float or out-of-range PI output as normalized float32 before returning it to the pipeline. Plus the three approved critique recommendations: (5) NEW hdr_core_blend \u2014 masked-core HDR blend with clipped-hue chroma refill, added to BOTH galaxy and nebula workflows, stats-veto-exempt; (6) folio-aware nebula stretch pick \u2014 placement key charges distance outside the folio bg_level_range; (7) NEW sky_green_rebalance \u2014 sky-only masked green cap (max(R,B), smoothed excess), SPCC-safe SCNR substitute.",
+   "rationale": "The 1.7.0 NBN runs on IC 1805 (5.8) and NGC 2244 (7.2) rendered steel-grey instead of the pathfound vibrant gold/teal SHO variants (IC_o3_1p5_sat / RO_o3_1p3_sat, 2026-06-08). Root cause: the NBN step input was a non-float working copy, the JS 'Float32' fix-up actually converted to uint32, and the nbn color_boost (the SOLE saturation pass, hoo_boost=0 by design) was then fully reverted by a mask computed on un-normalized uint32 luminance \u2014 bit-identical output confirmed on both runs while the step recorded 'applied'. NBN itself balances Ha/OIII to near-neutral (bright-region saturation 0.402 -> 0.198), so losing the restore pass is what produced the muted palette. The original critiques mis-framed this as an NBN palette inversion; the SHO palette is the intended aesthetic (aesthetic steps are not score-gated). ALSO IN 1.8.0: the three approved 2026-06-10 critique recommendations \u2014 (5) hdr_core_blend (M 42 + M 31: global HDR crushes faint signal and gets vetoed; masked blend touches only the core; galaxy path previously had NO HDR step), (6) folio-aware nebula stretch pick (M 42: mas sky 0.122 was in the wide per-type band 0.06-0.16 but 42% over the folio band [0.05,0.09], cost -0.2), (7) sky_green_rebalance (M 31 sky G/R 1.12, M 42 1.06 left unpolished by the SPCC-skips-SCNR rule; verified 1.045->1.012 and 1.061->1.010 with object/star color untouched; full SCNR on SPCC data stays forbidden, IC 434 precedent).",
+   "critiques_evaluated": [
+    "20260610_114522_seestar_nebula",
+    "20260610_101238_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/pi_postprocess.js",
+     "change": "SampleFormatConversion.To32Bit -> ToFloat in the ensure-float block (To32Bit is unsigned integer)"
+    },
+    {
+     "file": "nas_server/experiments.py",
+     "change": "_lum_mask_blend: min-max normalize orig/proc to [0,1] when out of range before computing mask + blending"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "skip _lum_mask_blend for color_boost when preset='nbn' (pathfound SHO look is unmasked); log the skip"
+    },
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "narrowband_normalize: rewrite non-float/out-of-range PI output as normalized float32 (safety net)"
+    },
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "NEW step hdr_core_blend: compute_wavescale_hdr blended under a feathered core luminance mask (thr 0.72 nebula / 0.80 galaxy); chroma-preserving luminance-ratio blend with clipped-hue refill (above L~0.78 stored ratios are washed; chroma refilled from well-exposed surroundings via normalized convolution sigma=100)"
+    },
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "NEW step sky_green_rebalance: sky-only masked green cap (sigma-clipped sky mask); cap = max(R,B) not SCNR average (average inverts weak-blue sky to magenta); excess computed on sigma=6-smoothed channels so the cap cannot clamp only the noise high-tail and drag the median below neutral"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "hdr_core_blend wiring: galaxy/nebula threshold from object_type; shares the hdr core-clip gate; exempt from whole-frame stats veto (masked 0.15-0.9% change, crop precedent); both new steps in _PHYSICS_SCORE_STEPS + _CORRECTIVE_REDUCE_KEY (compression_factor / amount)"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_physics_pick_stretch(folio_band=...): nebula placement key now charges distance outside the folio quality_thresholds.bg_level_range; galaxy branch unchanged (sky deliberately ignored, sky_mute_masked downstream); verified M 42 pick flips mas (bg 0.122, 42% over band) -> stf (0.050 in-band)"
+    },
+    {
+     "file": "nas_server/processing_ontology.json",
+     "change": "seestar_galaxy + seestar_nebula optional_nonlinear_steps -> [color_sat, hdr_core_blend, dark_enhance, sky_green_rebalance]; new step defs + variants (hdr_core_soft/standard/strong, sgr_soft/standard); hdr_compression def kept for experiments and other workflows"
+    },
+    {
+     "file": "nas_server/video_frame.py",
+     "change": "display names/captions for Masked-Core HDR Blend and Sky Green Rebalance"
+    }
+   ]
+  },
+  {
+   "version": "1.9.0",
+   "date": "2026-06-12",
+   "bump": "minor",
+   "summary": "NBExtract + SSSC (SASpro 1.18 features): true narrowband workflow for LP dual-band data plus spectrophotometric color calibration. (1) NBExtract \u2014 xp_channel_extract unmixes TRUE Ha/OIII channels from LP stacks via a Gaia-XP mixing-matrix NNLS fit (SEP detect -> WCS->XP library match -> raw-aperture photometry -> per-star expected line fluxes -> fit A; two-phase: A is fit on the star-full post-color_calibration image, NNLS-applied to the STARLESS linear image at the stretch boundary so the channels are nebula-only). (2) nb_palette composites the extracted channels into HOO / Foraxx / synthetic-SHO (s_mix=0.8) variants \u2014 force_only aesthetic step with 4 experiment variants, replacing the old narrowband_norm Ha~R/OIII~B approximation when forced. (3) SSSC \u2014 sssc_calibrate solves the camera system response from matched XP star spectra (SASpro stages 1-3, real Bayer throughput curve shapes from SASP_data.fits \u2014 identity curves are degenerate and desaturate to gray-world; SONY_COLOR_SENSOR UVIRCUT set for broadband, SONY_CMOS x L-eNhance set for LP) and applies the Stage-2 quadratic gains; SessionResponseCache seeds the next solve (verified: IC 1805 second run seeded from prior ctrl_points). Quality gate: applied-stage (Stage 2 sigma-clipped) RMS < 2.0, mirroring SASpro's own prior-trust threshold. (4) LP routing: color_calibration on LP data now tries SSSC FIRST (LP previously had no valid calibration \u2014 SPCC's broadband white reference is wrong for dual-narrowband); any SSSC failure falls through to the legacy PI SPCC/CC path unchanged. SSSC success writes .sssc_applied and counts as calibration success for the SCNR-skip and linked-stretch rules. SSSC results are exempt from the whole-frame SNR objective gate and get the lenient catastrophic-only stats-veto floor: the solved per-channel gains (k_R ~2.26 on LP) legitimately shift the SNR metric, which vetoed a correct calibration on the first live integration run (IC 1805, SNRx0.81 vs the 0.90 gate); the real quality check is the solver's applied-stage RMS < 2.0 gate (crop-exemption precedent: don't second-guess a deliberate transform with whole-frame stats). Broadband SSSC ships EXPERIMENT-ONLY this version (M 13 side-by-side showed a green core shift vs SPCC's neutral; default flip deferred to C3 validation = separate bump + canary re-baseline). Also fixes a latent gate bug: LP detection now happens ONCE on the source stack header \u2014 the crop step strips FILTER from run-dir intermediates, so the old mid-pipeline header sniffs would have silently no-opped on every real run. nb_palette black-sky fix (2026-06-12): per-channel background anchoring (sky->0 pre-stretch, re-anchored post) + signal-high-percentile midtone (not sky median), so composited palette sky is black instead of navy/teal; synthetic proof sky=[0,0,0]. Extreme-flux-ratio fallback NB_PALETTE_MAX_FLUX_RATIO=20: Ha/OIII ratio > 20 means OIII is a noise pedestal (IC 1805 ratio 157, OIII contrast 0.89 vs Ha 3.06) -> skip nb_palette, fall back to narrowband_norm; nb_palette is for genuine bicolor only.",
+   "rationale": "The SeeStar 'LP' filter is dual-narrowband (Ha 20nm + OIII 30nm), but the NBN branch only approximated channel separation (ha_dominance_ratio, Ha~R / OIII~B) and LP data got no real color calibration. SASpro 1.18.0 (promoted 2026-06-11, canary bit-identical) shipped NBExtract and SSSC; Henry's scope decisions: full narrowband workflow (extract H/O early in linear, synthesize S, composite SHO/HOO/Foraxx) and SSSC for both LP and broadband with broadband default flip gated on validation vs SPCC. Verified headless: xp_stars selftest (synthetic mixing-matrix recovery corr 1.0, NNLS reconstruction, synthetic R(lambda) solve rms 0.0015); IC 1805 LP end-to-end (280 XP stars, Stage 3, applied RMS 0.888, cache-seeded second run); M 13 broadband (84 stars, Stage 2, RMS 0.586). Old-drizzle stacks (1.19\"/px WCS/row-order mismatch) no-op the XP machinery by design \u2014 the star-match gate fails closed.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/xp_stars.py",
+     "change": "NEW shared Gaia-XP plumbing: detect_stars (SEP), match_xp (WCS px->sky -> find_nearest_batch, reproj dist^2<9 gate), measure_rgb (SASpro raw-aperture photometry), enrich_for_nbextract (line-window integrals + template class), enrich_for_sssc (S_star integrals over REAL Bayer throughput curves on sssc._WL_GRID; xp_flux Stage-3 compatible), load_throughput_curves (SASP_data.fits, nm->Angstrom), gather_calibration_stars, probe + --selftest CLI"
+    },
+    {
+     "file": "nas_server/nb_palette.py",
+     "change": "NEW HOO/SHO/Foraxx compositor for extracted Ha/OIII: joint normalization, linked-by-luminance (or per_channel) statistical stretch, synthetic SII = s_mix*Ha (default 0.8), Foraxx dynamic G mix"
+    },
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "NEW wrappers: xp_fit_matrix / xp_apply_matrix (two-phase NBExtract), nb_palette, sssc_calibrate (solve+apply, SessionResponseCache prior seeding + save, applied-stage RMS<2.0 gate, .sssc_applied sentinel, stage/RMS/bv_span/session diagnostics); spcc wrapper routes spcc_lp_filter=True -> SSSC first, legacy PI SPCC/CC fallback unchanged"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_is_lp_run computed once from source_fits (fixes latent FILTER-stripped-by-crop no-op at the xp hook and spcc_lp_filter param); xp fit boundary moved to after color_calibration (SSSC rescales channels per-pixel \u2014 fit and NNLS-apply must share a color domain); xp_fit/xp_apply hooks + nb_palette wiring; color_calibration step record carries engine method + SSSC solve diagnostics; sssc_applied recorded in the stretch step record"
+    },
+    {
+     "file": "nas_server/processing_ontology.json",
+     "change": "nb_palette step def (force_only, aesthetic, never score-gated) + variants nbp_hoo / nbp_foraxx / nbp_sho_gold / nbp_hoo_aggressive as experiment_variants"
+    },
+    {
+     "file": "nas_server/video_frame.py",
+     "change": "display names + captions for xp_channel_extract and nb_palette documentary frames"
+    }
+   ]
+  },
+  {
+   "version": "1.10.0",
+   "date": "2026-06-13",
+   "bump": "minor",
+   "summary": "background_neutralize blue-cast fix. (1) The completeness pass now measures the FOUR DARK CORNERS \u2014 the same region image_analyzer gates the step on \u2014 instead of the single auto-detected 50x50 patch. On frame-filling targets (IC 1805 \u2014 the Heart fills the centre) the auto-patch lands on an already-neutral spot while the dark corners carry the cast (IC 1805 corner sky B/R 1.25 survived the patch neutralize), so the step was a no-op and the blue cast reached the final. Corner-anchored per-channel offset now drives the corner sky to neutral grey (verified: IC 1805 corner B/R 1.25->1.00, G/R 0.95->1.00 in all three pivot modes). (2) _objective_check now gates background_neutralize on sky-cast improvement (cast_drop>0.02, SNR hold) instead of gradient drop. A colour step does not change the gradient, so the shared background_extraction gate (grad_drop>0) rejected EVERY neutralize when the gradient was already flat (IC 1805: 'gradient 1.000->1.000 0% drop' -> rejected) \u2014 the step could never apply. background_extraction keeps its gradient gate + the introduces-a-cast reject guard, now in its own branch.",
+   "rationale": "IC 1805 1.9.0 final carried a measured corner blue cast (B/R 1.26) that desaturated the Ha toward brownish-red; Henry flagged it. Root cause was two compounding bugs in the neutralize path: it sampled the wrong region (an auto-patch that read neutral) and its accept gate demanded a gradient drop a colour step can never deliver. M51/M13 corners are already neutral post-SPCC (no-op) but M42 has a mild residual corner cast that the working neutralize now corrects -> golden-baseline change on M42 -> MINOR + canary re-baseline with Henry's M42 before/after sign-off.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "background_neutralize completeness pass measures the four dark corners (m=max(h//20,w//20,50)) instead of the auto_rect_50x50 patch; subtracts per-channel offset to drive the darkest-corner channel reference (trigger _imbal>0.05). Neutralizes the cast region image_analyzer actually reads."
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_objective_check: split background_neutralize into its own branch gated on sky-cast improvement (cast_drop>0.02 and SNR>0.85; metrics['sky_cast']); background_extraction keeps the gradient gate + sky-cast-WORSENED reject guard."
+    }
+   ]
+  },
+  {
+   "version": "1.10.1",
+   "date": "2026-06-21",
+   "bump": "patch",
+   "summary": "Register SSSC as an EXPERIMENT-ONLY color_calibration variant (cc_sssc) in processing_ontology.json. Broadband default stays SPCC; LP/dual-band default stays SSSC (1.9.0). No standard-run output change \u2014 experiment_variants are consumed only when a color_calibration experiment is explicitly run, so the golden trio is byte-identical (canary: no drift). Classified PATCH because no good-run output changes: this is an additive optional capability, not a default flip. A future broadband default flip to SSSC would be a separate MINOR + canary re-baseline.",
+   "rationale": "C3 broadband validation (2026-06-21) ran SSSC vs SPCC on five targets: M 13 (84 XP stars), NGC 188 (45), M 3 (31) all ran and tied SPCC's corner-sky neutrality within ~0.01-0.03; M 51 (15 stars) and M 42 (5) fell below the 20-star gate and fell back to SPCC. Conclusion: SSSC broadband only fires on star-rich fields and offers no improvement over SPCC where it runs, so it is not worth making the broadband default \u2014 but it is registered as an experiment variant so it can be A/B'd on star-rich targets. Henry chose 'experiment only' 2026-06-21.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/processing_ontology.json",
+     "change": "color_calibration.experiment_variants added: cc_spcc (PI SPCC, broadband default), cc_sssc (seti_astro sssc_calibrate lp=false, NEW \u2014 star-rich only, auto-falls back to SPCC under 20 XP matches), cc_pi (PI ColorCalibration), cc_none (control). Note updated to document broadband=SPCC / LP=SSSC defaults and the experiment-only status of cc_sssc."
+    }
+   ]
+  },
+  {
+   "version": "1.10.2",
+   "date": "2026-06-29",
+   "bump": "patch",
+   "summary": "Add SyQon Prism Mini as experiment variant for noise_reduction. Wires syqon_prism_denoise() in seti_astro.py \u2014 pure in-process numpy path via prism_denoise_rgb01(); no subprocess, no GUI objects. Model weights downloaded (376 MB) to ~/.local/share/SASpro/runtime/py312/models/syqon_denoise/prism_mini.pt. Smoke-tested: 128x128 synthetic, CPU, variant=free, output shape confirmed. Two experiment variants registered: prism_mini_gentle (strength=0.65) and prism_mini_standard (strength=0.85). Standard runs unchanged \u2014 cc_denoise_inprocess remains the seti_astro_fn default. Parallax (BXT replacement) is still a placeholder architecture in SASpro 1.18.0; no weights available yet.",
+   "rationale": "SyQon bake-off spike 2026-06-29. Prism Mini is the only SyQon model with released weights. The Parallax (deconv/BXT replacement) architecture is still a placeholder in SASpro 1.18.0 \u2014 cannot integrate. Prism Mini is an experiment-only denoise alternative to CosmicClarity (cc_denoise_inprocess). Real value: first live data on Prism vs CC quality; prerequisite for future Prism adoption as default if it wins the bake-off on golden trio.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "Added syqon_prism_denoise(input_path, output_path, strength=0.85, tile=512, overlap=64, pad=64, use_mtf=True, mtf_target=0.10): loads Prism Mini weights via syqon_prism_model_path, calls prism_denoise_rgb01 directly (no GUI/app object), applies optional MTF stretch+invert, blends at strength, saves FITS. Falls back gracefully with clear error if weights missing."
+    },
+    {
+     "file": "nas_server/processing_ontology.json",
+     "change": "noise_reduction.experiment_variants: added prism_mini_gentle (strength=0.65) and prism_mini_standard (strength=0.85), both pointing to syqon_prism_denoise fn."
+    }
+   ]
+  },
+  {
+   "version": "1.10.3",
+   "date": "2026-06-29",
+   "bump": "patch",
+   "summary": "Correct the SeeStar S50 plate scale constant in image_analyzer.py from 2.55 to 2.37 arcsec/px (the measured native value). Feeds psf_arcsec/psf_diameter, consumed by tool_params.py for BXT nonstellar PSF diameter, so deconvolution PSF is now ~7% smaller (more accurate). Surfaced by the memory-tidy pass; ground-truthed from plate-solved WCS on native M 13/M 51 stacks (2.372-2.373\"/px) and corroborated by physics (2.9\u00b5m IMX462 / 250mm FL = 2.39) + the drizzled-wcs-mismatch note (1.19\"/px drizzle = 2.37/2).",
+   "rationale": "The reference-s50-pixel-scale memory had claimed 2.9\"/px native and flagged the code as wrong, but 2.9 is the pixel SIZE in microns, not the plate scale. agent.py's 2.4 was already correct; only image_analyzer.py's 2.55 was a stale estimate. PATCH: a small accuracy correction to one constant; affects BXT manual-PSF diameter by ~7%, no scoring-model or step change.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/image_analyzer.py",
+     "change": "psf_arcsec = fwhm_med * 2.37 (was 2.55); comment cites the measured WCS plate scale and the reference-s50-pixel-scale memory."
+    }
+   ]
+  },
+  {
+   "version": "1.11.0",
+   "date": "2026-06-29",
+   "bump": "minor",
+   "summary": "Nebula stretch-picker cost function: separate sky-placement from highlight-health so grain actually breaks ties. The nebula _neb_key previously lumped under+blown (highlight health) into the same 'placement' term as sky-band distance at 0.02 resolution; on faint LP nebulae the large/variable `under` term spread candidates across many buckets, so the grain tiebreaker never fired and the most aggressive/grainiest in-band stretch won (critique batch: stf/veralux beating cleaner stat/stat_bright at equal sky placement, e.g. IC 1805 veralux_strong grain 0.808 winning over stat 0.165). New key = (sky_bucket@0.02, health_bucket@0.05, grain, pref): sky placement primary (un-fixable downstream on Ha corners), highlight health a COARSE secondary, grain the real tiebreaker.",
+   "rationale": "Surfaced by the daily critique-pending pass (cross-batch signal across M 42 + IC 1805 LP-nebula runs). Validated with a read-only A/B harness (scripts/stretch_picker_ab.py) over 21 latest nebula runs: 9 change pick \u2014 7 to a cleaner variant (NGC 6914 grain -0.301, NGC 2244 -0.261, IC 5146 -0.067, SH2-101 -0.060, SH 2-273 -0.026, IC 1396 -0.008, NGC 7000 -0.011), 2 to a better-EXPOSED but grainier variant (M 57 +0.085, NGC 6334 +0.102) where highlight health legitimately differs. MINOR: changes stretch selection output but not the scoring model or steps, so scores stay comparable. Galaxy/globular branches untouched. Golden M 42 pick is unchanged (still stf) per the harness.",
+   "critiques_evaluated": [
+    "20260618_103721_seestar_nebula",
+    "20260614_062019_seestar_nebula",
+    "20260613_021905_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_physics_pick_stretch nebula branch _neb_key: was (round((bg_dist+under+blown+folio_dist)/0.02), grain, pref); now (round((bg_dist+folio_dist)/0.02), round((under+blown)/0.05), grain, pref)."
+    },
+    {
+     "file": "scripts/stretch_picker_ab.py",
+     "change": "New read-only A/B harness: recomputes current vs proposed nebula picker key over each target's latest nebula run and tables the pick deltas + grain change."
+    }
+   ]
+  },
+  {
+   "version": "1.11.1",
+   "date": "2026-06-29",
+   "bump": "patch",
+   "summary": "Preserve the celestial WCS through the color_calibration step. The PI color-cal path (run_postprocess) drops the astropy-readable WCS from its output; the preview renderer flips the image to north-up from the WCS (CDELT2 sign), so a WCS-less color_calibration output renders VERTICALLY FLIPPED vs the WCS-bearing upstream stages \u2014 the 'image orientation changes/looks wrong after color calibration' bug Henry caught on M 42. New _preserve_celestial_wcs(src,dst) re-injects the input WCS cards into the color-cal output when missing (no-op if a real WCS is present); called at all three spcc() success returns (sssc / spcc / pi_cc_fallback). M 42 hits this because it is drizzled (1.19\"/px) \u2192 SSSC no-ops \u2192 PI SPCC/CC fallback, which is the WCS-dropping path. Empirically verified: WCS-injected color-cal preview matches the background_extraction preview as-is (corr 1.000) instead of flipud (1.000).",
+   "rationale": "Orientation/metadata bug fix. The final SCORED pixels are unchanged (WCS is header + preview rendering); the golden M 42 is drizzled so downstream xp/nb matching no-ops there regardless \u2192 golden output unaffected. PATCH. Note: on NATIVE nebulae this restores a usable WCS after color-cal, which may re-enable downstream WCS-dependent xp/nb behavior that was silently no-op'ing \u2014 a latent improvement, monitor on the next native-nebula runs. Takes effect on the next seestar.service restart (deferred \u2014 the M 42 canary + 9 stretch-picker requeues are mid-run on the old code).",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "Added _preserve_celestial_wcs(src,dst); called before each successful return in spcc() (sssc, spcc, pi_cc_fallback). Copies CTYPE/CRVAL/CRPIX/CD/PC/CDELT/CROTA/CUNIT + WCSAXES/LONPOLE/LATPOLE/EQUINOX/RADESYS from input\u2192output when the output lacks a WCS."
+    }
+   ]
+  },
+  {
+   "version": "1.11.2",
+   "date": "2026-06-30",
+   "bump": "patch",
+   "summary": "Bounded mid-run stretch vision tiebreak \u2014 DEFAULT OFF pilot (settings.stretch_vision_tiebreak, default false). When enabled, the nebula stretch picker, on a genuine close call (top two share the same sky AND exposure bucket, so grain alone separated them), makes ONE cheap Haiku vision compare of the two variant previews and lets it break the tie; any failure / physics-only keeps the physics pick. This targets exactly the aesthetic call physics is weakest at (the M 57 grain-vs-placement case from the faithful A/B) without re-scoring any step. Default behaviour is unchanged (flag off \u2192 zero API calls, identical picks). PATCH: opt-in capability, no default-run output change (cf. the experiment-variant additions 1.10.1/1.10.2).",
+   "rationale": "Henry approved a bounded mid-run feedback loop using a cheap vision API call (NOT the headless skill mechanism, which is reserved for the deferred weekly batch-eval \u2014 latency/quota). Shipped default-off as a pilot per the faithful-harness discipline: enable on a few targets, compare finals + verify picks before making it default. Pairs with the deferred loop (1.11.x critique-batch-eval) \u2014 the two halves of the critique feedback system.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/claude_client.py",
+     "change": "Added stretch_vision_tiebreak(jpg_a,name_a,jpg_b,name_b,object_type,folio_band) \u2014 Haiku (MODEL_EVAL) compares two stretch previews, returns {winner,reason} or None (PhysicsOnlyMode / any failure \u2192 None \u2192 physics fallback)."
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_physics_pick_stretch gains vision_tiebreak param (default False) + close-call detection (same sky/health bucket on top two) \u2192 calls the vision tiebreak; added _stretch_preview_path helper. Caller reads settings.stretch_vision_tiebreak (default False)."
+    },
+    {
+     "file": "nas_server/settings.example.json",
+     "change": "Documented stretch_vision_tiebreak (default false)."
+    }
+   ]
+  },
+  {
+   "version": "1.12.0",
+   "date": "2026-06-30",
+   "bump": "minor",
+   "summary": "Narrow colour-swap in the nebula stretch picker: Henry's taste = maximise colour SUBJECT TO clean. The picker already honoured 'clean' (lands on colourful-clean stat variants) but never reached for colour when freely available, so it could ship a desaturated stretch (M 42 stf) when a comparably-clean, more-colourful one (mas) existed. After the physics pick, SWAP only to a candidate that is comparably clean (bg_noise \u03c3 \u2264 1.2\u00d7 the winner \u2014 GRAIN stays a hard constraint; Henry consistently rejected grainy veralux even when more colourful), well placed (under\u22640.15, sky 0.02..wash), AND meaningfully more saturated (mean signal saturation \u2265 winner + 0.05); take the most saturated qualifier. New _variant_saturation() helper; scored entries now carry the FITS path.",
+   "rationale": "Grounded in measurement + 7 blind labels (scripts/stretch_reframe_prototype.py, stretch_tiebreak_phase1.py journey): colour is largely IRRECOVERABLE downstream (M 42 color_boost closed <30% of the stf->mas sat gap), while grain is a hard reject for Henry (rejected veralux on IC 5146/NGC 7000/NGC 6914 despite more colour). The narrow rule reproduces 6/7 blind labels and changes ONLY M 42 (stf->mas), leaving the 5 correct picks untouched. Galaxy branch untouched (already mas-first via _GAL_PREF). MINOR: changes stretch selection, not the scoring model/steps.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_physics_pick_stretch nebula branch: after best=scored[0], narrow colour-swap gated on comparable-clean (\u03c3\u22641.2\u00d7) + well-placed + sat>=+0.05 (via new _variant_saturation). scored dict gains 'fits' path."
+    }
+   ],
+   "canary_note": "M 42 is the golden nebula baseline; this flips its stretch pick stf->mas, so the golden final changes. Needs canary re-baseline + Henry sign-off after the full-pipeline confirmation run."
+  },
+  {
+   "version": "1.12.1",
+   "date": "2026-06-30",
+   "bump": "patch",
+   "summary": "Extend the WCS-preservation fix (1.11.1) to EVERY step, not just color_calibration. PI-based steps (deconvolution/BXT, NXT, star_sharpen) also drop the astropy-readable WCS from their output, so the preview renderer flips the image to north-up from the (now-missing) WCS \u2014 the 'preview flipped after deconvolution' bug Henry caught mid-run. Now the main step loop re-injects the input WCS into any step output that lost it (generic), plus bxt_deconvolve does it directly (belt-and-suspenders). Metadata/preview-orientation only; scored pixels unchanged.",
+   "rationale": "1.11.1 only patched the spcc()/color_calibration return; deconvolution (confirmed NO WCS on the in-progress M 42 run while color_calibration had it) and other PI steps had the same drop. Central fix at the step loop covers all of them. PATCH \u2014 no good-run pixel change.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "Main step loop: after a successful step, call seti_astro._preserve_celestial_wcs(current_path, out_path) so any WCS-dropping step (PI-based) is repaired generically."
+    },
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "bxt_deconvolve: _preserve_celestial_wcs(input_path, output_path) before its success return."
+    }
+   ]
+  },
+  {
+   "version": "1.13.0",
+   "date": "2026-06-30",
+   "bump": "minor",
+   "summary": "Sky-adaptive, signal-aware contrast recovery for nebulae (docs/spec_contrast_recovery.md). The 1.12.0 colour-first pick (mas) has a brighter sky that softens contrast; this downstream step (in the combine tail, where galaxies get sky_mute and nebulae were previously skipped) pulls the black point to darken the sky (M42 0.125->0.045) and steepens midtones with a SHADOW-PROTECTED S-curve \u2014 identity below the faint floor (sky+3sigma), steepen only above \u2014 so the faint Ha/OIII is NOT crushed (validated: 0.0% faint pixels crushed). Hue-preserving (channel scale by luminance ratio; M42 sat 0.406->0.509). Gated to bright-sky/soft picks (sky>=0.08; no-op on dark stf-type), strength depth-scaled (gentle on thin stacks).",
+   "rationale": "Completes the recoverability strategy: pick colour at the stretch (irrecoverable), recover contrast+sky downstream (recoverable). Henry: mas 'vibrancy better but contrast less... slight too much crushing' on the crude prototype -> shadow-protected version fixes the crush. MINOR: gated downstream behaviour change, scores comparable; nebula only (galaxy already sky_muted).",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_recover_contrast_nebula(out,object_type,target,depth): floor-capped black point + shadow-protected smoothstep, hue-preserving. Wired into the combine tail nebula branch (was skipped)."
+    }
+   ],
+   "canary_note": "Changes nebula finals (M42) -> canary re-baseline of the golden nebula + Henry sign-off. Bundle with 1.12.0 stf->mas and 1.12.1 WCS fix on the next restart."
+  },
+  {
+   "version": "1.13.1",
+   "date": "2026-07-01",
+   "bump": "patch",
+   "summary": "Fix 1.13.0 contrast-recovery regressions found by the 2026-07-01 critique batch. (1) target_sky was 0.05 \u2014 BELOW the nebula band floor 0.06 \u2014 so it CRUSHED the sky (M42 0.121-in-band -> 0.050-crushed, faint-signal loss) and amplified grain (std/bg up to 1.24-2.13 on M42/IC1805/NGC7000). Now targets the band FLOOR + margin (~0.08), gated to only fire on a genuinely-soft sky (never darkens an already in-band sky). (2) Body expansion blew the cores (M42 Trapezium white mass, p99.9=1.0); added HIGHLIGHT PROTECTION (identity above knee 0.80) so cores don't clip. Gain 1.2->1.15. Validated on M42 mas stretch: sky 0.121->0.077 (IN BAND), contrast 0.171->0.193, sat 0.306->0.346, p99.9 0.973 (cores safe), 0% faint crush.",
+   "rationale": "The critique showed the two best batch runs (NGC2244 8.5, M31 8.4) were the ones where recovery did NOT fire, and every nebula it touched had its sky crushed below band + cores blown. This retune keeps the punch while respecting the band and protecting cores. Golden M42 must be re-baselined (1.13.0 froze a crushed M42).",
+   "critiques_evaluated": [
+    "20260701_055818_seestar_nebula",
+    "20260701_082229_seestar_nebula",
+    "20260701_094418_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "_recover_contrast_nebula: target_sky=band_lo+0.02 (in-band, was 0.05); gate sky>target+0.02; highlight-protected expansion (identity above knee 0.80); gain 1.15."
+    }
+   ],
+   "canary_note": "Re-baseline golden M42 (1.13.0 baseline was crushed)."
+  },
+  {
+   "version": "1.13.2",
+   "date": "2026-07-02",
+   "bump": "patch",
+   "summary": "SSSC output sanity gate (SH2-101 green-cast post-mortem). In dense fields the XP matcher pairs detected stars with WRONG catalog stars (WCS axis/offset mismatch vs data) yet passes the RMS gate \u2014 SSSC then solves garbage gains (SH2-101 signal G/R 1.43->3.01, R halved -> green nebula, final 3.2-3.5 twice). New gate in spcc(): measure signal-region G/R before/after SSSC; if it moves sharply AWAY from neutral (|after-1|>|before-1|+0.5 and after>1.6) reject SSSC, clear .sssc_applied, fall through to legacy SPCC/CC. Validated: gate fires on the SH2-101 numbers. Also investigated ingest-time WCS axis repair via XP-match hypothesis testing \u2014 REJECTED: dense fields match ~equally under all four orientations (39/39/37/40, non-discriminating) and M42 matches zero under all (WCS translationally off, not just flipped).",
+   "rationale": "Root-cause chain measured: stack signal G/R 1.43 -> post-SSSC 3.01 (SSSC injected the green; stretch only revealed it). Henry challenged the earlier pedestal diagnosis \u2014 correctly. PATCH: a protective gate; good calibrations unaffected.",
+   "critiques_evaluated": [
+    "20260702_024114_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "spcc(): SSSC sanity gate on signal G/R before/after; reject+fallback on away-from-neutral moves. New _signal_gr_ratio helper."
+    },
+    {
+     "file": "nas_server/xp_stars.py",
+     "change": "verify_and_repair_wcs added (diagnostic; NOT wired into the pipeline \u2014 hypothesis testing proved non-discriminating in dense fields)."
+    }
+   ]
+  },
+  {
+   "version": "1.14.0",
+   "date": "2026-07-02",
+   "bump": "minor",
+   "summary": "ASTAP re-solve at ingest \u2014 the root WCS fix. Siril/PI write plate solutions in a convention astropy misreads (axis-inverted, drizzled also offset), breaking every astropy consumer: SSSC/XP wrong-star matching (SH2-101 green cast), mirrored previews, drizzled XP no-op. Installed ASTAP D20 star DB (/opt/astap, 382MB); new seti_astro.astap_solve() re-solves the run working copy at ingest (~0.2s), replacing the header with an astropy-consistent solution that propagates through all steps via _preserve_celestial_wcs (now also carries the PLTSOLVD marker). Renderer _northup_flips: theoretical rule for PLTSOLVD headers (flipud iff CD2_2>0, fliplr iff CD1_1>0); legacy empirical rule retained for old Siril-header files. VALIDATED: SH2-101 XP matching 39/120-any-orientation -> 119/120 identity vs 4-5 flipped (discriminating, correct stars); M 42 (drizzled+offset) 0-4 -> 101/120 matches, true scale 1.1876\"/px confirmed. Solve failure is non-fatal (original WCS kept; 1.13.2 SSSC sanity gate remains the backstop). SASpro's own solver (ASTAP-first by design) also unblocked by the DB install. Note: Gaia XP libraries are SPECTRAL data for SSSC/NBExtract \u2014 SASpro has no positional solver built on them (checked; backends are ASTAP + astrometry.net web).",
+   "rationale": "Henry: 'We need to fix the image solver SASpro uses \u2014 seems only PI and Siril solvers work.' Exactly right: they are only self-consistent. MINOR: changes color-calibration outcomes on affected targets (SSSC now matches real stars; drizzled targets gain XP capability).",
+   "critiques_evaluated": [
+    "20260702_024114_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "change": "astap_solve() (astap_cli, -update, timeout/non-fatal); _northup_flips theoretical rule for PLTSOLVD headers; _preserve_celestial_wcs propagates PLTSOLVD."
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "Ingest: astap_solve(current_path) right after the working copy; failure keeps original WCS."
+    },
+    {
+     "file": "/opt/astap",
+     "change": "D20 star database installed (1476 files, 382MB zip)."
+    }
+   ],
+   "canary_note": "Golden trio finals may shift where SSSC/XP behaviour changes (esp. LP/drizzled nebulae) \u2014 watch next runs; M42 golden was just re-baselined on 1.13.1 and may need one more re-baseline after a 1.14.0 run."
+  },
+  {
+   "version": "1.14.1",
+   "date": "2026-07-02",
+   "bump": "patch",
+   "summary": "DISABLE the 1.14.0 ingest ASTAP solve by default (settings.astap_ingest_solve, default false) after the golden rerun regressed: M 42 5.8 (dim mids), M 13 6.2 (new blue corner glow) \u2014 Henry identified CROPPING as the failure mode, plus previews FLIP-FLOPPING between steps in the run videos. Root: the corrected WCS changes what every downstream WCS consumer computes \u2014 crop/canonical framing selected wrong regions (implicitly calibrated to the old convention), and PI steps re-solve internally, rewriting a WCS WITHOUT the PLTSOLVD marker so the renderer alternated between theoretical and legacy flip rules step-to-step. KEPT: D20 star DB, astap_solve() tool (incl. blind mode for pre-EQ spoof), SSSC sanity gate (the green-cast protection), renderer marker logic. Reintroduction requires a full WCS-consumer AUDIT: target_crop/crop_analysis/canonical_frame world_to_pixel usage, PI WCS-rewrite marker preservation, preview-rule consistency across every step, THEN golden validation.",
+   "rationale": "Validated components != validated system: ingest solve was verified for XP matching + single-file rendering, but not against the full consumer chain. Canary caught it; Henry's video review pinpointed crop + flip-flop. PATCH: restores pre-1.14.0 behaviour by default.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "change": "Ingest astap_solve gated behind settings.astap_ingest_solve (default false)."
+    }
+   ]
+  },
+  {
+   "version": "1.14.2",
+   "date": "2026-07-02",
+   "bump": "patch",
+   "summary": "Idle worker per-sub plate solving now ASTAP-first (solve_subs_astap): each sub COPIED to tmp, solved there (~0.1-0.6s measured, 4/4 on 10s M71 IRCUT subs, scale 2.38\" matching native 2.37), results written to the DB ONLY (solved_ra/dec/rot/scale via update_light_frame_solve) \u2014 library FITS never modified (the 1.14.0/1.14.1 ingest lesson applied: no header changes to pipeline-consumed files). Siril batch solve kept as automatic fallback when an ASTAP batch yields zero. Unblocks the ~106k-sub solve backlog stalled on the offline laptop worker; hint-less/pre-EQ-spoofed subs auto-blind-solve.",
+   "rationale": "Backlog: 106,238/234,756 subs unsolved with the distributed laptop path offline. Per-sub solves feed alignment-outlier exclusion (DB-side) \u2014 zero pipeline-output blast radius. PATCH.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/sub_solver.py",
+     "change": "solve_subs_astap(): tmp-copy per sub, astap_solve, _solve_from_header, DB write, outlier flagging; library untouched."
+    },
+    {
+     "file": "nas_server/idle_worker.py",
+     "change": "_solve_one_batch: ASTAP-first, Siril fallback on zero-yield batch."
+    }
+   ]
+  },
+  {
+   "version": "1.15.0",
+   "date": "2026-07-03",
+   "bump": "minor",
+   "summary": "F4 ASTAP-at-ingest colour/orientation completion: (1) xp_stars.measure_stars_rgb now subtracts a per-star LOCAL annulus (2.5r-4r) background residual per channel \u2014 the global SEP background can't follow bright structured Ha nebulosity at star scales, so embedded stars carried residual background that biased colour ratios and the solved SSSC gains (M 42: star R/G 0.30 vs SPCC's 1.49 = red crushed ~4x -> 'green and brown' finals). Fixed gains now physically sensible (R=1.756 G=1.0 B=1.098, Stage 3, RMS 0.25). (2) Drizzle gate on SSSC REMOVED \u2014 the 'drizzle photometry bias' was actually the nebulosity contamination, fixed at root; Henry approved the fixed SSSC colour on drizzled M 42 vs SPCC ('3 looks good'). (3) SCNR now ALLOWED when the calibrator was SSSC (.sssc_applied): SSSC solves star-based per-channel gains and cannot rebalance dual-band OIII emission landing in G, so the nebula body stays green through the linked stretch. Every good M 42 run (8.2, colour 7.5-7.8) had SCNR; all three SSSC-succeeded runs that skipped it scored 5.5-6.2 with 'dominant green cast' as issue #1. PI-SPCC-success runs still skip SCNR (linked-WB protection unchanged); NBN/nb_palette runs still skip it (OIII/teal protection unchanged).",
+   "rationale": "Three coupled colour-path changes that alter good-run output on LP/dual-band targets = MINOR. Items 1-2 shipped 2026-07-03 without a bump (versioning-discipline violation, corrected here); item 3 closes the F4 M 42 round-4 colour gap (6.2 vs 8.2 baseline).",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/xp_stars.py",
+     "param": "measure_stars_rgb background model",
+     "from": "global SEP per-channel background only",
+     "to": "global SEP + per-star local annulus (2.5r..4r) residual subtraction; stars with non-positive corrected flux dropped",
+     "reason": "nebulosity contamination biased star colour ratios -> wrong SSSC gains (M 42 red crush)"
+    },
+    {
+     "file": "nas_server/seti_astro.py",
+     "param": "SSSC drizzle gate (<1.8 arcsec/px -> force SPCC)",
+     "from": "gate present (workaround)",
+     "to": "removed",
+     "reason": "root cause was nebulosity, fixed by annulus photometry; Henry approved fixed SSSC on drizzled M 42"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "SCNR skip rule",
+     "from": "skip SCNR whenever color_calibration applied without .spcc_failed",
+     "to": "skip only for PI-SPCC success; SSSC-calibrated runs (.sssc_applied) run SCNR",
+     "reason": "SSSC gains can't rebalance OIII-in-G emission; SCNR-less SSSC runs scored 5.5-6.2 vs 8.2 with SCNR"
+    }
+   ]
+  },
+  {
+   "version": "1.16.0",
+   "date": "2026-07-04",
+   "bump": "minor",
+   "summary": "LP standard-chain colour routing (Henry decision 2026-07-04: 'PI CC look, keep it simple'). SSSC is spectrally faithful \u2014 star colours match Gaia XP \u2014 but on dual-band data that faithfulness renders the nebula green-teal (M 42 bright-nebula G/R: SSSC 1.21 vs PI CC 0.71 = the approved 8.2 look; SCNR can't fix it because the cast is green-CYAN, G < (R+B)/2 pointwise). And SPCC's broadband white reference is wrong for dual-band ('don't SPCC it'); it only ever 'worked' by FAILING into the PI CC fallback. So the standard chain on LP data now goes STRAIGHT to PI ColorCalibration with the .spcc_failed sentinel semantics (unlinked stretch + SCNR enabled) \u2014 the proven recipe, made explicit instead of failure-dependent. SSSC remains the calibrator for NBN/palette runs (allow_sssc=True when narrowband_norm/nb_palette forced), which it was built for (1.9.0).",
+   "rationale": "Rounds 4/6 of the F4 M 42 validation scored 5.8-6.8 vs the 8.2 baseline purely on colour: with corrected WCS, SSSC succeeds for the first time and its faithful green-teal beat out the PI-CC pink-Ha look Henry prefers. Aesthetic routing decision made by Henry. MINOR.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "param": "spcc() SSSC attempt",
+     "from": "always attempted when spcc_lp_filter",
+     "to": "only when allow_sssc=True (NBN/palette runs)",
+     "reason": "faithful SSSC colour is the NBN branch's need, not the standard chain's"
+    },
+    {
+     "file": "nas_server/seti_astro.py",
+     "param": "spcc() LP SPCC attempts",
+     "from": "2 attempts then CC fallback",
+     "to": "skipped on LP; direct PI CC + sentinel",
+     "reason": "broadband white ref wrong for dual-band; corrected WCS could make SPCC 'succeed' with untested colour and suppress SCNR"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "color_calibration params",
+     "from": "spcc_lp_filter only",
+     "to": "adds allow_sssc = LP AND (narrowband_norm|nb_palette forced)",
+     "reason": "route SSSC to the branch it was designed for"
+    }
+   ]
+  },
+  {
+   "version": "1.16.1",
+   "date": "2026-07-04",
+   "bump": "patch",
+   "summary": "astap_ingest_solve default flipped False -> True (F4 audit complete; golden trio M 51/M 42/M 13 all 7.8 at 1.16.0 with 0 orientation flips and exact crop positions; Henry signed off 2026-07-04). Golden canary baselines re-frozen to the three 1.16.0 runs. Nodes without the settings key (laptop worker) now solve at ingest too \u2014 without it their runs would keep the Siril-convention WCS and the migrated (ASTAP-convention) crop boxes would land ~36' off (the round-5 failure mode).",
+   "rationale": "Consistency across nodes; VM already ran with the flag true via settings.json. No output change on the VM. PATCH.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "astap_ingest_solve settings default",
+     "from": "False",
+     "to": "True",
+     "reason": "flag validated; missing-key nodes must match or crops break"
+    }
+   ]
+  },
+  {
+   "version": "1.16.2",
+   "date": "2026-07-05",
+   "bump": "patch",
+   "summary": "astap_solve() derives the FoV hint from actual header geometry (NAXIS2 x CD1_1/CDELT1/PC1_1, clamped 0.4-8 deg) instead of assuming the 1.3-deg single-panel default. Maxframing mosaics span several degrees and ASTAP fails in seconds on a wrong FoV hint: NGC 7000's 60 MP mosaic ingest solve FAILED silently -> pipeline kept the old WCS -> XP star matching stuck at 10 stars (<20 gate) -> NBN palette fell back to the approximation path (Ha amber/brown instead of red). Verified: the exact failing call now solves the NGC 7000 mosaic in 6.8s. Same derivation migrate_saved_crops.py already used.",
+   "rationale": "Bug fix uncovered by the first mosaic target processed with astap_ingest_solve on (NGC 7000, 2026-07-05). Single-panel stacks (~1.27 deg) derive the same value as the old default - zero behavior change for them. PATCH.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "param": "astap_solve fov_deg",
+     "from": "fixed 1.3 deg default",
+     "to": "derived from header scale x NAXIS2 (clamp 0.4-8 deg) when scale present",
+     "reason": "mosaics exceed 1.3 deg; wrong hint = instant solve failure"
+    }
+   ]
+  },
+  {
+   "version": "1.17.0",
+   "date": "2026-07-06",
+   "bump": "minor",
+   "summary": "background_extraction frame-fill exception: on frame-filling nebulae every 'sky' cell is nebula, so gradient_severity_sky wobbles without meaning \u2014 NGC 7000's GraXpert output was vetoed on a +0.014 move (0.062->0.076) despite measurably fixing the real corner wash (TL corner 1.029->1.006 vs median) with NO faint-structure loss (central IQR/med 0.112->0.126, i.e. structure IMPROVED). Henry compared renders: 'with background extraction looks better'. New rule: when the gradient move is trivial in absolute terms (<0.05) at low levels (<0.25 both sides) and SNR held (>=0.90x), accept \u2014 rejection requires evidence of harm, not metric noise. Genuine regressions (big gradient jump or SNR drop) still veto.",
+   "rationale": "Scorer complaints ('upper-right blue-grey glow', 'upper-left quadrant brighter') persisted across every NGC 7000 final while the pipeline silently discarded the fix each run. Gate change alters accepted outputs on frame-fill targets = MINOR.",
+   "critiques_evaluated": [
+    "20260701_234236_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_objective_check background_extraction",
+     "from": "reject whenever gradient did not drop (grad_drop > 0 required)",
+     "to": "also accept when |delta| < 0.05, both sides < 0.25, SNR >= 0.90x",
+     "reason": "corner-cell gradient metric has no signal when nebula fills the frame"
+    }
+   ]
+  },
+  {
+   "version": "1.17.1",
+   "date": "2026-07-06",
+   "bump": "patch",
+   "summary": "pi_curves silent no-op FIXED (critique-batch 2026-07-06 cross-run finding). _clean_curve_points merged any control point within 0.03 of x=0 INTO the [0,0] black anchor \u2014 on dark images (NBN palette sky ~0.05 generates a point at x~0.027) this destroyed the x=0 endpoint, PI rejected the whole curve ('CurvesTransformation.K(): the instance is not valid', confirmed in /tmp/pi_postprocess_last.log), the JS caught it and saved the input unchanged: bit-identical output, exit 0, no visible failure. NOT a version regression \u2014 stats-triggered (any curves input with sky < ~0.06), made common by the darker LP/NBN rendering path; the batch's 1.15.0->1.16.1 window was target-scheduling coincidence. Fix: never merge the x=0/x=1 anchors away + guarantee both endpoints post-clean. Verified: NGC 7000 NBN points now PI-valid, M 42 points unchanged.",
+   "rationale": "Bug fix restoring intended behavior; both recent NGC 7000 runs shipped without their contrast curve. PATCH.",
+   "critiques_evaluated": [
+    "20260706_010711_seestar_nebula",
+    "20260706_045300_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/tool_params.py",
+     "param": "_clean_curve_points merge rule",
+     "from": "unconditionally merge points closer than 0.03 in x (could consume the [0,0] anchor)",
+     "to": "never merge into x=0 anchor / never merge x=1 anchor away; endpoints re-pinned after cleaning",
+     "reason": "PI CurvesTransformation.K requires both endpoints; losing one invalidates the whole curve"
+    }
+   ]
+  },
+  {
+   "version": "1.17.2",
+   "date": "2026-07-07",
+   "bump": "patch",
+   "summary": "BXT local-undershoot guard on the deconvolution step. IC 1805 (2026-07-07): BXT dug large black holes with magenta rims into smooth nebula while whole-frame metrics IMPROVED (FWHM 2.59->2.14, SNR x1.43) \u2014 the objective gate is structurally blind to local ringing; Henry caught it in the step preview. New _bxt_undershoot_check blocks the frame into 8px cells and vetoes the step when a connected blob (>=40 cells) of output local minima falls below 0.5x the input local floor. Calibrated on labeled pairs: fires on the artifacted run (86-cell blob), quiet on clean IC 1805 1.13.1 (24), M 42 r7 (scattered only), NGC 7000 8.5 (19). Veto keeps the pre-decon image.",
+   "rationale": "Bug-class guard: changes output only when deconvolution produced artifacts; all known-good runs unaffected. PATCH.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "deconvolution acceptance",
+     "from": "whole-frame objective check only (FWHM/SNR/sharpness)",
+     "to": "plus _bxt_undershoot_check local-minima blob veto (block=8, drop=0.5x, blob>=40 cells)",
+     "reason": "ringing holes improve global stats while destroying local nebula"
+    }
+   ]
+  },
+  {
+   "version": "1.17.3",
+   "date": "2026-07-07",
+   "bump": "patch",
+   "summary": "Honor the undershoot hard-veto in step acceptance. 1.17.2's guard fired correctly on both IC 1805 runs ('deconvolution VETOED, 86-cell blob') but the physics-score acceptance line (`if new_sum > best_sum: best_path = out_path`) promoted the damaged output anyway \u2014 ringing SHARPENS stars, so star_roundness delta was +6.48 and outvoted the FAIL. Both finals shipped with the artifacts the guard had already caught (magenta/cyan star rings, violet blob). _obj now carries hard_veto=True from the guard and the best-result promotion skips hard-vetoed attempts; normal marginal-case iteration unchanged.",
+   "rationale": "Completes the 1.17.2 guard; changes output only for artifact-class rejections. PATCH.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "step best-result promotion",
+     "from": "new_sum > best_sum promotes unconditionally",
+     "to": "skipped when _obj.hard_veto (artifact-class objective failure)",
+     "reason": "physics deltas are positive for star-sharpening artifacts"
+    }
+   ]
+  },
+  {
+   "version": "1.18.0",
+   "date": "2026-07-07",
+   "bump": "minor",
+   "summary": "halo_suppression dense-field aliasing guard (batch-eval 2026-07-07 Pattern 1). On LP data with 16k+ stars the ratio-based colour subtraction flags nebula adjacent to overlapping star halos as 'halo colour' and paints vivid magenta/cyan/green RINGS across the whole frame \u2014 bg_noise +129%/+157% and p99.9 pegged to ~1.0 in both v1.17.2 IC 1805 runs (cost -1.3 overall on 064440). _objective_check now hard-vetoes halo_suppression when post bg_noise > 1.5x pre OR p99.9 jumps past 0.995 from <0.98; hard_veto blocks score-delta resurrection (like the decon undershoot guard). Validated: no false-positive on IC 1805 7.8 / NGC 7000 8.5 / M 42 7.8 clean runs (all bg_noise x~0.98).",
+   "rationale": "Batch eval's #1 critical pattern; these were the magenta/cyan star rings mis-attributed to deconvolution during the IC 1805 session. MINOR (changes accepted output on affected runs).",
+   "critiques_evaluated": [
+    "20260707_064440_seestar_nebula",
+    "20260707_080122_seestar_nebula"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_objective_check halo_suppression",
+     "from": "generic SNR-hold gate (no ring detection)",
+     "to": "hard-veto on bg_noise>1.5x or p99.9 peg (>0.995 from <0.98)",
+     "reason": "dense-field colour-subtraction aliasing paints frame-wide rings"
+    }
+   ]
+  },
+  {
+   "version": "1.19.0",
+   "date": "2026-07-08",
+   "bump": "minor",
+   "summary": "narrowband_hoo: HOO-preserving palette step (Henry-requested alternative to narrowband_norm's Equalize/SHO look). Keeps Ha the DOMINANT red; OIII a bounded blue/teal accent via R=Ha, G=0.15Ha+0.9O, B=O with O=min(OIII, oiii_cap*Ha). The local cap guarantees Ha dominance and forces O->0 where there's no Ha, auto-killing the field-flood a naive OIII surface produces on Ha-dominant fields (prototyped both failure modes: RGB-proxy OIII and raw xp_oiii both flood ~half the frame). OIII source: run_dir/xp_oiii.fit preferred (Ha ref taken from xp_ha.fit at matched stretch \u2014 a scale mismatch vs RGB-red crushed coverage to 4%), RGB blue-cyan-excess proxy fallback. oiii_cap knob (0.6 near-pure-red..1.0 max teal); soft/strong variants. Force via force_hoo (queue flag), SCNR skipped on this path. LIMITATION documented: needs spatially-distinct OIII to show teal \u2014 on HII regions where OIII co-locates with Ha (IC 1805) the overlap reads gray; best for PNe/Veil/OIII-rich bicolor targets.",
+   "rationale": "New opt-in palette step, no change to existing runs (force-only). Henry chose 'add an HOO-preserving mode'. MINOR.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "param": "narrowband_hoo()",
+     "from": "absent",
+     "to": "capped-OIII HOO composite (xp channels or RGB proxy)",
+     "reason": "Ha-dominant palette alternative to Equalize"
+    },
+    {
+     "file": "nas_server/processing_ontology.json",
+     "param": "narrowband_hoo step",
+     "from": "absent",
+     "to": "force_only aesthetic step, oiii_cap 0.85 + soft/strong variants",
+     "reason": "register the step + variants"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "NB SCNR-skip + hoo param inject",
+     "from": "narrowband_norm/nb_palette only",
+     "to": "also narrowband_hoo (run_dir + oiii_cap)",
+     "reason": "wire the step into the pipeline"
+    },
+    {
+     "file": "nas_server/main.py",
+     "param": "queue force_hoo flag",
+     "from": "absent",
+     "to": "force_hoo -> force_steps+=[narrowband_hoo]",
+     "reason": "user-facing trigger"
+    }
+   ]
+  },
+  {
+   "version": "1.20.0",
+   "date": "2026-07-12",
+   "bump": "minor",
+   "summary": "Frame-fill detection (spec_frame_fill_detection.md): on frame-filling emission nebulae (IC 1805, NGC 7000, NGC 6888, IC 1396, M 16, SH 2-273 per library sweep) the corner pixels are faint nebula, not sky, so every corner-anchored sky mechanism muted the object \u2014 the IC 1805 pixel autopsy proved the manual 8.2 beats pipeline 7.8 on midtone placement alone (manual p50 0.244 / corners 0.190 vs pipeline 0.075 / 0.068; same absolute grain, comparable saturation, pipeline HIGHER midscale contrast). Detector runs once per run on the post-BGE pre-stretch starless: 32x32 box-smoothed luminance, three tests (structure>=100x smoothed noise floor, corner separation >=0.15 of smoothed range, coverage >=0.65) \u2014 smoothing is load-bearing because raw level stats cannot distinguish a uniformly filled frame from a uniformly empty one post-BGE. When frame_fill: bg_level/bg_noise anchor on the darkest-percentile pixels (p1-p3; manual's dark anchor measures 0.137 = in-band) instead of corners; stats gain a p50 midtone target (0.15-0.20 by depth) charged into the picker cost and nebula placement bucket; folio band charge skipped (folio bands are corner-authored); type-gated to emission/SNR/generic-nebula only. Threaded through picker, bg clamp, sky feedback, physics_nl grades, retry path; detector output stamped into run.log (top-level frame_fill + stretch step_record). Offline A/B (scripts/frame_fill_ab.py, real depth): 7/7 controls unchanged, all 6 fillers detected, every frame-fill pick moved brighter or un-crushed (IC 1805 stat->mas p50 0.072->0.151; NGC 7000 stat->stf 0.073->0.209 vs manual 0.244; M 16 + NGC 6888 escaped crushed-floor stf; SH 2-273 crushed grainy veralux_strong -> in-band mas).",
+   "rationale": "Measurement/threshold change, no step add/remove \u2014 scores comparable. Hard-number proof of feedback-faint-nebula-too-dark; validated per stretch-picker-ab-faithful protocol (real depth, control set unchanged). MINOR.",
+   "critiques_evaluated": [
+    "ic1805-showdown pixel autopsy 2026-07-10 (project memory)",
+    "20260601_174055_seestar_nebula (NGC 7000 sky-at-ceiling grey lanes)",
+    "20260602_054529_seestar_nebula_nbn (grainy sky)"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_frame_fill_detect()",
+     "from": "absent",
+     "to": "smoothed structure/separation/coverage detector, type-gated",
+     "reason": "identify frame-filling nebulae once per run"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_compute_stretch_stats(frame_fill=)",
+     "from": "corner-median bg/bg_noise always",
+     "to": "dark-percentile (p1-p3) anchor + p50/p50_target_lo/p50_dist when frame_fill",
+     "reason": "corners are nebula on fillers; manual reference dark anchor 0.137 in band"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_physics_pick_stretch cost/keys",
+     "from": "bg_dist+under+blown+noise terms",
+     "to": "+p50_dist in blended cost and nebula placement bucket; folio charge skipped on frame_fill",
+     "reason": "charge midtone under-brightness like sky placement (unrecoverable downstream)"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "stretch step wiring",
+     "from": "corner semantics everywhere",
+     "to": "frame_fill threaded: detector at stretch boundary, bg clamp, sky feedback, physics_nl grades, retry; stamped in run.log",
+     "reason": "consistent anchor across all sky consumers"
+    },
+    {
+     "file": "scripts/frame_fill_ab.py",
+     "param": "A/B harness",
+     "from": "absent",
+     "to": "detector sweep + faithful picker replay (real depth)",
+     "reason": "validation per spec section 4"
+    }
+   ]
+  },
+  {
+   "version": "1.20.1",
+   "date": "2026-07-12",
+   "bump": "patch",
+   "summary": "Frame-fill picker cost hole fix (NGC 7000 20260712_175526 live-proof failure: flat-grey stf won \u2014 dark floor 0.160/p50 0.177, tonal spread 0.017 vs the manual reference's 0.107 \u2014 post-stretch physics grade 4.2, final 2.5 with non-degradation restore). The 1.20.0 frame-fill placement charged floor position + p50 brightness but not SPREAD, so a contrastless wash scored best on both. New frame-fill placement term: (a) ceiling-only floor charge \u2014 floor above band-hi is unfixable grey wash; floor BELOW band is NOT charged (the bg clamp lifts it additively, structure intact); (b) spread deficit x1.5 \u2014 max(0, spread_target - (p50 - floor)), spread_target 0.06-0.10 by depth; flatness is the one defect nothing downstream repairs; (c) crushed-floor exception \u2014 floor <0.005 with dark sigma <0.0015 is CLIPPED (faint nebula destroyed, not parked low) and pays 2x the band distance so it decisively loses to any un-clipped candidate. A/B (frame_fill_ab.py): 7/7 controls unchanged; NGC 7000 -> stat_bright (spread 0.096, clamp lifts floor); IC 1805 keeps live mas (8.2); IC 1396 keeps ghs_soft (clipped veralux rejected); SH 2-273 drops crushed veralux_strong for ghs_soft.",
+   "rationale": "Bug fix in the 2-day-old 1.20.0 feature; good-run picks (IC 1805 mas) unchanged, only flat-grey/clipped mispicks change. PATCH.",
+   "critiques_evaluated": [
+    "NGC 7000 20260712_175526 live-proof failure (Henry flagged: bad stretch)"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_physics_pick_stretch ff_place",
+     "from": "frame_fill placement = bg_dist + p50_dist",
+     "to": "ceiling-only floor charge + 1.5x spread deficit + 2x crushed-floor charge + p50_dist",
+     "reason": "charge unfixable flatness/clipping, not liftable low floors"
+    }
+   ]
+  },
+  {
+   "version": "1.21.0",
+   "date": "2026-07-13",
+   "bump": "minor",
+   "summary": "Batch-eval 2026-07-13 CRITICAL fixes (Bump 1 of plan_batch_eval_20260713_impl.md). (1) Stretch picker absolute grain disqualifier: candidates with bg_noise > 0.10 dropped before ANY branch ranking (keep-cleanest fallback if all exceed) \u2014 the galaxy detail-first branch had NO grain guard, letting veralux_strong win M 108 at sigma 0.198 (26x cleanest) and NGC 4565 at 0.143. Replay validation: exactly the 3 grainy live picks flip to clean mas (M 100/M 108/NGC 4565); all clean picks reproduce (2 apparent flips proven replay-depth artifacts from newer stacks). (2) Galaxy post-mute crush guard: additive lift back to band floor when combined-tail bg < band_lo-0.005 (measured finals 0.031-0.045 vs 0.05 floor on NGC 4244/M 66/NGC 7331) \u2014 fixes the downstream crush, NOT the deliberately-bright 1.7.0 pick. (3) halo_suppression output contract replacing mode-specific patches (step CRITICAL in TWO consecutive evals, three distinct modes): hard-veto unless |sky delta| <= 0.020 AND noise ratio <= 1.5 (1.18.0 guard kept) AND p99.9 rise <= 0.01; plus reduction_level capped at 2 on sparse fields (<1000 stars \u2014 the level-3 sky-raise inversion pair). Unit-validated against all measured failures from evals 07-07 + 07-13 (7/7 cases: 5 veto with correct mode, 2 healthy pass).",
+   "rationale": "Gate/threshold tuning, no step add/remove \u2014 scores comparable. MINOR.",
+   "critiques_evaluated": [
+    "batch_eval_20260713.md patterns 1+2",
+    "batch_eval_20260707.md pattern 1 (contract supersedes)",
+    "20260713_060929 M 108",
+    "20260713_073740 NGC 4565",
+    "20260711_062827 NGC 4244",
+    "20260711_064013 M 66",
+    "20260713_063457 NGC 7331"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_physics_pick_stretch grain-DQ",
+     "from": "galaxy branch grain-blind (detail-first)",
+     "to": "bg_noise > 0.10 disqualifies pre-branch; keep-cleanest fallback",
+     "reason": "grainy veralux_strong wins on galaxies"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "galaxy post-mute crush lift",
+     "from": "no floor guard after combine-tail curves/sky_mute",
+     "to": "additive lift to band_lo when bg < band_lo - 0.005",
+     "reason": "finals crushed to 0.031-0.045"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_objective_check halo_suppression",
+     "from": "1.18.0 aliasing guard only (noise ratio + p99.9 peg)",
+     "to": "output contract: + |sky delta| <= 0.020 + p99.9 rise <= 0.01, mode-tagged hard veto",
+     "reason": "sky-crush and sky-raise modes passed the old guard"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "halo reduction_level sparse cap",
+     "from": "level 3 reachable on sparse fields",
+     "to": "capped at 2 when star_count < 1000",
+     "reason": "level-3 sky-raise inversion (NGC 4565/M 108)"
+    }
+   ]
+  },
+  {
+   "version": "1.22.0",
+   "date": "2026-07-13",
+   "bump": "minor",
+   "summary": "Batch-eval HIGH fixes (Bump 2 of plan_batch_eval_20260713_impl.md) + 07-07 carry-overs. (1) sky_green_rebalance signal-green cap: the sky-only design correctly ignores OBJECT colour, which let colour_boost/curves-amplified SIGNAL casts sail through while the step reported no-excess (NGC 281 G p99 lead 7.9%). New opt-in signal mode: when signal-region (G_p99 - max(R,B)_p99)/G_p99 > 0.06, cap G toward max(R,B) inside the signal mask (bounded amount 0.6, same never-invert machinery). Folio colour-prior gate: FIRST dominant_colors entry only (ordered list \u2014 substring over the whole list wrongly blocked NGC 281 and M 42 whose OIII mentions are secondary accents; Thor's Helmet's teal-dominant first entry correctly blocks). Retro-validated: NGC 281 fires, NGC 2359 blocked by prior, M 42 no lead. The 07-07 pre-gate half is already present (min_gr 1.03 self-gate + max(R,B) cap in the current fn \u2014 the v1.14.2 green-floods predate it). (2) Star-layer grain gate (07-13 P4+P5 unified): combine doubled final noise via speckle in the stretched star layer (NGC 2359 x2.1, NGC 281 x2.0, starless clean); pre-combine, if star-layer corner sigma > 2x starless, re-stretch stars one factor step gentler (single bounded retry). Retro-validated: fires on both measured cases (2.4x/2.1x). DEVIATION from eval: the proposed post-combine denoise fallback (bg_noise > 0.08) was DROPPED \u2014 post-combine corner sigma is star-contaminated (healthy M 51 final measures 0.084) and would misfire. (3) 07-07 carry-overs: pi_globular_core_rolloff inversion guard (revert when p99 rises > 0.005 \u2014 it brightened cores while darkening midtones in both v1.14.x runs); denoise_linear[nxt] near-identity labeling (<10% rms reduction -> step_record near_identity, output kept).",
+   "rationale": "Gate/param tuning within existing steps, no step add/remove. MINOR.",
+   "critiques_evaluated": [
+    "batch_eval_20260713.md patterns 3+4+5",
+    "batch_eval_20260707.md patterns 3+4+5",
+    "20260711_021336 NGC 2359",
+    "20260711_021906 NGC 281",
+    "20260713_072158 IC 5146",
+    "20260713_064023 SH 2-273"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "param": "sky_green_rebalance signal mode",
+     "from": "sky-only, signal casts untouched",
+     "to": "opt-in signal-green cap (trigger 0.06, amount 0.6, max(R,B) cap)",
+     "reason": "signal casts from colour_boost/curves amplification"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "allow_signal_green folio gate",
+     "from": "absent",
+     "to": "first dominant_colors entry green/teal/OIII -> cap disabled",
+     "reason": "protect legitimately-teal targets (folio-color-priors trap)"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "star-layer grain gate",
+     "from": "star layer combined regardless of grain",
+     "to": "corner sigma > 2x starless -> re-stretch one factor step gentler",
+     "reason": "combine doubled final noise via star-layer speckle"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "core_rolloff inversion guard",
+     "from": "no output check",
+     "to": "revert when p99 rises > 0.005",
+     "reason": "curve brightened cores instead of rolling off"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "NXT near-identity labeling",
+     "from": "no-op counted as contribution",
+     "to": "step_record near_identity when rms reduction < 10%",
+     "reason": "critique accuracy (40% no-op rate)"
+    }
+   ]
+  },
+  {
+   "version": "1.22.1",
+   "date": "2026-07-14",
+   "bump": "patch",
+   "summary": "Frame-fill false-positive fix (M 1, grader 3.2). M 1 (6' Crab remnant in a dense Taurus star field) triggered frame_fill=True (coverage 0.93) \u2014 the smoothed 'coverage' was unresolved stars + noise, not emission. The dark-anchor over-brightening then amplified a residual gradient into a broad green band across the frame (grader: 'severe gradient contamination, broad horizontal green band'). The pixel tests CANNOT separate this case: M 1 and IC 1805 both measure corner_median/dark_floor = 1.04 pre-stretch. Fix: angular-size gate \u2014 a target < 30' cannot fill the 43'x77' S50 frame, so frame_fill is ineligible regardless of pixel coverage (folio angular_size_arcmin threaded from planner._folio_info). Validated: M 1 (7') ineligible, NGC 7000 (120')/IC 1805 (150') still fire. Unknown size falls through to pixels (no regression). NOTE: the horizontal BANDS Henry flagged in the on-device EAA live-stacks (Stacked_N files) do NOT reach the pipeline \u2014 Siril sigma-clip rejection over 3000+ subs removes the satellite trails at the pixel level (verified: pipeline raw stack trail check 3.1sigma, clean). The green band was created IN PROCESSING by the frame_fill mis-fire, not inherited from subs.",
+   "rationale": "Bug fix in the 2-day-old frame-fill feature; only affects small targets that were mis-firing. PATCH.",
+   "critiques_evaluated": [
+    "M 1 20260714_071850 (frame_fill false positive -> green band, 3.2)"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_frame_fill_detect target_arcmin gate",
+     "from": "pixel tests only (mis-fire on small target in star field)",
+     "to": "ineligible when folio angular size < 30' (target too small to fill frame)",
+     "reason": "M 1 6' false positive amplified a gradient into a green band"
+    }
+   ]
+  },
+  {
+   "version": "1.22.2",
+   "date": "2026-07-15",
+   "bump": "patch",
+   "summary": "Grain-DQ scoped to GALAXIES only (SH 2-273 regression fix). The 1.21.0 absolute grain disqualifier (bg_noise > 0.10 drops a stretch candidate) was branch-neutral, but on faint nebulae the CORRECT brighter stretch is necessarily grainier \u2014 the DQ killed it and left a conservative dark pick, over-darkening the faint signal. Measured: SH 2-273 (Fox Fur/Cone) regressed 6.8 (v1.20.1, picked stat_bright) -> 4.5 (v1.22.1, DQ dropped stat_bright -> ghs_soft won -> 'faint nebulosity almost entirely absent'). The galaxy branch NEEDS the DQ (it ignores grain by design, 1.7.0 \u2014 that let veralux_strong win M 108 at 26x cleanest); the nebula branch already treats grain as a placement-equal tiebreaker, the right discipline for faint signal (feedback-faint-nebula-too-dark). Fix: apply the DQ only when is_galaxy. Validated on the saved candidates: SH 2-273 -> stat_bright (restores the 6.8 pick); M 108/NGC 4565 galaxies keep clean picks with veralux_strong still DQ'd. Found by the reprocess campaign (1 of ~20 wave-1 reprocesses regressed).",
+   "rationale": "Bug fix in the 1.21.0 grain-DQ; only changes faint-nebula picks that the DQ was wrongly darkening. PATCH.",
+   "critiques_evaluated": [
+    "SH 2-273 20260715_063723 (grain-DQ over-darkened faint nebula, 6.8->4.5)"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "grain-DQ scope",
+     "from": "branch-neutral bg_noise>0.10 disqualifier",
+     "to": "applied only when is_galaxy",
+     "reason": "faint nebulae need the brighter (grainier) stretch; nebula branch has its own grain tiebreak"
+    }
+   ]
+  },
+  {
+   "version": "1.23.0",
+   "date": "2026-07-15",
+   "bump": "minor",
+   "summary": "Small-target compositional recenter-crop (M 1 under-framed 2026-07-15). The coverage-driven crop step only trims blank/edge borders, so a target much smaller than the S50 frame ships as a speck in empty sky (M 1 6' filled ~10% of a 77'x43' field; grader: 'small relative to the field, low fill factor'; processing was otherwise good at 7.0). New _small_target_recenter_crop wraps the crop fn when the folio angular size < 11' (25% of the 43' short axis) AND there is no saved/reviewed crop (a user's manual framing stays authoritative \u2014 feedback-never-veto-crop). It locates the target as the brightest EXTENDED (non-star) blob via median+gaussian smoothing (robust \u2014 a fresh plate solve on the final gave inconsistent WCS), MEASURES the blob radius (95th-pct of half-peak pixels), and crops to 4.5x radius centered on it with a 240px native-res floor (no-overcrop rule). Sizing from the measured blob is scale-free \u2014 necessary because drizzled finals (~1.19\"/px) are not reliably inferable from frame dimensions. Triggers: M 1 (7'), M 57 (2.5'), M 76, M 27 (8'), M 97 (3.4'), NGC 6826 (0.45'), M 105 (5.4'), small galaxies; skips M 51 (11.2'), M 31, M 42, IC 1805. Validated on M 1: Crab centered, cropped 2032x3712 -> 784px, full framing with margin.",
+   "rationale": "New sub-behavior of the crop step (no step add/remove); changes small-target output framing. Scores for compact targets will shift as the object now fills the frame \u2014 intended. MINOR.",
+   "critiques_evaluated": [
+    "M 1 20260715_073028 (good processing, under-framed \u2014 7.0 with 'small relative to field')"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_small_target_recenter_crop + crop fn wrap",
+     "from": "crop trims edges only; small targets ship as specks in empty field",
+     "to": "folio <11' + no saved crop -> blob-centered crop to 4.5x measured radius",
+     "reason": "compact targets (M 1, M 57, PNe, small galaxies) were under-framed"
+    }
+   ]
+  },
+  {
+   "version": "1.23.1",
+   "date": "2026-07-17",
+   "bump": "patch",
+   "summary": "Instrumentation only (channel/episode Phase 1) \u2014 no pixel-path change. (1) _physics_pick_stretch now emits every candidate's physics metrics (cost, bg_dist, p99, under, blown, bg_noise, grain, winner flag, and dropped reason for grain-DQ/grain-cap cuts) via a scored_out param; the stretch_pick step_record persists it as candidate_scores. (2) A hard-vetoed step (decon undershoot, halo output contract, \u2026) that ends in a skip now records skip_reason='hard_veto: <reason>' plus veto_metrics instead of the generic 'no improvement'. Both feed run.log so the episode generator can render the candidate-grid and failure-beat shots from real data.",
+   "critiques_evaluated": [],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_physics_pick_stretch(scored_out=)",
+     "from": "scored list discarded",
+     "to": "per-candidate metrics returned to caller",
+     "reason": "candidate-grid episode shot needs real scores"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "stretch_pick step_record",
+     "from": "variants only",
+     "to": "+ candidate_scores",
+     "reason": "persist in run.log"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "skip step_record",
+     "from": "skip_reason='no improvement'",
+     "to": "hard_veto reason + veto_metrics when vetoed",
+     "reason": "failure beats need the measured cause"
+    }
+   ]
+  },
+  {
+   "version": "1.24.0",
+   "date": "2026-07-18",
+   "bump": "minor",
+   "summary": "Batch eval 2026-07-16 fixes (M 85/88/91/97 galaxy regressions). (1) SPCC mutilated-WCS rescue: intermediates carrying astropy's PC-matrix+CDELT=1.0 header form (WCS.to_header() style, written by the crop WCS rewrite) are misread by PI 1.9.3 as 3600\"/px \u2014 its solver fails and SPCC always fell back to generic CC (pink nuclei, unlinked stretch). spcc() now detects the form and normalizes PC\u2192CD on a temp copy (pure header math); absent/insane WCS additionally gets an ASTAP pre-solve. Verified: M 88 SPCC OK in 26s (was 2\u00d7150s fail\u2192fallback). (2) Galaxy stretch sky-ceiling gate: candidates with bg_level > 0.10 are dropped when an under-ceiling candidate exists \u2014 detail-first stays, but the winner must be within sky_mute's healthy pull range (M 51 validated 0.093\u21920.060; the batch's thin stacks handed it 0.11+ and it over-crushed to CRUSHED). (3) channel_crush_guard re-score: the guard mutates pixels AFTER final evaluation; the shipped image now gets a physics re-grade so run.log's final score describes the pixels that shipped (the 'final \u2260 best_publishable' evaluator mismatch).",
+   "critiques_evaluated": [
+    "20260716_092905_seestar_galaxy",
+    "20260716_093513_seestar_galaxy",
+    "20260716_09_M91",
+    "20260716_095812_seestar_nebula",
+    "20260716_M71_globular"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/seti_astro.py",
+     "param": "spcc() WCS gate",
+     "from": "PI seeded 3600\"/px from PC+CDELT=1 headers",
+     "to": "PC\u2192CD normalize + ASTAP pre-solve fallback",
+     "reason": "SPCC fell back on 6+ runs 2026-07-16"
+    },
+    {
+     "file": "nas_server/pi_postprocess.js",
+     "param": "plateSolveForSPCC",
+     "from": "trusts Init seed",
+     "to": "sanitize + reseed belt (keyword-level)",
+     "reason": "defense in depth"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_GAL_SKY_CEIL",
+     "from": "galaxy branch ignores sky entirely",
+     "to": "relative ceiling 0.10 DQ",
+     "reason": "mas 0.11+ on thin stacks \u2192 downstream over-crush"
+    },
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "channel_crush_guard",
+     "from": "mutates after final eval, score stale",
+     "to": "physics re-grade of shipped pixels",
+     "reason": "evaluator scored an image nobody ships"
+    }
+   ]
+  },
+  {
+   "version": "1.24.1",
+   "date": "2026-07-18",
+   "bump": "patch",
+   "summary": "Post-guard re-score fix: 1.24.0 REPLACED the final evaluator scores with a physics re-grade when channel_crush_guard fired \u2014 physics scores a different scale (M 109: Sonnet 7.2-class run recorded as 6.5 with color_balance 1.0), breaking cross-run comparability. Evaluator final_scores stay authoritative; the shipped-pixel physics grade is attached as final_scores.post_guard_physics.",
+   "critiques_evaluated": [
+    "20260718 M 109 rescue-batch regression"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "post-guard re-score",
+     "from": "current_scores = physics re-grade",
+     "to": "final_scores.post_guard_physics attachment",
+     "reason": "score-scale mixing broke comparability"
+    }
+   ]
+  },
+  {
+   "version": "1.24.2",
+   "date": "2026-07-18",
+   "bump": "patch",
+   "summary": "Small-target recenter crop now shifts CRPIX with the crop. It copied the header verbatim, leaving the FULL-frame reference pixel on the tiny cutout \u2014 every recentered target (folio <11') shipped a WCS pointing ~0.5\u00b0 off-sky, so SPCC queried Gaia at the wrong position and always fell back (the second, fast-fail SPCC mode: M 85/M 97/M 102 in the 2026-07-18 rescue batch, while non-recentered M 88/91/109 were fixed by 1.24.0).",
+   "critiques_evaluated": [
+    "20260718 rescue batch M 85/M 97/M 102"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_small_target_recenter_crop",
+     "from": "header copied verbatim (CRPIX stale)",
+     "to": "CRPIX1/2 -= crop offsets",
+     "reason": "WCS must move with the cutout"
+    }
+   ]
+  },
+  {
+   "version": "1.24.3",
+   "date": "2026-07-18",
+   "bump": "patch",
+   "summary": "Small-target recenter crop is now WCS-first: center on the target's CATALOG RA/Dec projected through the (now-trustworthy) crop-stage WCS, sized from the folio angular size x measured pixel scale; the brightest-extended-blob detector is demoted to fallback. Root cause (M 102 2026-07-18, Henry's screenshot): a bright star's halo survives the median filter and out-peaks a low-surface-brightness galaxy \u2014 the crop threw the galaxy out of frame entirely (3.5 run). WCS(hdr, naxis=2) required: 3-axis color WCS + SIP trips astropy otherwise. Validated offline on the failing M 102 stack: catalog center (1063,1904) vs blob's star (1535,1648); galaxy centered in a 1182px crop.",
+   "critiques_evaluated": [
+    "20260718_192500_seestar_galaxy (M 102, 3.5)"
+   ],
+   "changes": [
+    {
+     "file": "nas_server/auto_process.py",
+     "param": "_small_target_recenter_crop",
+     "from": "brightest-extended-blob center",
+     "to": "catalog RA/Dec via WCS, blob fallback",
+     "reason": "star halo out-peaked the galaxy; wrong-spot crop"
+    }
+   ]
+  }
+ ]
+}

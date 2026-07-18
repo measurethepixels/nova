@@ -1,0 +1,15 @@
+# SeeStar drizzle hero max-framing stacking script — pixfrac=0.4 + max framing.
+
+requires 1.4.0
+
+cd light
+convert light -out=../process
+cd ../process
+
+seqplatesolve light -nocache -force -order=4 -radius=25
+register light -drizzle -2pass -scale=2.0 -pixfrac=0.4 -kernel=square -framing=max
+seqapplyreg light -framing=max
+
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -out=../result
+
+cd ..

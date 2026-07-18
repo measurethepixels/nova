@@ -1,0 +1,12 @@
+# SeeStar hero register-only — Lanczos4 interpolation, feeds ImageMM or PI.
+# seqplatesolve provides absolute WCS alignment. register -2pass removed: overwrites
+# seqplatesolve's WCS matrices. Requires Siril 1.4.3.
+
+requires 1.4.0
+
+cd light
+convert light -debayer -out=../process
+cd ../process
+
+seqplatesolve light -nocache -force -order=4 -radius=25
+seqapplyreg light -interp=lanczos4

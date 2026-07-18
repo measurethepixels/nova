@@ -1,0 +1,11 @@
+# SeeStar drizzle max-framing register-only — feeds ImageMM or PI.
+
+requires 1.4.0
+
+cd light
+convert light -out=../process
+cd ../process
+
+seqplatesolve light -nocache -force -order=4 -radius=25
+register light -drizzle -2pass -scale=2.0 -pixfrac=0.5 -kernel=square
+seqapplyreg light -drizzle -scale=2.0 -pixfrac=0.5 -kernel=square -framing=max

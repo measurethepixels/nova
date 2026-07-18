@@ -1,0 +1,14 @@
+# SeeStar mosaic stacking script — max-pixel combination for mosaics with panel overlap.
+
+requires 1.4.0
+
+cd light
+convert light -debayer -out=../process
+cd ../process
+
+register light -2pass
+seqapplyreg light
+
+stack r_light max -out=../result
+
+cd ..

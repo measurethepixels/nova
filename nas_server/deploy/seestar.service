@@ -1,0 +1,15 @@
+[Unit]
+Description=SeeStar NAS Server
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_ROOT__
+Environment=SEESTAR_SETTINGS=__DATA_DIR__/settings.json
+ExecStart=__VENV__/bin/uvicorn nas_server.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

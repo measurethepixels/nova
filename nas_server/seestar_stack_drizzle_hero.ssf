@@ -1,0 +1,14 @@
+# SeeStar drizzle hero stacking script — 2x upsampling, pixfrac=0.4.
+
+requires 1.4.0
+
+cd light
+convert light -out=../process
+cd ../process
+
+register light -drizzle -2pass -scale=2.0 -pixfrac=0.4 -kernel=square
+seqapplyreg light
+
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -out=../result
+
+cd ..

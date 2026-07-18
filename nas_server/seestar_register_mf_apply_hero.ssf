@@ -1,0 +1,8 @@
+# Max-framing hero Phase B: register + apply with Lanczos4
+# Uses image-matching registration as fallback if WCS headers are missing.
+
+requires 1.4.0
+
+cd process
+register light -2pass
+seqapplyreg light -framing=max -interp=lanczos4

@@ -1,0 +1,9 @@
+# Stack pre-registered r_light frames (no calibrate/register step).
+# Used by the 'both' engine after shared registration is complete.
+# Expected: workdir/process/r_light_*.fit (from seestar_register.ssf)
+
+requires 1.4.0
+
+cd process
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -out=../result
+cd ..

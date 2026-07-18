@@ -1,0 +1,10 @@
+# Drizzle maxframing hero Phase B: register + apply with Lanczos4.
+# Runs after Phase A (seestar_platesolve_drizzle.ssf).
+# WCS from seqplatesolve is already in FITS headers; register -2pass uses it.
+
+requires 1.4.0
+
+cd process
+
+register light -drizzle -2pass -scale=2.0 -pixfrac=0.4 -kernel=square
+seqapplyreg light -drizzle -scale=2.0 -pixfrac=0.4 -kernel=square -interp=lanczos4 -framing=max

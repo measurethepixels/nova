@@ -1,0 +1,10 @@
+# SeeStar max-framing without plate solve — image-matching only, hero mode.
+
+requires 1.4.0
+
+cd light
+convert light -debayer -out=../process
+cd ../process
+
+register light -2pass
+seqapplyreg light -framing=max

@@ -1,0 +1,9 @@
+# Stack pre-registered r_light frames with max framing (union footprint).
+# Used by two-phase Siril engine after seestar_register*_maxframing*.ssf.
+# Expected: workdir/process/r_light_*.fit (from register+seqapplyreg -framing=max)
+
+requires 1.4.0
+
+cd process
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -out=../result
+cd ..

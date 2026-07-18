@@ -1,0 +1,12 @@
+# SeeStar max-framing without plate solve — image-matching only.
+# Used for multi-panel mosaic stacks where frames span different pointings
+# and seqplatesolve would only solve a subset, discarding the rest.
+
+requires 1.4.0
+
+cd light
+convert light -debayer -out=../process
+cd ../process
+
+register light -2pass
+seqapplyreg light -framing=max

@@ -1,0 +1,14 @@
+# SeeStar max-framing hero stacking script — max framing + Lanczos4.
+
+requires 1.4.0
+
+cd light
+convert light -debayer -out=../process
+cd ../process
+
+seqplatesolve light -nocache -force -order=4 -radius=25
+seqapplyreg light -framing=max -interp=lanczos4
+
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -out=../result
+
+cd ..

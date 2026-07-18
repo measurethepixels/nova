@@ -1,0 +1,11 @@
+# SeeStar plate-solve-only — solves each sub against Gaia DR3, no registration/stacking.
+# Used to harvest per-sub true sky position into the DB for alignment QA + association.
+# seqplatesolve writes the solved WCS into each light_NNNNN.fit header; we read it back.
+
+requires 1.4.0
+
+cd light
+convert light -debayer -out=../process
+cd ../process
+
+seqplatesolve light -nocache -force -order=4 -radius=25
