@@ -19,3 +19,5 @@ Support boundary: shared as-is alongside the channel; issues/PRs welcome, respon
 not guaranteed — hobby project, fixed time budget.
 
 *Measure the pixels. Make the call.*
+
+Test
