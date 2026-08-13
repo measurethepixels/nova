@@ -53,6 +53,74 @@ only if pipeline *code* changes in response to the new engine.
 
 ---
 
+## 1.24.8 — 2026-08-08 (patch)
+
+**Persist the stretch-pick decision rank.**
+
+`candidate_scores` carried `pref` from the generic `_STRETCH_PREF_ORDER`, but the
+galaxy branch decides with `_GAL_PREF` — computed locally and never recorded. Any
+consumer reading `pref` as "the rank that chose the winner" was wrong for galaxies:
+on M 66 the two orders disagree on **5 of 6 survivors**, showing `veralux_strong`
+9th where the galaxy order ranks it **2nd**. That produced a false claim on the
+episode's stretch-grid panel (PR #317, found by Codex).
+
+`_emit()` now records `decision_rank` and `decision_basis` from the list the branch
+actually sorted, so galaxy, nebula and blended-cost branches each report their own
+real ordering. Dropped candidates get no rank — they were removed before the
+ordering.
+
+Instrumentation only. No sort key, threshold, or winner-selection line changed;
+verified by diff and by replaying M 66's own candidate data, which reproduces the
+recorded winner `mas`.
+
+## 1.24.7 — 2026-07-20 (patch)
+
+**Stacker pre-EQ spoof fix — the 16-hour failure.** The SH 2-298 LP restack failed
+catastrophically: 3717/3717 frames failed `seqplatesolve` over 8 hours, the
+fallback registration re-attempted platesolve and failed AGAIN over another 8
+hours — 16 hours, zero output. Root cause: every individual sub's header carries
+the pre-EQ ALP location spoof (Dec off by 22° from catalog truth), so Siril's
+`-radius=25` search fetches up to ~297k Gaia stars per frame trying to compensate
+— and still can't converge. `stack_target()` now compares one copied frame's
+header RA/DEC to the target's catalog position; on >3° mismatch it rewrites
+RA/DEC on every copied frame to the catalog truth before Siril ever runs.
+Validated on a 9-frame test set: 9/9 solved in 1.3s (catalog fetch collapsed to
+2.3k stars). Extrapolated full run: ~9 minutes, not 16 hours.
+
+## 1.24.6 (filter separation deploy, delayed) — now live
+
+`/stack?filter=auto|<name>|all` (committed 2026-07-19, this restart is its first
+live deploy): groups qualifying frames by FILTER, stacks the dominant one by
+default, logs what was left out. Root fix for mixed-filter stacks like SH 2-298's
+original 6.6h-IRCUT-labeled/11.8h-LP-hidden blend.
+
+## 1.24.6 — 2026-07-19 (patch)
+
+**Correction (credit: Henry — "framing mode doesn't change pixel scale").** The
+1.24.4 "framing-mode 4.78″/px" conclusion was wrong: the SH 2-298 stack is native
+2.39″/px. ASTAP's `-fov` is field **height**; the ladder computed width × scale, so
+the native rung failed and the solve landed only through coincidental arithmetic on
+a portrait crop. Ladder now uses NAXIS2 × scale. The fix that actually rescued
+SH 2-298 was 1.24.5's catalog override of the pre-EQ spoofed position.
+
+## 1.24.5 — 2026-07-19 (patch)
+
+Completes the 1.24.4 pre-solve: `color_calibration` now actually passes `target=`
+to `spcc()` (the catalog-hint block was silently gated on an empty string), and the
+catalog position **overrides** header RA/DEC on gross mismatch (>3°) — pre-EQ
+southern captures carry fake header coordinates (ALP location spoof); SH 2-298's
+Dec 2024 stack claimed Dec +9 for a Dec −13 target, so the scale ladder searched
+15° around a lie.
+
+## 1.24.4 — 2026-07-19 (patch)
+
+SPCC ASTAP pre-solve: **catalog position hint + scale ladder**. SH 2-298 exposed
+SPCC failure mode #4: a WCS-less framing/mosaic-mode stack (~4.78"/px — twice
+native on the same 1080×1920 canvas). The pre-solve assumed native scale and found
+no solution in any search window. It now writes the target's catalog RA/Dec into
+the temp copy and tries FoV hints for all three S50 scales (2.39 / 4.78 / 1.19
+"/px) before falling back blind — the right hint solved SH 2-298 in 1.3 s.
+
 ## 1.24.3 — 2026-07-18 (patch)
 
 Small-target recenter crop is now **WCS-first**: center on the target's catalog

@@ -65,11 +65,25 @@ cleanly* rather than crash. If you find a step that crashes on a missing optiona
 binary, that is a bug worth fixing — but fix it as a capability gate, not by
 deleting the step.
 
+**PixInsight version note:** this project validates against **PixInsight Core
+1.9.3 "Lockhart"**, held there deliberately because 1.9.4 swaps PixInsight's PJSR
+scripting engine to a new V8 JavaScript runtime, and this pipeline drives
+PixInsight headlessly through several thousand lines of PJSR (`seti_astro.py`'s
+PixInsight-backed steps). If your install is on 1.9.4 or later, the PixInsight
+path is **not yet verified** on this pipeline — the free-core path above (Siril +
+ASTAP + GraXpert + Seti Astro Suite Pro) has no PixInsight dependency and is the
+safer default until that's confirmed. If you do run the PixInsight steps on
+1.9.4+, watch for PJSR script failures in the logs and report back.
+
 ## 4. The config contract
 
 Everything machine- or person-specific lives in **`settings.json`** (path given to
 the service; copy `settings.example.json`). You edit **config, not pipeline
-logic**. Key groups:
+logic**. The root example is canonical; `nas_server/settings.example.json` is a
+compatibility mirror checked for exact equality in CI. Settings are validated at
+load time: unknown keys, wrong types, invalid ranges, and malformed worker or
+horizon entries fail with the exact setting name. Credential fields stay blank
+in examples and are redacted by diagnostic callers.
 
 - **Paths**: `seestar_incoming_path`, `seestar_library_path`, `db_path`,
   `nas_work_path`, `calibration_library_path`, `pixinsight_cache_dir`
@@ -80,6 +94,12 @@ logic**. Key groups:
   `api_host/api_port`, `web_link_host`
 - **Integrations** (leave unset if unused): `nina_*`, `remote_workers`, `vm_url`
 - **Tuning**: `pi_*` memory budgets — set from this machine's RAM
+
+Legacy files using `library_path` still work, but the canonical name is
+`seestar_library_path` and a visible deprecation warning is emitted.
+`siril_path` is also accepted as an ignored legacy key: current Siril calls use
+`siril-cli` from `PATH`; wiring executable selection into pipeline behavior is
+deferred to the separate capability work.
 
 ## 5. Allowed vs forbidden adaptations
 
@@ -111,22 +131,44 @@ it, don't silently change it.
 - Download the big star databases (ASTAP D20/D50; optionally Gaia DR3 for PI SPCC —
   tens of GB).
 
-## 7. Verification protocol (the port isn't done until this passes)
+## 7. Verification protocol
 
-Sample data: `sample_data/` (or the release-page link) — a small real SeeStar
-capture set with golden outputs.
+Start with `python scripts/public_release_smoke.py`. It verifies the exported
+release files and checksums, compiles the Python tree, and imports the service with
+the example settings. Public CI runs the same check after a clean dependency
+install.
+
+The public preview ships a small, metadata-sanitized M42 capture set and the
+`sample_data/golden.json` contract. Read `sample_data/README.md` before using it:
+while its licence, golden baseline, or second-machine evidence is marked pending,
+the image steps below remain an acceptance protocol rather than proof of a fully
+reproducible release. Do not substitute private captures or undocumented machine
+state and call the public release reproducible.
+
+When a release includes the named sample package, run all of these on a clean
+machine:
 
 1. `python -m venv` + `pip install -r requirements.txt`; service starts; web UI
    loads (`/`, `/queue`, `/learning` return 200).
 2. Stack the sample set through the queue → a `*_siril_stack.fit` lands in the
    library with a valid WCS (ASTAP solve log line present).
-3. Run auto-process on the stack → run dir contains `run.log` with
+3. Run auto-process on the stack with the `public_free_core` workflow and
+   physics-only grading → run dir contains `run.log` with
    `workflow_version`, per-step `step_records`, a `stretch_pick` record, and a
-   final score.
+   final score. Use the capability profile named in `golden.json`; the reference
+   profile leaves the aesthetic API disabled so the score uses the deterministic
+   physics fallback.
 4. Compare measured metrics to `sample_data/golden.json` (SNR/FWHM/background
-   within the stated tolerances — they encode machine variance).
+   and final score) with `python scripts/public_sample_verify.py --result-fits
+   PATH --run-log PATH`. The stated tolerances encode machine variance only after
+   at least two genuinely different machines are recorded; a one-machine fit is
+   not a tolerance.
 5. Report to the human: capability matrix found, steps enabled/skipped, metric
    comparison table, and anything you adapted beyond config.
+
+Until then, a passing smoke workflow proves only that the exported source and
+dependency contract are internally loadable; it does not prove an end-to-end
+astronomy result.
 
 ## 8. Support boundary
 

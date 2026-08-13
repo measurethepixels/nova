@@ -9,4 +9,5 @@ protocol — most "bugs" are porting gaps it can fix.
 - OS / environment:
 - Command that failed:
 - Log output (the relevant lines, not the whole file):
+- `python scripts/public_release_smoke.py` output:
 - Capability matrix (which engines are installed):

@@ -150,8 +150,12 @@ def _run_pi(script_path: str, job_path: str, timeout: int = 600,
     else:
         cmd = pi_cmd
     log.info(f"[pi] running: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, env=env, preexec_fn=_pi_preexec)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, preexec_fn=_pi_preexec)
+    except FileNotFoundError:
+        log.warning(f"[pi] binary not found: {cmd[0]}")
+        return False, f"PI binary not found: {cmd[0]}"
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
         # Always write PI's raw stdout+stderr for debugging

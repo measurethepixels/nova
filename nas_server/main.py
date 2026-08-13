@@ -10,6 +10,7 @@ Or use the systemd service file in nas_server/deploy/.
 import collections
 import logging
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -22,8 +23,10 @@ from pydantic import BaseModel
 
 from nas_server import database, scheduler as sched, watcher
 from nas_server.config import settings
+from nas_server.db_error_reporting import report_sqlite_error
 from nas_server.organizer import organize_session
 from nas_server import telegram
+from nas_server.safe_path import UnsafePathError, safe_resolve
 
 # ---------------------------------------------------------------------------
 # Global serialization lock for PI-based processing pipelines.
@@ -70,6 +73,14 @@ logging.getLogger().addHandler(_log_buffer)
 
 log = logging.getLogger(__name__)
 
+
+def _safe_route_path(base: Path, *parts: str) -> Path:
+    """Resolve request path components or return a clean client error."""
+    try:
+        return safe_resolve(base, *parts)
+    except UnsafePathError as exc:
+        raise HTTPException(status_code=400, detail="Invalid path") from exc
+
 _observer = None
 _stop_event = None
 _scheduler = None
@@ -77,11 +88,15 @@ _pending_sessions = None  # shared set from watcher for forced checks
 _idle_stop = None
 _nina_cap_stop = None
 _nina_cal_stop = None
+_relay_observer = None
+_relay_stop = None
+_relay_observer_codex = None
+_relay_stop_codex = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _observer, _stop_event, _scheduler, _pending_sessions, _idle_stop, _nina_cap_stop, _nina_cal_stop
+    global _observer, _stop_event, _scheduler, _pending_sessions, _idle_stop, _nina_cap_stop, _nina_cal_stop, _relay_observer, _relay_stop, _relay_observer_codex, _relay_stop_codex
 
     log.info("Starting SeeStar NAS Server")
     database.init_database()
@@ -106,6 +121,28 @@ async def lifespan(app: FastAPI):
         settings.get("telegram_token", ""),
         settings.get("telegram_chat_id", ""),
     )
+    # Henry's Telegram approve/reject decisions for GATE/yellow/red relay
+    # messages. Read-then-validate-then-record-once; safe to register even
+    # while relay_watcher_enabled is false (no buttons exist to tap yet).
+    try:
+        from nas_server import gate_approval
+
+        telegram.set_callback_handler(gate_approval.handle_relay_callback)
+    except Exception as e:
+        log.warning(f"[startup] gate-approval callback handler failed to register: {e}")
+
+    # Henry's "approve N" text command -- issue #231's merge signal for
+    # elevated-risk PRs, after native GitHub review and PR comments both
+    # turned out to be structurally unable to prove the signal came from
+    # him rather than an agent (every PR here is authored under his own
+    # account). See nas_server/telegram_pr_approval.py for the full history.
+    try:
+        from nas_server import telegram_pr_approval
+
+        telegram.set_approve_command_handler(telegram_pr_approval.handle_approve_command)
+    except Exception as e:
+        log.warning(f"[startup] telegram approve-command handler failed to register: {e}")
+
     from nas_server.agent import run_agent as _agent_fn
     telegram.start_polling(_agent_fn)
 
@@ -127,6 +164,24 @@ async def lifespan(app: FastAPI):
     from nas_server import nina_watcher
     _nina_cap_stop, _ = nina_watcher.start_capture_watcher()
     _nina_cal_stop, _ = nina_watcher.start_calibration_watcher()
+
+    # NOVA Relay Telegram notifications (disabled by default). Two instances —
+    # one per recipient — so a Telegram gate-approval button reaches Henry for
+    # BOTH agents' gates, not just Claude's; both share the same enable flag.
+    try:
+        from nas_server import relay_watcher
+
+        _relay_observer, _relay_stop = relay_watcher.start_relay_watcher()
+    except Exception as e:
+        log.warning(f"[startup] relay watcher (claude) failed to start: {e}")
+    try:
+        from nas_server import relay_watcher
+
+        _relay_observer_codex, _relay_stop_codex = relay_watcher.start_relay_watcher(
+            recipient="codex"
+        )
+    except Exception as e:
+        log.warning(f"[startup] relay watcher (codex) failed to start: {e}")
 
     # NINA WebSocket event listener (fail-safe if VM is offline)
     try:
@@ -156,6 +211,16 @@ async def lifespan(app: FastAPI):
         _nina_cap_stop.set()
     if _nina_cal_stop:
         _nina_cal_stop.set()
+    if _relay_stop:
+        _relay_stop.set()
+    if _relay_observer is not None and _relay_observer.is_alive():
+        _relay_observer.stop()
+        _relay_observer.join()
+    if _relay_stop_codex:
+        _relay_stop_codex.set()
+    if _relay_observer_codex is not None and _relay_observer_codex.is_alive():
+        _relay_observer_codex.stop()
+        _relay_observer_codex.join()
     try:
         from nas_server import nina_client
         nina_client.stop_event_listener()
@@ -201,6 +266,14 @@ def get_mounts():
         except Exception as e:
             result[name] = {"path": path, "accessible": False, "error": str(e)}
     return result
+
+
+@app.get("/doctor")
+def get_doctor():
+    """Read-only availability report for optional tools and integrations."""
+    from nas_server.doctor import run_doctor
+
+    return run_doctor(settings)
 
 
 # ---------------------------------------------------------------------------
@@ -430,10 +503,12 @@ def stack_target_endpoint(target: str, engine: str = "siril",
                           min_stars: int = 20, fast: bool = False, framing: str = "min",
                           hero: bool = False, drizzle: bool = False,
                           exptime: int = None, eq_only: bool = True,
+                          filter: str = "auto",
                           ecc_threshold: float = 0.66,
                           sky_level_factor: float = 3.0, gradient_threshold: float = 0.5,
                           post_autoprocess_workflow: str = None,
-                          post_autoprocess_experiment: bool = False):
+                          post_autoprocess_experiment: bool = False,
+                          force: bool = False):
     """Queue a stacking job. Serialized with processing jobs to prevent resource contention.
     engine: siril | imagemm | pixinsight_wbpp | pixinsight_register
     cull: score frames and exclude outliers before stacking (default True)
@@ -444,20 +519,30 @@ def stack_target_endpoint(target: str, engine: str = "siril",
     exptime: if set, only stack frames whose exposure_time rounds to this value (seconds).
     eq_only: if True, exclude frames captured in alt-az mode (EQMODE!=1 in FITS header).
              Prevents diagonal banding artifacts when mixing old alt-az and new EQ sessions.
-    ecc_threshold: eccentricity gate (default 0.6). Raise to 0.8 to recover EQ tracking
+    ecc_threshold: eccentricity gate (default 0.66). Raise to 0.8 to recover EQ tracking
                    frames with moderate polar-alignment drift.
     sky_level_factor: reject frames where sky > median_sky × factor (default 3.0). 0 disables.
     gradient_threshold: reject frames with gradient_severity > threshold (default 0.5). 0 disables.
     post_autoprocess_workflow: if set, auto-queues an autoprocess job after stack completes
+    force: if True, queue even if an identical-config stack is already queued/running
+           for this target (default False — rejects the duplicate with 409).
     """
     from nas_server.queue_manager import add_stack_job
     item = add_stack_job(target, engine=engine, cull=cull,
                          bottom_pct=bottom_pct, min_stars=min_stars, fast=fast, framing=framing,
                          hero=hero, drizzle=drizzle, exptime=exptime, eq_only=eq_only,
+                         filter_name=filter,
                          ecc_threshold=ecc_threshold,
                          sky_level_factor=sky_level_factor, gradient_threshold=gradient_threshold,
                          post_autoprocess_workflow=post_autoprocess_workflow,
-                         post_autoprocess_experiment=post_autoprocess_experiment)
+                         post_autoprocess_experiment=post_autoprocess_experiment,
+                         force=force)
+    if item.get("duplicate"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Identical stack config already {item['existing']['where']} for '{target}'. "
+                   f"Pass force=true to queue anyway.",
+        )
     return {"message": f"Stacking '{target}' queued at position {item['position']}", **item}
 
 
@@ -566,10 +651,12 @@ def trigger_assess(target: str):
         return {"error": f"No processed files found for {target}"}
     latest = files[0]
     jpg = latest.get("filename", "").replace(".fit", "_preview.jpg").replace(".fits", "_preview.jpg")
-    jpg_path = Path("/mnt/nas_data") / target / "_processed" / Path(jpg).name
+    jpg_path = _safe_route_path(
+        Path("/mnt/nas_data"), target, "_processed", Path(jpg).name
+    )
     # Fall back to any .jpg in the _processed dir
     if not jpg_path.exists():
-        proc_dir = Path("/mnt/nas_data") / target / "_processed"
+        proc_dir = _safe_route_path(Path("/mnt/nas_data"), target, "_processed")
         jpgs = sorted(proc_dir.glob("*.jpg")) if proc_dir.exists() else []
         jpg_path = jpgs[-1] if jpgs else jpg_path
     try:
@@ -607,7 +694,9 @@ def run_cosmic_clarity(target: str, mode: str = "denoise"):
     if not files:
         return {"error": f"No processed files for {target}"}
     fits_name = files[0].get("filename", "")
-    fits_path = Path("/mnt/nas_data") / target / "_processed" / fits_name
+    fits_path = _safe_route_path(
+        Path("/mnt/nas_data"), target, "_processed", fits_name
+    )
     if not fits_path.exists():
         return {"error": f"FITS not found: {fits_path}"}
     out_path = fits_path.parent / (fits_path.stem + f"_cc_{mode}" + fits_path.suffix)
@@ -646,7 +735,9 @@ def stretch_image(target: str, mode: str = "stat", target_median: float = 0.25,
     if not files:
         return {"error": f"No processed files for {target}"}
     fits_name = files[0].get("filename", "")
-    fits_path = Path("/mnt/nas_data") / target / "_processed" / fits_name
+    fits_path = _safe_route_path(
+        Path("/mnt/nas_data"), target, "_processed", fits_name
+    )
     if not fits_path.exists():
         return {"error": f"FITS not found: {fits_path}"}
     out_path = fits_path.parent / (fits_path.stem + f"_stretched_{mode}" + fits_path.suffix)
@@ -678,7 +769,9 @@ def background_extract(target: str, correction: str = "Subtraction",
     if not files:
         return {"error": f"No processed files for {target}"}
     fits_name = files[0].get("filename", "")
-    fits_path = Path("/mnt/nas_data") / target / "_processed" / fits_name
+    fits_path = _safe_route_path(
+        Path("/mnt/nas_data"), target, "_processed", fits_name
+    )
     if not fits_path.exists():
         return {"error": f"FITS not found: {fits_path}"}
     out_path = fits_path.parent / (fits_path.stem + "_bgextracted" + fits_path.suffix)
@@ -700,6 +793,7 @@ def autoprocess_target(
     dry_run: bool = False,
     experiment_mode: bool = False,
     source_file: str | None = None,
+    force: bool = False,
 ):
     """
     Kick off the automated processing pipeline for a target.
@@ -707,15 +801,32 @@ def autoprocess_target(
     dry_run: if true, plan steps without writing any files.
     experiment_mode: try all variants per step; Claude picks best; stores results for learning.
     source_file: specific stack filename to process (default: most recently added).
+    force: if True, start even if this target already has a queued or active
+           autoprocess job (default False — rejects the duplicate with 409).
     """
     from nas_server.auto_process import auto_process
+    from nas_server import auto_process as _ap_mod
+    from nas_server import queue_manager as _qm
     global _pipeline_active_target
+
+    # reserve_process_target() checks the pending queue AND registers into
+    # auto_process._active in one atomic step (held under queue_manager's
+    # own _queue_lock, the same lock add_job()'s check+append uses) — a
+    # two-step check-then-register here (as in the first fix) still raced
+    # against a concurrent add_job() landing in between (PR #39 review round
+    # 2, finding 1).
+    conflict = _qm.reserve_process_target(target, force=force)
+    if conflict:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Process job already {conflict['where']} for '{target}'. "
+                   f"Pass force=true to start anyway.",
+        )
 
     def _run():
         global _pipeline_active_target
         with _PIPELINE_LOCK:
             _pipeline_active_target = target
-            from nas_server import auto_process as _ap_mod
             _ap_mod.mark_pipeline_lock_held()
             try:
                 auto_process(target, workflow=workflow, dry_run=dry_run,
@@ -1236,11 +1347,26 @@ def _regen_narratives_bg(target: str | None):
             break
         tname = t["target"]
         # Skip if already narrated
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT id FROM claude_assessments WHERE target=? AND phase='story_narrative' LIMIT 1",
-                (tname,)
-            ).fetchone()
+        try:
+            with get_conn() as conn:
+                row = conn.execute(
+                    "SELECT id FROM claude_assessments "
+                    "WHERE target=? AND phase='story_narrative' LIMIT 1",
+                    (tname,),
+                ).fetchone()
+        except sqlite3.Error as e:
+            report_sqlite_error(
+                log,
+                context="story narrative lookup",
+                error=e,
+                consequence=(
+                    f"Narrative regeneration skipped {tname}; the job will "
+                    "continue with other targets."
+                ),
+                notify=False,
+            )
+            _story_regen_status["errors"] += 1
+            continue
         if row:
             _story_regen_status["done"] += 1
             continue
@@ -1374,8 +1500,10 @@ def story_generate_previews(target: str = None):
 @app.get("/image/{target}/{filename:path}")
 def serve_image(target: str, filename: str):
     """Serve a processed JPEG from _processed/ (including experiment subdirs)."""
-    proc_dir = Path(settings["seestar_library_path"]) / target / "_processed"
-    img_path = proc_dir / filename
+    proc_dir = _safe_route_path(
+        Path(settings["seestar_library_path"]), target, "_processed"
+    )
+    img_path = _safe_route_path(proc_dir, filename)
     if not img_path.exists() or img_path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(str(img_path), media_type="image/jpeg")
@@ -1537,7 +1665,8 @@ def fits_preview_endpoint(target: str, path: str,
     from nas_server.seti_astro import (generate_preview_stf, generate_preview_nonlinear,
                                        generate_preview_image)
     lib = Path(settings["seestar_library_path"])
-    fits_path = lib / target / path
+    target_dir = _safe_route_path(lib, target)
+    fits_path = _safe_route_path(target_dir, path)
     if not fits_path.exists():
         raise HTTPException(404, detail=f"FITS not found: {path}")
 
@@ -1638,8 +1767,11 @@ def messier_tile(name: str):
     """Serve a cached WCS-centered Messier Wall tile JPG."""
     from fastapi.responses import FileResponse
     from nas_server.messier_tiles import TILE_DIR
-    p = (TILE_DIR / name).resolve()
-    if not str(p).startswith(str(TILE_DIR)) or not p.exists():
+    try:
+        p = safe_resolve(TILE_DIR, name)
+    except UnsafePathError:
+        raise HTTPException(status_code=404, detail="no tile")
+    if not p.exists():
         raise HTTPException(status_code=404, detail="no tile")
     return FileResponse(str(p), media_type="image/jpeg")
 
@@ -1794,6 +1926,37 @@ def help_page():
 def workflows_doc_view():
     from nas_server import workflow_docs
     return workflow_docs.workflow_docs_page()
+
+
+@app.get("/recipe/{target}", response_class=HTMLResponse)
+def recipe_page_latest(target: str):
+    """Live preview: the target's most recent completed run, as a recipe/
+    evidence page -- what NOVA actually did, with the real settings it chose,
+    plus how to reproduce each step by hand in PixInsight/Siril/SASpro
+    (issue #96). For a stable, publishable link to one specific run, use
+    /recipe/{target}/{run} instead."""
+    from nas_server import recipe_page as _recipe_mod
+
+    lib = settings["seestar_library_path"]
+    try:
+        run_dir = _recipe_mod.resolve_run_dir(Path(lib), target, run=None)
+    except _recipe_mod.RecipeRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _recipe_mod.render_recipe_page(run_dir)
+
+
+@app.get("/recipe/{target}/{run}", response_class=HTMLResponse)
+def recipe_page_run(target: str, run: str):
+    """The immutable, run-aware recipe/evidence page for one specific run --
+    the stable URL the static site exporter (issue #209) publishes."""
+    from nas_server import recipe_page as _recipe_mod
+
+    lib = settings["seestar_library_path"]
+    try:
+        run_dir = _recipe_mod.resolve_run_dir(Path(lib), target, run=run)
+    except _recipe_mod.RecipeRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _recipe_mod.render_recipe_page(run_dir)
 
 
 @app.get("/frames/{target}", response_class=HTMLResponse)
@@ -2526,8 +2689,10 @@ def crop_analysis_page(target: str, filename: str):
     from nas_server.crop_analysis import crop_analysis_page as _page
     from nas_server.database import get_image_crops
     # Validate the image exists
-    proc_dir = Path(settings["seestar_library_path"]) / target / "_processed"
-    img_path = proc_dir / filename
+    proc_dir = _safe_route_path(
+        Path(settings["seestar_library_path"]), target, "_processed"
+    )
+    img_path = _safe_route_path(proc_dir, filename)
     if not img_path.exists():
         raise HTTPException(404, detail=f"Image not found: {filename}")
     crops = get_image_crops(target, filename)
@@ -2550,8 +2715,10 @@ async def save_crop_region(target: str, filename: str, request: Request):
     natural_w = int(body.get("natural_w", 0))
     natural_h = int(body.get("natural_h", 0))
 
-    proc_dir = Path(settings["seestar_library_path"]) / target / "_processed"
-    source = proc_dir / filename
+    proc_dir = _safe_route_path(
+        Path(settings["seestar_library_path"]), target, "_processed"
+    )
+    source = _safe_route_path(proc_dir, filename)
     if not source.exists():
         return {"ok": False, "error": "Source image not found"}
 
@@ -2850,7 +3017,7 @@ def _find_nbn_branch_sources(target: str) -> dict:
     or {"ok": False, "error": ...}.
     """
     lib = settings["seestar_library_path"]
-    runs_dir = Path(lib) / target / "_processed" / "runs"
+    runs_dir = _safe_route_path(Path(lib), target, "_processed", "runs")
     if not runs_dir.is_dir():
         return {"ok": False, "error": f"No runs dir for '{target}': {runs_dir}"}
 
@@ -2983,12 +3150,11 @@ def serve_video_file(target: str, filename: str):
     Serve a compiled pipeline video MP4.
     Starlette FileResponse handles Range requests automatically — seek works.
     """
-    from pathlib import Path as _P
     from nas_server.video_logger import _LIBRARY
 
-    # Sanitise: only allow filename portion, no directory traversal
-    safe_name = _P(filename).name
-    path = _LIBRARY / target / "_video" / safe_name
+    # Preserve the existing basename-only filename contract while also
+    # containing the previously unguarded target component.
+    path = _safe_route_path(_LIBRARY, target, "_video", Path(filename).name)
     if not path.exists() or path.suffix.lower() != ".mp4":
         raise HTTPException(status_code=404, detail="Video not found")
     return FileResponse(str(path), media_type="video/mp4",

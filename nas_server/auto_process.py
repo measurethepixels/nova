@@ -78,6 +78,24 @@ def _set_status(target: str, **kw):
         _active[target].update(kw)
 
 
+def try_register_active(target: str) -> bool:
+    """Atomically check-and-register a target as starting, unless it's already
+    active. Returns True if registered (caller may proceed to start the
+    pipeline), False if a run for this target is already active.
+
+    _set_status() alone can't close the check-then-spawn race between two
+    concurrent /autoprocess requests for the same target: it only runs inside
+    the spawned pipeline thread, after threading.Thread.start() has already
+    returned to the caller.
+    """
+    with _active_lock:
+        current = _active.get(target)
+        if current and current.get("phase") not in ("done", "error", "aborted", None):
+            return False
+        _active[target] = {"phase": "starting"}
+        return True
+
+
 def get_autoprocess_status(target: str) -> dict | None:
     with _active_lock:
         s = _active.get(target)
@@ -634,6 +652,14 @@ def _physics_should_run(step_name: str, stats: dict | None,
     hdr_compression keeps its own inline starless clip-gate upstream; here it only supplies
     params. See [[project-physics-default-pipeline]].
     """
+    # A global minimum is not evidence of an electronic pedestal. Calibrated stacks
+    # normally contain a positive floor from sky signal/noise, and blindly subtracting
+    # min($T) merely forces one pixel to zero. Keep this step opt-in via force_apply
+    # until capture/calibration provenance supplies a documented remaining pedestal.
+    if step_name == "remove_pedestal":
+        return False, {}, ("no confirmed calibration pedestal — global minimum is not "
+                           "sufficient evidence")
+
     if not stats:
         return True, {}, "no stats — run with defaults"
 
@@ -657,6 +683,25 @@ def _physics_should_run(step_name: str, stats: dict | None,
         except Exception as _pe:
             log.debug(f"[autoprocess] _physics_should_run {step_name} param calc failed: {_pe}")
             return {}
+
+    if step_name == "background_neutralize":
+        # SPCC neutralizes the background itself and linked stretches preserve that
+        # balance. A second unconditional neutralization can move an already-correct
+        # sky and suppress legitimate faint colour. Use representative sky ratios as
+        # the executable gate: run only for a confirmed residual cast. This also
+        # naturally enables the fallback when SPCC failed or an unlinked stretch
+        # introduced a cast, without relying solely on a sentinel file.
+        color = stats.get("color", {})
+        if not color.get("is_color", True):
+            return False, {}, "monochrome frame — background colour neutralization not applicable"
+        sky_g = float(color.get("sky_g_over_r", 1.0) or 1.0)
+        sky_b = float(color.get("sky_b_over_r", 1.0) or 1.0)
+        imbalance = max(abs(sky_g - 1.0), abs(sky_b - 1.0))
+        if imbalance <= 0.10:
+            return False, {}, (f"sky already neutral (max G/R,B/R deviation "
+                               f"{imbalance:.3f} ≤ 0.10); preserve SPCC balance")
+        return True, _params(_tp.compute_background_neutralize), (
+            f"measured residual sky cast (max G/R,B/R deviation {imbalance:.3f} > 0.10)")
 
     if step_name == "clahe":
         # Local-contrast enhancement helps a SOFT frame; on an already-crisp image it only
@@ -1173,8 +1218,17 @@ def _frame_fill_detect(fits_path, object_type: str,
 
 
 # Tie-break order for stretch picks: calibration-preserving / well-behaved first.
+# This is the GENERIC order, persisted per candidate as `pref`. It is NOT what
+# decides a galaxy -- see _GAL_PREF_ORDER. Reading `pref` as "the rank that chose
+# the winner" is wrong for galaxies and produced a published claim that veralux_strong
+# ranked 9th when the galaxy order ranks it 2nd.
 _STRETCH_PREF_ORDER = ["mas", "stat", "stat_bright", "stf", "ghs_soft", "ghs",
                        "ghs_strong", "veralux", "veralux_strong"]
+
+# Galaxy branch order: faint-structure retention first. Module scope so the episode
+# panel can name the order that actually decided instead of inferring one.
+_GAL_PREF_ORDER = ["mas", "veralux_strong", "veralux", "stat_bright", "stat",
+                   "stf", "ghs_strong", "ghs", "ghs_soft"]
 
 
 def _variant_saturation(fits_path) -> float:
@@ -1321,13 +1375,34 @@ def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
     # so drop annotations below (grain DQ / grain cap) land on them too.
     _all_cands = list(scored)
 
-    def _emit(best_name: str) -> None:
+    def _emit(best_name: str, ranked: list[dict] | None = None,
+              basis: str | None = None) -> None:
+        """Record per-candidate metrics, including the rank that actually decided.
+
+        `ranked` is the branch-sorted survivor list at the moment the winner was
+        taken, so `decision_rank` is the real ordering rather than an inference from
+        `pref` -- which comes from the generic _STRETCH_PREF_ORDER and disagrees with
+        the galaxy branch (veralux_strong is 9th generically, 2nd for galaxies).
+        Consumers that want "why did this win" must read decision_rank, not pref.
+
+        Dropped candidates get no decision_rank: they were removed before the
+        ordering, so they genuinely have no place in it. And if a vision tiebreak
+        later swapped the winner, decision_rank still describes the physics order
+        while `winner` marks the final pick -- rank 2 winning is information, not a
+        contradiction.
+        """
         if scored_out is None:
             return
+        order = {c["name"]: i + 1 for i, c in enumerate(ranked or [])}
         for c in _all_cands:
             rec = {k: (round(v, 4) if isinstance(v, float) else v)
                    for k, v in c.items() if k != "fits"}
             rec["winner"] = c["name"] == best_name
+            rank = order.get(c["name"])
+            if rank is not None:
+                rec["decision_rank"] = rank
+            if basis:
+                rec["decision_basis"] = basis
             scored_out.append(rec)
 
     is_galaxy = "galaxy" in (object_type or "")
@@ -1376,8 +1451,7 @@ def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
         # (already applied above), then prefer the faint-preserving variants by a
         # galaxy-specific order. The sky is no longer this step's problem. See
         # [[feedback-galaxy-stretch-darker]] and the sky_mute_masked step.
-        _GAL_PREF = ["mas", "veralux_strong", "veralux", "stat_bright", "stat",
-                     "stf", "ghs_strong", "ghs", "ghs_soft"]
+        _GAL_PREF = _GAL_PREF_ORDER
 
         # Sky-ceiling gate (workflow 1.24.0, batch eval 2026-07-16: M 85/88/91 all
         # −1.3..−1.6 regressions). "Ignore sky, mute downstream" only holds when the
@@ -1413,7 +1487,7 @@ def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
                  f"sky-muted downstream): {best['name']} (p99={best['p99']:.2f} "
                  f"under={best['under']:.3f} blown={best['blown']:.3f} "
                  f"bg_noise={best['bg_noise']:.3f} — sky terms ignored)")
-        _emit(best["name"])
+        _emit(best["name"], scored, "galaxy_detail_first")
         return best["name"]
 
     if is_nebula:
@@ -1536,7 +1610,7 @@ def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
                  f"{best['name']} (bg_dist={best['bg_dist']:.3f} p99={best['p99']:.2f} "
                  f"under={best['under']:.3f} grain={best['grain']:.3f}"
                  f"{_fol_tag}{_ff_tag})")
-        _emit(best["name"])
+        _emit(best["name"], scored, "nebula_sky_placement")
         return best["name"]
 
     # Non-nebula (galaxy/globular/broadband): blended cost, validated by prior batches.
@@ -1569,7 +1643,7 @@ def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
     log.info(f"[autoprocess] physics stretch pick: {best['name']} "
              f"(bg_dist={best['bg_dist']:.3f} p99={best['p99']:.2f} "
              f"under={best['under']:.3f} bg_noise={best['bg_noise']:.3f})")
-    _emit(best["name"])
+    _emit(best["name"], scored, "blended_cost")
     return best["name"]
 
 
@@ -5432,6 +5506,9 @@ def auto_process(
         # LP filter: detected once from the SOURCE stack header (crop strips
         # FILTER from run-dir intermediates), overrides ontology default
         if step_name == "color_calibration":
+            # target name reaches spcc() so the ASTAP pre-solve can hint from the
+            # catalog position (1.24.4 ladder was silently hintless without this)
+            params["target"] = target
             params["spcc_lp_filter"] = _is_lp_run
             # SSSC only on the narrowband-palette branch (1.16.0, Henry 2026-07-04):
             # on the STANDARD chain, spectrally-faithful SSSC renders dual-band

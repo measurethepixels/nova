@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "status": "pending_baseline",
+  "capability_profile": "public_free_core",
+  "tolerance_basis": "No baseline has been recorded yet. Tolerances below are placeholders and must not be represented as measured machine variance.",
+  "metrics": {
+    "snr": {"expected": 0.0, "absolute_tolerance": 0.0},
+    "fwhm_px": {"expected": 0.0, "absolute_tolerance": 0.0},
+    "background": {"expected": 0.0, "absolute_tolerance": 0.0},
+    "final_score": {"expected": 0.0, "absolute_tolerance": 0.0}
+  },
+  "machine_runs": []
+}

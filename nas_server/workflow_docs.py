@@ -17,6 +17,38 @@ from pathlib import Path
 
 EX = "/image/_docs/wf"  # base URL for curated before/after example images
 
+COMPARISON_SLIDER_JS = """
+document.querySelectorAll('.ba-slider').forEach(function(s) {
+  var r = s.querySelector('.ba-range');
+  var b = s.querySelector('.ba-before');
+  var d = s.querySelector('.ba-divider');
+  r.addEventListener('input', function() {
+    var pct = this.value;
+    b.style.clipPath = 'inset(0 ' + (100 - pct) + '% 0 0)';
+    d.style.left = pct + '%';
+  });
+});
+"""
+
+COMPARISON_SLIDER_CSS = """
+.ba-slider { position: relative; overflow: hidden; border-radius: 8px; cursor: ew-resize;
+             user-select: none; border: 1px solid var(--border); }
+.ba-slider .ba-after { display: block; width: 100%; }
+.ba-slider .ba-before { position: absolute; top: 0; left: 0; width: 100%;
+                        clip-path: inset(0 50% 0 0); pointer-events: none; }
+.ba-slider .ba-divider { position: absolute; top: 0; left: 50%; width: 2px; height: 100%;
+                         background: rgba(255,255,255,.8); pointer-events: none;
+                         transform: translateX(-50%); }
+.ba-slider .ba-lbl { position: absolute; top: 8px; background: rgba(0,0,0,.65); color: #fff;
+                     font-size: .62rem; padding: 1px 6px; border-radius: 3px;
+                     pointer-events: none; letter-spacing: .05em; text-transform: uppercase; }
+.ba-slider .ba-lbl-l { left: 8px; }
+.ba-slider .ba-lbl-r { right: 8px; }
+.ba-slider .ba-range { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+                       opacity: 0; cursor: ew-resize; margin: 0; }
+.ba-cap { font-size: .76rem; color: var(--text2); margin-top: .4rem; font-style: italic; }
+"""
+
 _ONTOLOGY_PATH = Path(__file__).parent / "processing_ontology.json"
 
 
@@ -611,9 +643,13 @@ PI_MANUAL = {
     "remove_pedestal": (
         "<b>Process: PixelMath</b> (or set it at calibration time)."
         "<ol>"
+        "<li><b>Skip by default on a calibrated stack.</b> A positive global minimum "
+        "is not evidence of an electronic pedestal; sky signal, noise, or a cold pixel "
+        "can set that value.</li>"
         "<li>The clean way is <b>ImageCalibration → Output pedestal</b> when you build the "
         "master, so it's already removed.</li>"
-        "<li>On an existing master, use PixelMath per channel: "
+        "<li>Only when calibration provenance confirms a remaining constant offset, use "
+        "PixelMath uniformly: "
         "<code>$T - min($T)</code> (rescale off), which pins true black to zero while "
         "keeping channel ratios intact.</li>"
         "</ol>"
@@ -735,9 +771,14 @@ PI_MANUAL = {
     "background_neutralize": (
         "<b>Process: BackgroundNeutralization</b>."
         "<ol>"
+        "<li><b>Skip after successful background extraction + SPCC</b> when representative "
+        "empty-sky samples remain neutral after a linked stretch.</li>"
+        "<li>Run only when the sky measurements confirm a residual channel cast; NOVA's "
+        "automatic gate requires max(|G/R−1|, |B/R−1|) &gt; 0.10.</li>"
         "<li>Draw a preview over a genuinely empty sky region and set it as the "
         "<i>Reference image</i>.</li>"
-        "<li>Run to force R≈G≈B in the darkest background after stretch.</li>"
+        "<li>Re-measure after applying it and reject the result if legitimate faint colour "
+        "is suppressed or a channel clips.</li>"
         "</ol>"
     ),
     "color_boost": (
@@ -885,19 +926,28 @@ WORKFLOW_NOTES = {
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
-def _slider(key: str, caption: str) -> str:
-    before = f"{EX}/{key}_before.jpg"
-    after = f"{EX}/{key}_after.jpg"
+def comparison_slider(key: str, caption: str, *, base_url: str = EX) -> str:
+    """Shared workflow/handbook before-after component."""
+    base_url = _html.escape(base_url.rstrip("/"), quote=True)
+    safe_key = _html.escape(key, quote=True)
+    safe_caption = _html.escape(caption, quote=True)
+    before = f"{base_url}/{safe_key}_before.jpg"
+    after = f"{base_url}/{safe_key}_after.jpg"
     return (
         '<div class="ba-slider">'
-        f'<img class="ba-after" src="{after}" alt="after {caption}" loading="lazy">'
-        f'<img class="ba-before" src="{before}" alt="before {caption}" loading="lazy">'
+        f'<img class="ba-after" src="{after}" alt="after {safe_caption}" loading="lazy">'
+        f'<img class="ba-before" src="{before}" alt="before {safe_caption}" loading="lazy">'
         '<div class="ba-divider"></div>'
         '<span class="ba-lbl ba-lbl-l">before</span>'
         '<span class="ba-lbl ba-lbl-r">after</span>'
         '<input type="range" class="ba-range" value="50" min="0" max="100">'
-        f'</div><div class="ba-cap">{caption}</div>'
+        f'</div><div class="ba-cap">{safe_caption}</div>'
     )
+
+
+def _slider(key: str, caption: str) -> str:
+    """Compatibility wrapper for existing workflow rendering."""
+    return comparison_slider(key, caption)
 
 
 def _params_table(step_def: dict) -> str:
@@ -1215,16 +1265,7 @@ def workflow_docs_page() -> str:
   </div>
 </div>
 <script>
-document.querySelectorAll('.ba-slider').forEach(function(s) {{
-  var r = s.querySelector('.ba-range');
-  var b = s.querySelector('.ba-before');
-  var d = s.querySelector('.ba-divider');
-  r.addEventListener('input', function() {{
-    var pct = this.value;
-    b.style.clipPath = 'inset(0 ' + (100 - pct) + '% 0 0)';
-    d.style.left = pct + '%';
-  }});
-}});
+{COMPARISON_SLIDER_JS}
 (function() {{
   var links = document.querySelectorAll('.toc a');
   links.forEach(function(a) {{
@@ -1331,22 +1372,6 @@ document.querySelectorAll('.ba-slider').forEach(function(s) {{
   .veng { font-size: .66rem; border: 1px solid var(--border); border-radius: 10px; padding: 0 6px;
           margin: 0 .4rem; color: var(--text2); }
   .vdesc { color: var(--text2); }
-  /* before/after slider */
-  .ba-slider { position: relative; overflow: hidden; border-radius: 8px; cursor: ew-resize;
-               user-select: none; border: 1px solid var(--border); }
-  .ba-slider .ba-after { display: block; width: 100%; }
-  .ba-slider .ba-before { position: absolute; top: 0; left: 0; width: 100%;
-                          clip-path: inset(0 50% 0 0); pointer-events: none; }
-  .ba-slider .ba-divider { position: absolute; top: 0; left: 50%; width: 2px; height: 100%;
-                           background: rgba(255,255,255,.8); pointer-events: none; transform: translateX(-50%); }
-  .ba-slider .ba-lbl { position: absolute; top: 8px; background: rgba(0,0,0,.65); color: #fff;
-                       font-size: .62rem; padding: 1px 6px; border-radius: 3px; pointer-events: none;
-                       letter-spacing: .05em; text-transform: uppercase; }
-  .ba-slider .ba-lbl-l { left: 8px; }
-  .ba-slider .ba-lbl-r { right: 8px; }
-  .ba-slider .ba-range { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-                         opacity: 0; cursor: ew-resize; margin: 0; }
-  .ba-cap { font-size: .76rem; color: var(--text2); margin-top: .4rem; font-style: italic; }
   /* stretch gallery */
   .gallery-wrap { margin-bottom: .8rem; }
   .gallery-h { font-size: .82rem; color: var(--text2); margin-bottom: .55rem; line-height: 1.45; }
@@ -1366,5 +1391,5 @@ document.querySelectorAll('.ba-slider').forEach(function(s) {{
     .step-grid { grid-template-columns: 1fr; }
     .gallery { grid-template-columns: repeat(2, 1fr); }
   }
-"""
+""" + COMPARISON_SLIDER_CSS
     return _page_shell(title="Workflow Reference", body=body, extra_css=extra_css)

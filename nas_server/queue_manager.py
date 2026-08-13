@@ -8,11 +8,14 @@ Usage:
 """
 import logging
 import shutil
+import sqlite3
 import threading
 import time
 from pathlib import Path
 
 import subprocess
+
+from nas_server.db_error_reporting import report_sqlite_error
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +27,7 @@ _restart_pending: bool = False
 _parked_for_review: set[str] = set()  # targets blocked indefinitely waiting for manual review
 _park_lock = threading.Lock()
 _current_job_target: str | None = None   # target the queue worker is currently waiting on
+_current_job_fingerprint: tuple | None = None  # stack fingerprint of that job (None for process jobs)
 _current_park_event: threading.Event | None = None  # per-job event for that wait
 _remote_inflight: dict[str, dict] = {}   # target → {worker_url, worker_name, remote_id}
 _remote_inflight_lock = threading.Lock()
@@ -119,6 +123,17 @@ def _db_insert(item: dict) -> int:
     try:
         from nas_server.database import queue_insert
         return queue_insert(item)
+    except sqlite3.Error as e:
+        report_sqlite_error(
+            log,
+            context="queue insert",
+            error=e,
+            consequence=(
+                "The job remains in memory but will not survive a service restart."
+            ),
+            notify=True,
+        )
+        return -1
     except Exception as e:
         log.warning(f"[queue] DB insert failed (in-memory only): {e}")
         return -1
@@ -130,6 +145,16 @@ def _db_delete(row_id: int):
     try:
         from nas_server.database import queue_delete
         queue_delete(row_id)
+    except sqlite3.Error as e:
+        report_sqlite_error(
+            log,
+            context="queue delete",
+            error=e,
+            consequence=(
+                "The completed job may reappear after a service restart."
+            ),
+            notify=True,
+        )
     except Exception as e:
         log.warning(f"[queue] DB delete failed: {e}")
 
@@ -138,8 +163,137 @@ def _db_clear():
     try:
         from nas_server.database import queue_clear_all
         queue_clear_all()
+    except sqlite3.Error as e:
+        report_sqlite_error(
+            log,
+            context="queue clear",
+            error=e,
+            consequence=(
+                "The in-memory queue was cleared, but persisted jobs may reappear "
+                "after a service restart."
+            ),
+            notify=True,
+        )
     except Exception as e:
         log.warning(f"[queue] DB clear failed: {e}")
+
+
+# --- Duplicate-job prevention ---
+#
+# Three registries matter for "is this job already spoken for": the pending
+# _queue, the job the worker just claimed (_current_job_target/
+# _current_job_fingerprint — published atomically with the pop in
+# _pop_next(), see its docstring), and the already-registered-active job in
+# a DIFFERENT module's own locked state (stacker._active_stacks,
+# auto_process._active). The first two are checked together under
+# _queue_lock (_conflict_locked); the third is checked separately since a
+# race there just means a benign redundant run, not a duplicate write.
+
+_STACK_FINGERPRINT_FIELDS = (
+    "engine", "cull", "bottom_pct", "min_stars", "fast", "framing", "hero",
+    "drizzle", "exptime", "eq_only", "filter_name", "ecc_threshold",
+    "sky_level_factor", "gradient_threshold",
+)
+
+
+def _stack_fingerprint(item: dict) -> tuple:
+    """Config fingerprint for stack-job dedup. Two stack jobs are duplicates
+    iff they'd produce the same output filename (mirrors
+    stack_config._stack_config_tokens — reuses its exact rounding rule via
+    stack_config._round_field, same field set minus engine/target which are
+    prepended separately here). Sharing the rounding function (not just
+    matching its behavior by hand) guarantees fingerprint-equality and
+    filename-token-equality can never drift apart. post_autoprocess_* fields
+    are excluded — they don't change the stack itself.
+
+    Callers must resolve `item["framing"]` to its EFFECTIVE value (via
+    stack_config.resolve_effective_framing) before building `item`, since
+    stack_target() itself forces framing="max" for mosaic targets regardless
+    of what was requested — otherwise two requests that will actually
+    collide on the same output filename could fingerprint as distinct."""
+    from nas_server.stack_config import _round_field
+    return (item.get("target"),) + tuple(_round_field(item.get(f)) for f in _STACK_FINGERPRINT_FIELDS)
+
+
+def _conflict_locked(job_type: str, target: str, fingerprint: tuple | None) -> str | None:
+    """Caller must hold _queue_lock. Returns a conflict label if a matching
+    job already occupies this target, else None.
+
+    Checks, in order: the pending queue; the job _pop_next() just claimed
+    (via _current_job_target/_current_job_fingerprint, published atomically
+    with the pop — nested _park_lock inside the same _queue_lock section, so
+    the window between a pop and the worker's own stacker/_active
+    registration can't admit a duplicate, see PR #39 review round 1 finding
+    1); and — since this function is now THE atomic reservation point for
+    every check-then-commit path, not just the queue append — the
+    cross-module active registries too (_remote_inflight, stacker.
+    _active_stacks, auto_process._active). Doing all of this under one lock
+    is what lets add_job()/add_stack_job()'s own append and
+    reserve_process_target()'s direct-endpoint registration (see below)
+    mutually exclude each other instead of racing (PR #39 review round 2,
+    finding 1).
+    """
+    for pending in _queue:
+        if pending.get("job_type") != job_type or pending.get("target") != target:
+            continue
+        if job_type == "stack" and fingerprint is not None and _stack_fingerprint(pending) != fingerprint:
+            continue
+        return "queued"
+    with _park_lock:
+        if _current_job_target == target and (
+            job_type != "stack" or fingerprint is None or _current_job_fingerprint == fingerprint
+        ):
+            return "running"
+    if job_type == "process":
+        with _remote_inflight_lock:
+            if target in _remote_inflight:
+                return "remote_inflight"
+        from nas_server.auto_process import get_autoprocess_status
+        status = get_autoprocess_status(target)
+        if status and status.get("phase") not in ("done", "error", "aborted", None):
+            return "autoprocess_active"
+    elif job_type == "stack":
+        from nas_server.stacker import get_stack_status
+        if get_stack_status(target) is not None:
+            return "stack_active"
+    return None
+
+
+def find_active_or_queued(job_type: str, target: str, fingerprint: tuple | None = None) -> dict | None:
+    """Self-contained conflict check (acquires _queue_lock itself) — see
+    _conflict_locked for what it covers. Used as a fast pre-check by
+    add_job()/add_stack_job() before they even attempt the append (avoids
+    unnecessary lock contention on an obvious conflict), and by
+    reserve_process_target() as its sole, authoritative check."""
+    with _queue_lock:
+        where = _conflict_locked(job_type, target, fingerprint)
+    return {"where": where, "target": target} if where else None
+
+
+def reserve_process_target(target: str, force: bool = False) -> dict | None:
+    """Atomically check every process-job registry and reserve `target` as
+    active in auto_process._active if clear. For callers that register
+    active state OUTSIDE the queue's own append — i.e. POST
+    /autoprocess/{target}'s direct-thread path, which has no append step to
+    piggyback an atomic check on the way add_job() does.
+
+    Returns a conflict dict, or None on success. force=True skips the check
+    and registers unconditionally (matching the queue paths' force=True
+    semantics). Holding _queue_lock for the entire check+register — not two
+    sequential locks — is what closes the race: add_job()'s own check+append
+    for the same target also needs _queue_lock, so the two can no longer
+    interleave (see PR #39 review round 2, finding 1)."""
+    from nas_server import auto_process as _ap_mod
+    if force:
+        _ap_mod.try_register_active(target)
+        return None
+    with _queue_lock:
+        where = _conflict_locked("process", target, None)
+        if where:
+            return {"where": where, "target": target}
+        if not _ap_mod.try_register_active(target):
+            return {"where": "autoprocess_active", "target": target}
+    return None
 
 
 # --- Public API ---
@@ -148,7 +302,8 @@ def add_job(target: str, workflow: str = "seestar_broadband",
             experiment_mode: bool = False, dry_run: bool = False,
             source_file: str | None = None,
             manual_review: bool = False,
-            extra_params: dict | None = None) -> dict:
+            extra_params: dict | None = None,
+            force: bool = False) -> dict:
     item = {
         "job_type": "process",
         "target": target,
@@ -159,8 +314,18 @@ def add_job(target: str, workflow: str = "seestar_broadband",
         "manual_review": manual_review,
         "extra_params": extra_params or {},
     }
-    item["_db_id"] = _db_insert(item)
+    if not force:
+        conflict = find_active_or_queued("process", target)
+        if conflict:
+            log.info(f"[queue] duplicate process '{target}' rejected (active: {conflict['where']})")
+            return {"duplicate": True, "existing": conflict}
     with _queue_lock:
+        if not force:
+            where = _conflict_locked("process", target, None)
+            if where:
+                log.info(f"[queue] duplicate process '{target}' rejected ({where})")
+                return {"duplicate": True, "existing": {"where": where, "target": target}}
+        item["_db_id"] = _db_insert(item)
         _queue.append(item)
         pos = len(_queue)
     log.info(f"[queue] added '{target}' (workflow={workflow}) — position {pos}")
@@ -172,11 +337,33 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
                   fast: bool = False, framing: str = "min", hero: bool = False,
                   drizzle: bool = False, exptime: int | None = None,
                   eq_only: bool = True,
-                  ecc_threshold: float = 0.6,
+                  filter_name: str | None = "auto",
+                  ecc_threshold: float = 0.66,
                   sky_level_factor: float = 3.0,
                   gradient_threshold: float = 0.5,
                   post_autoprocess_workflow: str | None = None,
-                  post_autoprocess_experiment: bool = False) -> dict:
+                  post_autoprocess_experiment: bool = False,
+                  force: bool = False) -> dict:
+    from nas_server.stack_config import resolve_effective_framing, _round_field
+    # Resolve to the EFFECTIVE framing stack_target() will actually use
+    # (mosaic targets force "max" regardless of what's requested) so the
+    # dedup fingerprint and the eventual filename agree — otherwise two
+    # requests that differ only in requested framing could both be accepted
+    # here yet collide on the same output filename once mosaic detection
+    # runs inside stack_target() (see PR #39 review, finding 3).
+    effective_framing = resolve_effective_framing(target, "max" if framing == "max" else "min")
+    # Round numeric gates to the SAME 3-decimal precision the fingerprint and
+    # filename token use, and STORE the rounded value (not just fingerprint
+    # it rounded) — otherwise two requests differing only by float noise
+    # (0.8001 vs 0.8004) would fingerprint/filename identically yet execute
+    # with different raw thresholds against stack_target()'s frame-selection
+    # logic, silently producing different output under one "identical"
+    # filename. Identity must match what actually executes (PR #39 review
+    # round 2, finding 4).
+    bottom_pct = _round_field(bottom_pct)
+    ecc_threshold = _round_field(ecc_threshold)
+    sky_level_factor = _round_field(sky_level_factor)
+    gradient_threshold = _round_field(gradient_threshold)
     item = {
         "job_type": "stack",
         "target": target,
@@ -185,11 +372,12 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
         "bottom_pct": bottom_pct,
         "min_stars": min_stars,
         "fast": fast,
-        "framing": "max" if framing == "max" else "min",
+        "framing": effective_framing,
         "hero": hero,
         "drizzle": drizzle,
         "exptime": exptime,
         "eq_only": eq_only,
+        "filter_name": filter_name,
         "ecc_threshold": ecc_threshold,
         "sky_level_factor": sky_level_factor,
         "gradient_threshold": gradient_threshold,
@@ -197,8 +385,19 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
         "workflow": post_autoprocess_workflow,
         "experiment_mode": post_autoprocess_experiment if post_autoprocess_workflow else False,
     }
-    item["_db_id"] = _db_insert(item)
+    fingerprint = _stack_fingerprint(item)
+    if not force:
+        conflict = find_active_or_queued("stack", target, fingerprint)
+        if conflict:
+            log.info(f"[queue] duplicate stack '{target}' rejected (active: {conflict['where']})")
+            return {"duplicate": True, "existing": conflict}
     with _queue_lock:
+        if not force:
+            where = _conflict_locked("stack", target, fingerprint)
+            if where:
+                log.info(f"[queue] duplicate stack '{target}' rejected ({where})")
+                return {"duplicate": True, "existing": {"where": where, "target": target}}
+        item["_db_id"] = _db_insert(item)
         _queue.append(item)
         pos = len(_queue)
     suffix = f" +autoprocess({post_autoprocess_workflow})" if post_autoprocess_workflow else ""
@@ -234,12 +433,27 @@ def clear_queue() -> int:
     return count
 
 
-def _pop_next() -> dict | None:
+def _pop_next() -> tuple[dict | None, threading.Event | None]:
+    """Pop the next queue item and atomically publish it as the current job
+    (nested _park_lock inside the same _queue_lock critical section that
+    removes it from _queue). Without this, there's a window after the item
+    leaves _queue but before _current_job_target is set where a concurrent
+    add_stack_job()/add_job() sees neither a queued nor a running conflict
+    and accepts an identical duplicate (see PR #39 review, finding 1)."""
+    global _current_job_target, _current_job_fingerprint, _current_park_event
+    park_ev = threading.Event()
     with _queue_lock:
         item = _queue.pop(0) if _queue else None
+        if item is not None:
+            with _park_lock:
+                _current_job_target = item["target"]
+                _current_job_fingerprint = (
+                    _stack_fingerprint(item) if item.get("job_type") == "stack" else None
+                )
+                _current_park_event = park_ev
     if item is not None:
         _db_delete(item.get("_db_id", -1))
-    return item
+    return item, park_ev
 
 
 def _public(item: dict) -> dict:
@@ -392,6 +606,31 @@ def _proactive_remote_dispatch(current_target: str | None = None) -> None:
             return
 
         candidate = _queue.pop(candidate_idx)
+        target = candidate["target"]
+
+        # Publish the _remote_inflight claim NESTED inside the same
+        # _queue_lock section that removes the item from _queue — not after
+        # releasing it. Previously this registration happened several lines
+        # (and a _db_delete + workflow-resolution DB call) later, under only
+        # _remote_inflight_lock; in that window a concurrent add_job() saw
+        # the target in neither _queue nor _remote_inflight and accepted a
+        # duplicate (PR #39 review round 2, finding 2). With the claim
+        # published here, _conflict_locked (which add_job()'s own
+        # _queue_lock-guarded append also runs under) sees it immediately.
+        with _remote_inflight_lock:
+            if target in _remote_inflight:
+                # Should be unreachable now that the claim is atomic with the
+                # pop — every other writer of _remote_inflight also needs
+                # _queue_lock first. Kept as a defensive safety net; if this
+                # ever fires it indicates a real logic bug, not a benign race.
+                log.warning(f"[queue] proactive dispatch: '{target}' unexpectedly "
+                            f"already in _remote_inflight — dropping duplicate candidate")
+                return
+            _remote_inflight[target] = {
+                "worker_url": worker["url"],
+                "worker_name": worker.get("name", worker["url"]),
+                "remote_id": None,
+            }
 
     # Claim the job: delete its persistent row now (mirrors _pop_next). On a
     # successful remote run the row stays gone; if dispatch fails, the requeue
@@ -400,23 +639,9 @@ def _proactive_remote_dispatch(current_target: str | None = None) -> None:
     # already-finished work on the next restart.
     _db_delete(candidate.get("_db_id", -1))
 
-    target = candidate["target"]
     workflow = _resolve_workflow(target, candidate.get("workflow", "auto"))
     candidate_with_wf = {**candidate, "workflow": workflow}
 
-    with _remote_inflight_lock:
-        if target in _remote_inflight:
-            # Lost the race with another dispatcher — this candidate is a duplicate
-            # of a target already in flight. Drop it instead of double-dispatching
-            # (DB row already removed above).
-            log.info(f"[queue] proactive dispatch skipped duplicate '{target}' "
-                     f"— already in flight")
-            return
-        _remote_inflight[target] = {
-            "worker_url": worker["url"],
-            "worker_name": worker.get("name", worker["url"]),
-            "remote_id": None,
-        }
     threading.Thread(
         target=_dispatch_and_monitor,
         args=(candidate_with_wf, worker),
@@ -432,19 +657,23 @@ def _proactive_remote_dispatch(current_target: str | None = None) -> None:
 def _requeue_at_front(item: dict) -> None:
     """Re-insert item at front of queue (used when remote dispatch fails).
 
-    Dedups: never insert a second copy of a target that is already queued — this
-    was the churn that accumulated multiple identical rows for one target.
-    """
+    Dedups: never insert a second copy of a target that is already queued —
+    this was the churn that accumulated multiple identical rows for one
+    target. The check and the insert happen inside ONE _queue_lock critical
+    section (previously two separate lock acquisitions with a _db_insert()
+    in between — the same window add_job()'s own DB-insert-then-append
+    already tolerates under one lock elsewhere — let a concurrent add_job()
+    insert a second copy for this target before this function's own insert
+    landed; PR #39 review round 2, finding 3)."""
     target = item.get("target")
     job_type = item.get("job_type", "process")
+    new_item = {k: v for k, v in item.items() if not k.startswith("_")}
     with _queue_lock:
         if any(q.get("target") == target and q.get("job_type", "process") == job_type
                for q in _queue):
             log.info(f"[queue] re-queue skipped for '{target}' — already in queue")
             return
-    new_item = {k: v for k, v in item.items() if not k.startswith("_")}
-    new_item["_db_id"] = _db_insert(new_item)
-    with _queue_lock:
+        new_item["_db_id"] = _db_insert(new_item)
         _queue.insert(0, new_item)
     log.info(f"[queue] re-queued '{new_item['target']}' at front for local execution")
 
@@ -902,7 +1131,8 @@ def _run_job(item: dict) -> None:
                 drizzle=item.get("drizzle", False),
                 exptime=item.get("exptime"),
                 eq_only=item.get("eq_only", True),
-                ecc_threshold=item.get("ecc_threshold", 0.6),
+                filter_name=item.get("filter_name", "auto"),
+                ecc_threshold=item.get("ecc_threshold", 0.66),
                 sky_level_factor=item.get("sky_level_factor", 3.0),
                 gradient_threshold=item.get("gradient_threshold", 0.5),
             )
@@ -918,8 +1148,12 @@ def _run_job(item: dict) -> None:
                     experiment_mode=bool(item.get("experiment_mode")),
                     source_file=source_file,
                 )
-                log.info(f"[queue] auto-queued autoprocess '{target}' "
-                         f"({post_workflow}, src={source_file}) — position {follow['position']}")
+                if follow.get("duplicate"):
+                    log.warning(f"[queue] post-stack autoprocess '{target}' not queued — "
+                                f"duplicate ({follow['existing']['where']})")
+                else:
+                    log.info(f"[queue] auto-queued autoprocess '{target}' "
+                             f"({post_workflow}, src={source_file}) — position {follow['position']}")
         except Exception as e:
             stop_event.set()
             log.error(f"[queue] stack '{target}' failed: {e}")
@@ -1017,7 +1251,7 @@ def _run_job(item: dict) -> None:
 
 
 def _worker():
-    global _current_job_target, _current_park_event
+    global _current_job_target, _current_job_fingerprint, _current_park_event
     log.info("[queue] worker started")
     while True:
         # Only block on LOCAL active jobs. Remote-worker jobs run in their own
@@ -1062,16 +1296,12 @@ def _worker():
             time.sleep(60)
             continue
 
-        item = _pop_next()
+        item, park_ev = _pop_next()
         if item is None:
             time.sleep(3)
             continue
 
         target = item["target"]
-        park_ev = threading.Event()
-        with _park_lock:
-            _current_job_target = target
-            _current_park_event = park_ev
 
         job_thread = threading.Thread(
             target=_run_job, args=(item,), daemon=True, name=f"job-{target}"
@@ -1095,6 +1325,7 @@ def _worker():
 
         with _park_lock:
             _current_job_target = None
+            _current_job_fingerprint = None
             _current_park_event = None
 
         if park_ev.is_set() and job_thread.is_alive():

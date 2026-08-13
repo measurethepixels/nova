@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "target": "M 42",
+  "capture_owner": "Jeff Henry",
+  "data_license": "CC BY 4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "license_status": "approved",
+  "prepared_on": "2026-08-10",
+  "instrument": "Seestar S50",
+  "frame_count": 12,
+  "exposure_s": 10.0,
+  "total_exposure_s": 120.0,
+  "sanitization": {
+    "pixel_policy": "Pixel arrays are byte-identical before and after metadata sanitization.",
+    "metadata_policy": "allowlist",
+    "allowed_science_header_keys": [
+      "BAYERPAT",
+      "CCD-TEMP",
+      "CCDXBIN",
+      "CCDYBIN",
+      "CREATOR",
+      "DATE-OBS",
+      "DEC",
+      "EXPOSURE",
+      "EXPTIME",
+      "FILTER",
+      "FOCALLEN",
+      "FOCUSPOS",
+      "GAIN",
+      "IMAGETYP",
+      "INSTRUME",
+      "OBJECT",
+      "RA",
+      "TELESCOP",
+      "XBINNING",
+      "XORGSUBF",
+      "XPIXSZ",
+      "YBINNING",
+      "YORGSUBF",
+      "YPIXSZ"
+    ],
+    "source_paths_recorded": false
+  },
+  "frames": [
+    {
+      "file": "light_001.fit",
+      "sha256": "bc71b8fc240b846945b3d90386d3c4f2b02bef7bd5efb7ad2188a37e6131f173",
+      "pixel_sha256": "506aaf07a628014a89069524afd6695598fd85f147498c6c4b2a77a0dec1446b",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_002.fit",
+      "sha256": "f7a6657a30b89f75261b37b04fbc587435e72cad3f4926fff940f5f3679afb6f",
+      "pixel_sha256": "3239b65c4a12878047564f3adf11c105d5d52a6393c0440d212459f8c82bca8c",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_003.fit",
+      "sha256": "771af5fe8a7e93da93d29e1d4736b6623d6147cbee1a59c39bba0c2f7c9f141a",
+      "pixel_sha256": "fe6e1d3046cd097a014dd396f389bb14185bdd0ba1a22783dd7f0041a4c6b5cb",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_004.fit",
+      "sha256": "e6f54f20cafb10757587c1f8b37ea115eebee25d8d30a757ee389f06bbd4f088",
+      "pixel_sha256": "435cec60f2b63cf1eaa5ac8fbe0d6a5e112d5e0b797b9f0755fa5eca35aa41a2",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_005.fit",
+      "sha256": "70b6c1f60d9ca60443c96f16eb6415eb09d9e2eb5c4a909d48196e1b05aab931",
+      "pixel_sha256": "27c2388f1f4cc731b044bafa2eaa86f52a2312d3ca22b3c3de236db4b41539ec",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_006.fit",
+      "sha256": "2ef9233cf36f270ccede2f2a330b9cbedefc38cbb478753a3f674dfa9412576b",
+      "pixel_sha256": "c7199fe8241bebd6df3130d65de18298a284017642a8b7c03787201e38b5c2fd",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_007.fit",
+      "sha256": "db9392ac6b8e81e064abf5112b72798aa9c6340fdcbbe6d24b40210174a3cfa7",
+      "pixel_sha256": "59f74bedb176847ebee1f5b15b636b62c2e71bafc67f6b036b8591bb858f26ef",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_008.fit",
+      "sha256": "fc6aa6a3fc3bcc8e0d06bf8512ef656087185ff84dbbb76c54d5a674863e62f8",
+      "pixel_sha256": "436289efbe4baf8fb52a7e3661a6d9b5d9d42a1f079ffa9485970519bee83682",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_009.fit",
+      "sha256": "ae22ff86058e95f9fee6c16ddf1f0a9f3317ab3216421f063a3e7cb248d4617c",
+      "pixel_sha256": "18467f0977c37ecdab7e52af61e25bb2e48e1b305e3b8317a757d7281f29a9ff",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_010.fit",
+      "sha256": "059f84def2f379004af5b3d33910689f9839d9f73061f18ff33f894f186bf27a",
+      "pixel_sha256": "25130f4be0d980ca7558ce5aadb195b43bd786eacda4281e5f34e077f2c021d9",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_011.fit",
+      "sha256": "5ad1f940cfb593d039e1110a26b3aa85ef93f1072905ae7ec50fa6365eaa4789",
+      "pixel_sha256": "a06715c10ecc17ad2e42e5768dd0ad827bd2f1a422816b122508761704105021",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    },
+    {
+      "file": "light_012.fit",
+      "sha256": "781fa50987a56e49472aafd9376881a35fe78bd5b9f926bc4f618c01b69d26c1",
+      "pixel_sha256": "55dad2cd185a729f4551195bd178fbbd55a0aa2a904349ce68d5adce142df99f",
+      "bytes": 4150080,
+      "removed_header_keys": [
+        "SITELAT",
+        "SITELONG"
+      ]
+    }
+  ]
+}

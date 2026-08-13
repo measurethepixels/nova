@@ -1,7 +1,7 @@
 """
 Astrophotography story page generator.
 
-Builds a personal journal-style HTML page covering Henry's full journey from
+Builds a personal journal-style HTML page covering Jeff's full journey from
 first light (March 18, 2024) to present. Data comes from the DB; Claude writes
 short narrative paragraphs for each target; the page is served live at /story
 and can be exported as a self-contained HTML file.
@@ -105,7 +105,7 @@ def generate_story_html(target: str | None = None, embed_images: bool = False) -
         year = (t.get("first_date") or "")[:4] or "Unknown"
         sections.setdefault(year, []).append(t)
 
-    header_title = f"Henry's Astrophotography Journey"
+    header_title = "Jeff Henry's Astrophotography Journey"
     total_hours = stats.get("total_hours", 0)
     total_subs  = stats.get("total_subs", 0)
     total_tgts  = stats.get("total_targets", 0)

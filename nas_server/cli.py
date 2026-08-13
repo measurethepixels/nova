@@ -43,6 +43,23 @@ STAGE_SYMBOLS = {
     "exported":   "✓",
 }
 
+# Keep the direct and queued AutoProcess entry points on one contract.  In
+# particular, REPLICATE.md requires public_free_core for release verification;
+# omitting it here makes the documented clean-machine command impossible even
+# though the workflow exists in processing_ontology.json.
+AUTOPROCESS_WORKFLOWS = (
+    "seestar_broadband",
+    "seestar_fast",
+    "seestar_galaxy",
+    "seestar_nebula",
+    "linear_only",
+    "experiment_full",
+    "seestar_starless_stretch",
+    "spcc_only",
+    "quick_default",
+    "public_free_core",
+)
+
 
 def _load_url() -> str:
     try:
@@ -107,6 +124,16 @@ def cmd_mounts(url, _args):
         items = f"  ({info['items']} items)" if info.get("items") is not None else ""
         err = f"  ERROR: {info['error']}" if "error" in info else ""
         print(f"  {ok} {name}: {info['path']}{items}{err}")
+
+
+def cmd_doctor(url, _args):
+    data = _get(url, "/doctor")
+    summary = data.get("summary", {})
+    print(f"  Doctor: {summary.get('available', 0)} available, "
+          f"{summary.get('missing', 0)} missing, {summary.get('unknown', 0)} unknown")
+    for item in data.get("probes", []):
+        state = "✓" if item.get("available") is True else "✗" if item.get("available") is False else "?"
+        print(f"  {state} {item.get('name')}: {item.get('detail', '')}")
 
 
 def cmd_pipeline(url, args):
@@ -680,6 +707,7 @@ def main():
 
     sub.add_parser("status", help="Server status and paths")
     sub.add_parser("mounts", help="Check SMB mount health")
+    sub.add_parser("doctor", help="Read-only tool and capability diagnostic")
 
     p_pipeline = sub.add_parser("pipeline", help="Show pipeline status")
     p_pipeline.add_argument("target", nargs="?", help="Show a single target")
@@ -797,9 +825,7 @@ def main():
     p_ap = sub.add_parser("autoprocess", help="Run automated Claude-driven processing pipeline")
     p_ap.add_argument("target", help="Target name (e.g. 'C 77')")
     p_ap.add_argument("--workflow", default="seestar_broadband",
-                      choices=["seestar_broadband", "seestar_fast", "seestar_galaxy",
-                               "seestar_nebula", "linear_only", "experiment_full",
-                               "seestar_starless_stretch", "spcc_only", "quick_default"],
+                      choices=AUTOPROCESS_WORKFLOWS,
                       help="Processing workflow (default: seestar_broadband)")
     p_ap.add_argument("--dry-run", action="store_true",
                       help="Plan steps without writing files")
@@ -814,9 +840,7 @@ def main():
     p_qa = q_sub.add_parser("add", help="Add a target to the queue")
     p_qa.add_argument("target", help="Target name (e.g. 'M 51')")
     p_qa.add_argument("--workflow", default="seestar_broadband",
-                      choices=["seestar_broadband", "seestar_fast", "seestar_galaxy",
-                               "seestar_nebula", "linear_only", "experiment_full",
-                               "seestar_starless_stretch", "spcc_only", "quick_default"],
+                      choices=AUTOPROCESS_WORKFLOWS,
                       help="Processing workflow (default: seestar_broadband)")
     p_qa.add_argument("--experiment", action="store_true",
                       help="Run all variants per step, Claude picks best")
@@ -872,6 +896,7 @@ def main():
     commands = {
         "status": cmd_status,
         "mounts": cmd_mounts,
+        "doctor": cmd_doctor,
         "pipeline": cmd_pipeline,
         "stage": cmd_stage,
         "organize": cmd_organize,

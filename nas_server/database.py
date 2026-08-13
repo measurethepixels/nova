@@ -25,9 +25,11 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 10000")
+        conn.execute("PRAGMA journal_mode = WAL")
         yield conn
         conn.commit()
     finally:
@@ -1877,7 +1879,7 @@ def get_frames_by_target(target: str) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, target, date, file_name, file_path, exposure_time,
-                      exclude, fwhm, eccentricity, snr
+                      exclude, fwhm, eccentricity, snr, filter
                FROM light_files WHERE target=? ORDER BY date""",
             (target,),
         ).fetchall()
