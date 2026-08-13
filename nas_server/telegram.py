@@ -13,6 +13,8 @@ _token: str | None = None
 _chat_id: str | None = None
 _poll_thread: threading.Thread | None = None
 _poll_stop = threading.Event()
+_callback_handler: Callable[[dict], str] | None = None
+_approve_command_handler: Callable[[str], str | None] | None = None
 
 
 def configure(token: str, chat_id: str):
@@ -21,17 +23,84 @@ def configure(token: str, chat_id: str):
     _chat_id = chat_id
 
 
-def send(message: str) -> bool:
+def set_callback_handler(handler: Callable[[dict], str] | None) -> None:
+    """Register the function that turns a callback_query into an outcome string.
+
+    telegram.py is transport only — it authorizes the chat, dispatches an
+    authorized callback_query dict to `handler`, and always acknowledges +
+    edits the message with whatever outcome string `handler` returns. It does
+    not interpret `callback_data` itself. Pass None to unregister (an
+    unhandled callback_query is then safely ignored, not an error).
+    """
+    global _callback_handler
+    _callback_handler = handler
+
+
+def set_approve_command_handler(handler: Callable[[str], str | None] | None) -> None:
+    """Register the function that inspects an incoming text message for a
+    PR-approval command (issue #231's third design -- see
+    nas_server/telegram_pr_approval.py for why this exists as a distinct
+    text command rather than a native GitHub review or PR comment).
+
+    telegram.py stays transport only, same rule as set_callback_handler:
+    it dispatches every already-chat-authorized text message to `handler`
+    and does not itself decide what counts as an approval command. `handler`
+    returns None for text that isn't an approval command (the poll loop
+    then falls through to the normal chat agent, unchanged) or a reply
+    string to send back and skip the chat agent for that message. Pass
+    None to unregister.
+    """
+    global _approve_command_handler
+    _approve_command_handler = handler
+
+
+def send(message: str, reply_markup: dict | None = None) -> bool:
     if not _token or not _chat_id:
         return False
     url = f"https://api.telegram.org/bot{_token}/sendMessage"
-    payload = json.dumps({"chat_id": _chat_id, "text": message, "parse_mode": "HTML"}).encode()
+    body = {"chat_id": _chat_id, "text": message, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        body["reply_markup"] = reply_markup
+    payload = json.dumps(body).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
         urllib.request.urlopen(req, timeout=10)
         return True
     except Exception as e:
         logger.warning(f"Telegram send failed: {e}")
+        return False
+
+
+def answer_callback(callback_query_id: str, text: str = "") -> bool:
+    """Acknowledge a button tap (dismisses the client-side loading spinner)."""
+    if not _token:
+        return False
+    url = f"https://api.telegram.org/bot{_token}/answerCallbackQuery"
+    payload = json.dumps({"callback_query_id": callback_query_id, "text": text[:200]}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as e:
+        logger.warning(f"Telegram answerCallbackQuery failed: {e}")
+        return False
+
+
+def edit_message_text(chat_id, message_id, text: str) -> bool:
+    """Rewrite a sent message (used to strip its buttons and show the outcome)."""
+    if not _token:
+        return False
+    url = f"https://api.telegram.org/bot{_token}/editMessageText"
+    payload = json.dumps({
+        "chat_id": chat_id, "message_id": message_id,
+        "text": text, "parse_mode": "HTML",
+    }).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as e:
+        logger.warning(f"Telegram editMessageText failed: {e}")
         return False
 
 
@@ -189,6 +258,52 @@ def _download_file(file_id: str) -> bytes | None:
         return None
 
 
+def _handle_callback(callback: dict) -> None:
+    """Authorize, dispatch to the registered handler, and always close the loop.
+
+    Unauthorized chat or tapping user: acknowledged (clears the tapper's
+    spinner) but never dispatched. No registered handler: acknowledged and
+    silently ignored — not an error. A handler exception is caught so one bad
+    callback cannot kill the polling thread, matching the existing agent_fn
+    error handling below; only a generic outcome reaches Telegram — the raw
+    exception is logged server-side only, since it could otherwise leak
+    internals or contain characters that break HTML-mode message editing.
+    """
+    callback_id = callback.get("id", "")
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    tapper = callback.get("from") or {}
+    # In a private bot chat, chat.id == the other party's user id — checking
+    # both isn't redundant: it makes explicit that the *tapping user*, not
+    # just the chat, must be the authorized one.
+    if str(chat.get("id", "")) != str(_chat_id) or str(tapper.get("id", "")) != str(_chat_id):
+        logger.warning(
+            "[telegram] ignoring callback from unauthorized chat=%s from=%s",
+            chat.get("id"), tapper.get("id"),
+        )
+        answer_callback(callback_id, "Not authorized.")
+        return
+
+    handler = _callback_handler
+    if handler is None:
+        answer_callback(callback_id)
+        return
+
+    try:
+        outcome = handler(callback)
+    except Exception:
+        outcome = "Sorry, something went wrong handling that."
+        logger.exception("[telegram] callback handler error")
+
+    answer_callback(callback_id, outcome)
+    message_id = message.get("message_id")
+    if message_id:
+        edit_message_text(
+            chat["id"], message_id,
+            (message.get("text", "") + "\n— " + outcome),
+        )
+
+
 def _poll_loop(agent_fn: Callable[[str, str | None], str]) -> None:
     """Background polling loop — calls agent_fn for each incoming message."""
     last_update_id = 0
@@ -199,7 +314,7 @@ def _poll_loop(agent_fn: Callable[[str, str | None], str]) -> None:
         data = _tg_get("getUpdates", {
             "offset": last_update_id + 1,
             "timeout": 25,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         })
         if not data or not data.get("ok"):
             _poll_stop.wait(5)
@@ -208,6 +323,12 @@ def _poll_loop(agent_fn: Callable[[str, str | None], str]) -> None:
             uid = update.get("update_id", 0)
             if uid > last_update_id:
                 last_update_id = uid
+
+            callback = update.get("callback_query")
+            if callback is not None:
+                _handle_callback(callback)
+                continue
+
             msg = update.get("message", {})
             chat = msg.get("chat", {})
             # Only respond to the configured chat
@@ -229,6 +350,12 @@ def _poll_loop(agent_fn: Callable[[str, str | None], str]) -> None:
 
             if not text and not image_b64:
                 continue
+
+            if image_b64 is None and _approve_command_handler is not None:
+                approve_reply = _approve_command_handler(text)
+                if approve_reply is not None:
+                    send(approve_reply)
+                    continue
 
             logger.info(f"[telegram] incoming: {text[:80]!r}")
             try:

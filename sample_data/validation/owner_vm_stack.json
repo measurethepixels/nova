@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "run_date": "2026-08-10",
+  "scope": "candidate sample viability only; not clean-room or end-to-end proof",
+  "environment": {
+    "siril": "1.4.3",
+    "python": "3.12",
+    "machine_class": "NOVA owner VM"
+  },
+  "input": {
+    "target": "M 42",
+    "frames": 12,
+    "exposure_s_each": 10.0,
+    "total_exposure_s": 120.0
+  },
+  "registration": {
+    "platesolved": 12,
+    "attempted": 12,
+    "registered": 12
+  },
+  "stack": {
+    "engine": "Siril",
+    "combination": "average",
+    "normalization": "additive plus scaling",
+    "rejection": "winsorized sigma clipping",
+    "result_written": true
+  },
+  "stack_metrics": {
+    "snr": 48.33838803709561,
+    "fwhm_px": 3.25000975728035,
+    "background": 0.0018191718263551593
+  },
+  "limits": [
+    "The auto-process stage was not run, so this is not a golden final baseline.",
+    "This VM is not a clean machine.",
+    "No second-hardware tolerance evidence exists yet."
+  ]
+}

@@ -7,10 +7,12 @@ Current jobs:
 """
 
 import logging
+import sqlite3
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from nas_server.config import settings
 from nas_server import database
+from nas_server.db_error_reporting import report_sqlite_error
 
 log = logging.getLogger(__name__)
 
@@ -78,58 +80,10 @@ def hourly_scan():
         log.error(f"Processed-folder scan failed during hourly scan: {e}")
 
 
-# 7Timer cloudcover index → approximate midpoint %
-_CLOUD_PCT = {1: 3, 2: 13, 3: 25, 4: 38, 5: 50, 6: 63, 7: 75, 8: 88, 9: 97}
-# 7Timer wind10m speed index → label
-_WIND_LABEL = {
-    1: "calm", 2: "light", 3: "gentle", 4: "moderate",
-    5: "fresh", 6: "strong", 7: "near-gale", 8: "storm",
-}
-_PREC_LABEL = {"none": None, "rain": "rain", "snow": "snow", "frzr": "freezing rain", "icep": "sleet"}
-
-
 def _get_weather(lat: float, lon: float) -> tuple[bool, str]:
-    """Return (is_clear, summary_str).
-    is_clear=True → proceed with plan. Fails open on API error."""
-    import urllib.request
-    import json as _json
-    url = (f"http://www.7timer.info/bin/api.pl"
-           f"?lon={lon}&lat={lat}&product=astro&output=json")
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = _json.loads(resp.read())
-        series = data["dataseries"][:3]  # next 9 hrs (3h steps)
-
-        clouds = [d.get("cloudcover", 1) for d in series]
-        avg_cloud = sum(clouds) / len(clouds)
-        cloud_pct = _CLOUD_PCT.get(round(avg_cloud), int(avg_cloud * 11))
-
-        winds = [d.get("wind10m", {}).get("speed", 1) for d in series]
-        max_wind = max(winds)
-        wind_label = _WIND_LABEL.get(max_wind, f"speed {max_wind}")
-
-        prec_types = [d.get("prec_type", "none") for d in series]
-        prec = next((p for p in prec_types if p != "none"), "none")
-        prec_label = _PREC_LABEL.get(prec)
-
-        lifted = [d.get("lifted_index", 10) for d in series]
-        unstable = min(lifted) < -2
-
-        parts = [f"{cloud_pct}% clouds"]
-        if max_wind >= 5:
-            parts.append(f"{wind_label} winds")
-        if prec_label:
-            parts.append(prec_label)
-        if unstable:
-            parts.append("unstable air")
-        summary = " · ".join(parts)
-
-        is_clear = avg_cloud < 4.0
-        log.info(f"[scheduler] 7Timer: {summary} (avg_cloud={avg_cloud:.1f}, clear={is_clear})")
-        return is_clear, summary
-    except Exception as e:
-        log.warning(f"[scheduler] weather check failed (fail-open): {e}")
-        return True, ""
+    """Compatibility wrapper for the shared observing-night forecast."""
+    from nas_server.weather_forecast import get_tonight_weather
+    return get_tonight_weather(lat, lon)
 
 
 def _generate_plan_chart(results: list, schedule: list, date_str: str) -> bytes | None:
@@ -496,6 +450,17 @@ def _morning_plan():
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         _stack_calibration_masters(since_date=yesterday)
+    except sqlite3.Error as e:
+        report_sqlite_error(
+            log,
+            context="morning calibration-master job",
+            error=e,
+            consequence=(
+                "Calibration-master registration did not complete; the morning "
+                "job will try again on its next run."
+            ),
+            notify=True,
+        )
     except Exception as e:
         log.warning(f"[morning_plan] calibration master stacking failed: {e}")
     try:

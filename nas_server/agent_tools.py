@@ -462,53 +462,23 @@ def get_target_context(target: str) -> dict:
     return result
 
 
-_CLOUD_PCT = {1: 3, 2: 13, 3: 25, 4: 38, 5: 50, 6: 63, 7: 75, 8: 88, 9: 97}
-_WIND_LABEL = {1: "calm", 2: "light", 3: "gentle", 4: "moderate",
-               5: "fresh", 6: "strong", 7: "near-gale", 8: "storm"}
-_PREC_LABEL = {"rain": "rain", "snow": "snow", "frzr": "freezing rain", "icep": "sleet"}
-
-
 def _check_weather(lat: float, lon: float) -> tuple[bool, str]:
-    """Standalone 7Timer weather check — no APScheduler dependency."""
-    import urllib.request
-    import json as _json
-    url = (f"http://www.7timer.info/bin/api.pl"
-           f"?lon={lon}&lat={lat}&product=astro&output=json")
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = _json.loads(resp.read())
-        series = data["dataseries"][:3]
-        clouds = [d.get("cloudcover", 1) for d in series]
-        avg_cloud = sum(clouds) / len(clouds)
-        cloud_pct = _CLOUD_PCT.get(round(avg_cloud), int(avg_cloud * 11))
-        max_wind = max(d.get("wind10m", {}).get("speed", 1) for d in series)
-        wind_label = _WIND_LABEL.get(max_wind, f"speed {max_wind}")
-        prec_types = [d.get("prec_type", "none") for d in series]
-        prec = next((p for p in prec_types if p != "none"), "none")
-        prec_label = _PREC_LABEL.get(prec)
-        unstable = min(d.get("lifted_index", 10) for d in series) < -2
-        parts = [f"{cloud_pct}% clouds"]
-        if max_wind >= 5:
-            parts.append(f"{wind_label} winds")
-        if prec_label:
-            parts.append(prec_label)
-        if unstable:
-            parts.append("unstable air")
-        return avg_cloud < 4.0, " · ".join(parts)
-    except Exception as e:
-        log.warning(f"[agent] weather check failed (fail-open): {e}")
-        return True, ""
+    """Shared observing-night weather check; independent of APScheduler."""
+    from nas_server.weather_forecast import get_tonight_weather
+    return get_tonight_weather(lat, lon)
 
 
 def get_tonight_plan() -> dict:
     """Weather forecast + computed observing schedule for tonight."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from nas_server.config import settings
 
     lat = settings.get("observer_lat", 33.18296)
     lon = settings.get("observer_lon", -111.57295)
     elevation = settings.get("observer_elevation_m", 440)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # The observing date is the site's/local calendar date, not UTC (Arizona is
+    # already on the next UTC date during the evening observing window).
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
 
     result: dict = {}
 

@@ -10,6 +10,15 @@ from pathlib import Path
 from datetime import datetime
 
 from nas_server import telegram
+from nas_server.stack_config import (
+    STACK_CONFIG_DEFAULTS,
+    _round_field,
+    _target_forces_max_framing,
+    resolve_effective_framing,
+    _stack_config_tokens,
+    make_processed_filename,
+    _move_with_overwrite_warning,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +54,6 @@ REGISTER_SCRIPT_PATH_MF_NOPS_HERO = Path(__file__).parent / "seestar_register_ma
 # Stack-only SSFs — used by two-phase Siril engine after register SSF completes.
 STACK_ONLY_SCRIPT_PATH = Path(__file__).parent / "seestar_stack_only.ssf"
 STACK_ONLY_SCRIPT_PATH_MAXFRAMING = Path(__file__).parent / "seestar_stack_only_maxframing.ssf"
-
-
-def make_processed_filename(target: str, obs_date: str | None, total_secs: float | None,
-                             temp_c: float | None, tool: str, step: str, ext: str) -> str:
-    """Generate a standardized processed filename.
-    Example: C_77_20260419_6510s_0C_siril_stack.fit
-    """
-    safe = target.replace(" ", "_").replace("/", "_")
-    date = obs_date[:8] if obs_date and len(obs_date) >= 8 else "unknown"
-    integ = f"{int(round(total_secs))}s" if total_secs else "0s"
-    temp = f"{int(round(temp_c))}C" if temp_c is not None else "nC"
-    return f"{safe}_{date}_{integ}_{temp}_{tool}_{step}.{ext}"
 
 
 def _read_first_frame_meta(work_light: Path) -> dict:
@@ -329,6 +326,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                  hero: bool = False, drizzle: bool = False,
                  exptime: int | None = None,
                  eq_only: bool = True,
+                 filter_name: str | None = "auto",
                  ecc_threshold: float = 0.66,
                  sky_level_factor: float = 3.0,
                  gradient_threshold: float = 0.5) -> dict:
@@ -726,6 +724,46 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         with ThreadPoolExecutor(max_workers=8) as _pool:
             list(_pool.map(_copy_frame, indexed))
 
+        # --- Phase 1a: pre-EQ location-spoof correction ------------------------
+        # Pre-EQ alt-az captures on southern (Dec<0) targets carry a FAKE header
+        # RA/DEC (the ALP location spoof — see [[project-pre-eq-location-spoof]]).
+        # seqplatesolve seeds its per-frame Gaia search from that header; a wrong
+        # hint forces a huge-radius blind-ish search (up to ~297k stars fetched
+        # PER FRAME) that still fails. SH 2-298, 2026-07-19: 3717/3717 frames
+        # failed to solve over 8h, Dec off by 22°. Fix: if the target's catalog
+        # position disagrees with a sample frame's header by >3°, rewrite RA/DEC
+        # on every copied frame to the catalog truth BEFORE Siril ever sees them.
+        # Validated: 9-frame test set went from unsolvable to 9/9 solved in 1.3s
+        # (fetch collapsed 297k -> 2.3k stars once the hint pointed at real sky).
+        try:
+            from astropy.io import fits as _sfits
+            with _db_conn() as _c:
+                _cat = _c.execute("SELECT ra, dec FROM targets WHERE target=?",
+                                  (target_name,)).fetchone()
+            if _cat and _cat[0] is not None and indexed:
+                _cra, _cdec = float(_cat[0]), float(_cat[1])
+                _sample_hdr = _sfits.getheader(str(indexed[0][1]), memmap=False)
+                _hra, _hdec = _sample_hdr.get("RA"), _sample_hdr.get("DEC")
+                _mismatch = (_hra is None or _hdec is None or
+                            abs(float(_hdec) - _cdec) > 3.0 or
+                            min(abs(float(_hra) - _cra), 360 - abs(float(_hra) - _cra)) > 3.0)
+                if _mismatch:
+                    logger.warning(
+                        f"[stack] {target_name}: header pointing "
+                        f"({_hra}/{_hdec}) disagrees with catalog "
+                        f"({_cra:.3f}/{_cdec:.3f}) by >3° — pre-EQ spoof correction: "
+                        f"rewriting RA/DEC on {len(indexed)} frames")
+                    for _src, _dest in indexed:
+                        try:
+                            with _sfits.open(str(_dest), mode="update", memmap=False) as _hh:
+                                _hh[0].header["RA"] = _cra
+                                _hh[0].header["DEC"] = _cdec
+                                _hh.flush()
+                        except Exception:
+                            pass
+        except Exception as _spe:
+            logger.warning(f"[stack] {target_name}: pre-EQ spoof check failed ({_spe})")
+
         # --- Phase 1b: Calibrate NINA raw frames ---
         # Frames with source='nina' are raw CFA; subtract dark + divide flat before Siril runs.
         # seestar_app frames are already calibrated by the SeeStar firmware — skip them.
@@ -1101,13 +1139,21 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         # "No such file or directory" after a full stack run. See database alias.
         processed_dir.mkdir(parents=True, exist_ok=True)
 
+        _cfg_tokens = _stack_config_tokens({
+            "engine": engine, "cull": cull, "bottom_pct": bottom_pct,
+            "min_stars": min_stars, "fast": fast, "framing": framing,
+            "hero": hero, "drizzle": drizzle, "exptime": exptime,
+            "eq_only": eq_only, "filter_name": filter_name,
+            "ecc_threshold": ecc_threshold, "sky_level_factor": sky_level_factor,
+            "gradient_threshold": gradient_threshold,
+        })
         stack_name = make_processed_filename(
             target_name, obs_date, total_integration, sensor_temp,
-            tool_label, "stack", "fit"
+            tool_label, "stack", "fit", config_tokens=_cfg_tokens
         )
         preview_name = make_processed_filename(
             target_name, obs_date, total_integration, sensor_temp,
-            tool_label, "stack", "jpg"
+            tool_label, "stack", "jpg", config_tokens=_cfg_tokens
         )
 
         result_fit = work_dir / "result.fit"
@@ -1192,11 +1238,11 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         out_jpg = processed_dir / preview_name
 
         if result_fit.exists():
-            shutil.move(str(result_fit), str(out_fit))
+            _move_with_overwrite_warning(result_fit, out_fit, target_name, "stack output")
         else:
             return {"success": False, "error": "Siril produced no result.fit"}
         if preview_jpg.exists():
-            shutil.move(str(preview_jpg), str(out_jpg))
+            _move_with_overwrite_warning(preview_jpg, out_jpg, target_name, "preview output")
 
         # Embed integration metadata into the stack header for every engine. Siril
         # writes STACKCNT/LIVETIME natively, but SASpro (Image MM) and PI stacks do

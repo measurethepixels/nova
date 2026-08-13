@@ -260,7 +260,7 @@ async function toggleList(btn, t, list) {{
 
 
 # ---------------------------------------------------------------------------
-# Manual processing — Henry's hand-processed PixInsight exports
+# Manual processing — Jeff's hand-processed PixInsight exports
 # ---------------------------------------------------------------------------
 
 def _manual_recipe_html(flow: list[dict], n_steps: int, summary: str | None) -> str:
@@ -287,7 +287,7 @@ def _manual_recipe_html(flow: list[dict], n_steps: int, summary: str | None) -> 
 
 def manual_processing_page() -> str:
     """Review queue: folders that may hold a hand-processed final, plus the
-    finals Henry has already flagged (with Claude grades)."""
+    finals Jeff has already flagged (with Claude grades)."""
     import json as _json
     from nas_server.database import list_manual_runs, reviewed_folder_status
     from nas_server.manual_capture import candidate_targets
@@ -426,7 +426,7 @@ async function reopenFolder(btn, target) {{
 
 
 def manual_folder_page(target: str) -> str:
-    """Review one folder: show candidate files, let Henry flag one or more finals
+    """Review one folder: show candidate files, let Jeff flag one or more finals
     (e.g. an RGB and an HSO version), then finish the folder."""
     from nas_server.manual_capture import folder_candidates
     from nas_server.database import list_manual_runs
@@ -475,7 +475,7 @@ def manual_folder_page(target: str) -> str:
         grid = ('<p style="color:var(--text2)">No candidate files in this folder. '
                 'Skip it to clear it from the queue.</p>')
 
-    # Strip of finals already flagged for this folder (lets Henry flag several —
+    # Strip of finals already flagged for this folder (lets Jeff flag several —
     # e.g. an RGB and an HSO version — before finishing the folder).
     flagged_strip = ""
     if flagged:
@@ -681,7 +681,7 @@ async function unflagFinal(runId) {{
 
 
 def gallery_page() -> str:
-    """Ranked gallery of best finals — auto-pipeline best runs plus Henry's
+    """Ranked gallery of best finals — auto-pipeline best runs plus Jeff's
     hand-processed manual finals (tagged 'manual')."""
     from nas_server.database import get_worklist, list_manual_runs
     from nas_server.folio_generator import get_hero
@@ -711,7 +711,7 @@ def gallery_page() -> str:
             "report_url": f"/report/{_q(t)}/{run_id}",
         })
 
-    # Manual finals: Henry's hand-processed exports, graded the same way.
+    # Manual finals: Jeff's hand-processed exports, graded the same way.
     for m in list_manual_runs():
         if m.get("claude_score") is None:
             continue
@@ -742,7 +742,7 @@ def gallery_page() -> str:
         score = (_score_pill(it["score"]) if it["score"] is not None
                  else '<span style="color:var(--text2)">—</span>')
         if it["manual"]:
-            tag = ('<span title="hand-processed by Henry" style="margin-left:.3rem;color:#bc8cff;'
+            tag = ('<span title="hand-processed by Jeff" style="margin-left:.3rem;color:#bc8cff;'
                    'font-size:.7rem;border:1px solid #bc8cff;border-radius:3px;padding:0 4px">manual</span>')
         else:
             tag = ('<span title="hand-picked hero" style="margin-left:.3rem">★</span>'

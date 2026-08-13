@@ -47,12 +47,14 @@ Both watchers reuse the same stability-loop pattern as watcher.py.
 
 import logging
 import os
+import sqlite3
 import time
 import threading
 from pathlib import Path
 
 from nas_server.config import settings
 from nas_server import telegram
+from nas_server.db_error_reporting import report_sqlite_error
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +128,17 @@ def _register_nina_lights(target_folder: str, target_name: str) -> int:
                         (fpath,),
                     )
                 count += 1
+            except sqlite3.Error as e:
+                report_sqlite_error(
+                    log,
+                    context="NINA light registration",
+                    error=e,
+                    consequence=(
+                        "One captured light frame was not registered and may be "
+                        "missing from later processing."
+                    ),
+                    notify=True,
+                )
             except Exception as e:
                 log.warning(f"[nina_watcher] could not register {fpath}: {e}")
     return count
@@ -298,6 +311,17 @@ def _cal_stability_loop(pending: set, stop: threading.Event) -> None:
                 log.info(f"[nina_watcher] calibration stable: {folder}")
                 try:
                     _process_calibration_folder(folder)
+                except sqlite3.Error as e:
+                    report_sqlite_error(
+                        log,
+                        context="NINA calibration registration",
+                        error=e,
+                        consequence=(
+                            "The calibration folder was not fully registered; "
+                            "inspect it before relying on its frames."
+                        ),
+                        notify=True,
+                    )
                 except Exception as e:
                     log.error(f"[nina_watcher] calibration processing failed: {e}")
 

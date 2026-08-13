@@ -4280,9 +4280,67 @@ def spcc(
                        "— ASTAP pre-solve on temp copy")
         try:
             import shutil as _sh
+            from astropy.io import fits as _pf
             _solved = Path(output_path).parent / "_spcc_astap_solved.fit"
             _sh.copy2(str(input_path), str(_solved))
-            _as = astap_solve(_solved)
+            # Catalog position hint (1.24.4): headerless intermediates give ASTAP
+            # nothing to anchor on; the targets table knows where we pointed.
+            _w_px = None
+            try:
+                with _pf.open(str(_solved), mode="update", memmap=False) as _hh:
+                    _w_px = int(_hh[0].header.get("NAXIS1") or 0)
+                    if target:
+                        import sqlite3 as _sq
+                        _db = _sq.connect(_cfg_settings.get(
+                            "db_path", str(Path.home() / "seestar_database" / "astro_data.db")))
+                        _row = _db.execute("SELECT ra, dec FROM targets WHERE target=?",
+                                           (target,)).fetchone()
+                        _db.close()
+                        if _row and _row[0] is not None:
+                            _hra = _hh[0].header.get("RA")
+                            _hdec = _hh[0].header.get("DEC")
+                            # Catalog OVERRIDES the header when they grossly disagree:
+                            # pre-EQ southern captures carry FAKE RA/DEC (ALP location
+                            # spoof — see pre-EQ-location-spoof notes). SH 2-298's
+                            # header said Dec +9 for a Dec −13 target; a 15° search
+                            # around a lie finds nothing.
+                            _mismatch = (_hra is None or _hdec is None or
+                                         abs(float(_hdec) - float(_row[1])) > 3.0 or
+                                         min(abs(float(_hra) - float(_row[0])),
+                                             360 - abs(float(_hra) - float(_row[0]))) > 3.0)
+                            if _mismatch:
+                                _hh[0].header["RA"] = float(_row[0])
+                                _hh[0].header["DEC"] = float(_row[1])
+                                _hh.flush()
+                                logger.info(
+                                    f"[seti_astro] pre-solve: catalog position "
+                                    f"{_row[0]:.3f}/{_row[1]:.3f} written "
+                                    f"(header said {_hra}/{_hdec}"
+                                    + (" — pre-EQ spoof override)" if _hra is not None
+                                       else " — absent)"))
+            except Exception as _he:
+                logger.warning(f"[seti_astro] pre-solve hint write failed ({_he})")
+            # Scale ladder (1.24.4, corrected 1.24.6): ASTAP's -fov is field
+            # HEIGHT (NAXIS2 × scale — same convention as the 1.16.2 ingest
+            # derivation). 1.24.4 used width, so the native rung failed and the
+            # solve only landed via coincidental arithmetic on portrait crops
+            # (Henry caught it: "framing mode doesn't change pixel scale").
+            # Rungs cover native 2.39, drizzled 1.19, and binned/legacy 4.78 "/px.
+            _as = {"ok": False}
+            try:
+                _h_px = int(_pf.getheader(str(_solved), memmap=False).get("NAXIS2") or 0)
+            except Exception:
+                _h_px = 0
+            if _h_px:
+                for _scale in (2.39, 1.19, 4.78):
+                    _fov = _h_px * _scale / 3600.0
+                    _as = astap_solve(_solved, fov_deg=_fov, search_deg=15)
+                    if _as.get("ok"):
+                        logger.info(f"[seti_astro] pre-solve hit at {_scale}\"/px "
+                                    f"(fov {_fov:.2f} deg)")
+                        break
+            if not _as.get("ok"):
+                _as = astap_solve(_solved)          # last resort: default/blind
             _s2 = _wcs_scale_arcsec(_solved)
             if _as.get("ok") and _s2 and 0.3 < _s2 < 30.0:
                 logger.info(f"[seti_astro] ASTAP pre-solve OK ({_s2:.2f}\"/px) — "
