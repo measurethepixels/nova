@@ -26,7 +26,13 @@ import json
 from pathlib import Path
 
 from nas_server.safe_path import UnsafePathError, safe_resolve
-from nas_server.workflow_docs import STEP_DOCS, PI_MANUAL
+from nas_server.workflow_docs import (
+    COMPARISON_SLIDER_CSS,
+    COMPARISON_SLIDER_JS,
+    PI_MANUAL,
+    STEP_DOCS,
+    comparison_slider,
+)
 
 # ── Siril manual recipe per step ─────────────────────────────────────────────
 SIRIL_MANUAL = {
@@ -158,16 +164,23 @@ SASPRO_MANUAL = {
         "</ol>"
     ),
     "background_extraction": (
-        "<b>ABE — Automatic Background Extraction.</b><ol>"
-        "<li>Run ABE on the linear stack; it fits a polynomial + RBF model and subtracts "
-        "it. Increase the sample count on busy fields.</li>"
-        "<li>This is the SASpro tool the pipeline uses for gradient removal.</li>"
+        "<b>ADBE — Automatic Dynamic Background Extraction.</b><ol>"
+        "<li>Run ADBE on the cropped linear image. Choose polynomial complexity and "
+        "optional RBF correction from the gradient actually present; there is no "
+        "target-specific universal preset.</li>"
+        "<li>Save and inspect the background model. Compare representative sky regions "
+        "and extended target structure before accepting the subtraction.</li>"
         "</ol>"
     ),
     "color_calibration": (
-        "<b>SASpro has no SPCC.</b> Use its <i>White Balance / Background Neutralization</i> "
-        "for a quick balance, or do photometric color calibration in PixInsight/Siril, then "
-        "return to SASpro for stretching."
+        "<b>SSSC — Seti Astro Spectral Calibration.</b><ol>"
+        "<li>Run SSSC on a linear, plate-solved color image and record the Gaia-XP "
+        "matches, response solution, coefficients, and any fallback.</li>"
+        "<li>Treat it as a related physical calibration path, not as the identical SPCC "
+        "process. Too few spectrum-bearing stars can force a reduced solution or fallback.</li>"
+        "<li>If the field cannot support a stable solution, repair the astrometry, use a "
+        "validated SPCC path in PixInsight or Siril, or record the fallback explicitly.</li>"
+        "</ol>"
     ),
     "deconvolution": (
         "<b>Cosmic Clarity — Sharpen.</b><ol>"
@@ -225,13 +238,28 @@ SASPRO_MANUAL = {
         "<i>Screen</i> blend mode to lay the stars back over the galaxy without clipping.</li>"
         "</ol>"
     ),
-    # steps SASpro doesn't really cover — honest pointers
+    # Steps that need explicit cross-tool limits or conditional handling.
     "crop": "<b>Not a SASpro step.</b> Crop in Siril or PixInsight before you bring the "
             "stack into SASpro for stretching.",
-    "remove_pedestal": "<b>Not a SASpro step.</b> Handle the pedestal at calibration "
-                       "(Siril/PI) — SASpro assumes a clean linear stack.",
-    "cosmetic_correction": "<b>Not a SASpro step.</b> Cosmetic/hot-pixel repair belongs at "
-                           "calibration in Siril or PixInsight.",
+    "remove_pedestal": (
+        "<b>Pedestal Removal — conditional.</b><ol>"
+        "<li>Use only when calibration provenance independently establishes a residual "
+        "offset in each channel; a positive image minimum is not enough.</li>"
+        "<li>SASpro subtracts each channel's minimum and has no adjustable amount. "
+        "Record the minima first, then compare clipping, channel statistics, and color.</li>"
+        "<li>Otherwise skip this step. Undo if a cold pixel or real sky signal set the "
+        "subtraction, or if channel balance changes.</li>"
+        "</ol>"
+    ),
+    "cosmetic_correction": (
+        "<b>Stacking Suite — Cosmetic Correction.</b><ol>"
+        "<li>Enable it while calibrating light frames, before registration and integration.</li>"
+        "<li>Match the input state: use Bayer-aware correction for undebayered CFA data; "
+        "use the debayered/mono path only for matching inputs.</li>"
+        "<li>Start with Hot σ 5.0 and Cold σ 5.0, then inspect corrected frames and a "
+        "difference image. Raise the relevant threshold if star cores or compact detail change.</li>"
+        "</ol>"
+    ),
     "sky_mute": "<b>No dedicated tool.</b> Use a mask + Curves to pull the background down "
                 "while protecting the galaxy.",
 }
@@ -247,7 +275,13 @@ def _params_str(params: dict | None) -> str:
     return ", ".join(parts)
 
 
-def _step_block(step_key: str, variant: str | None, params: dict | None) -> str:
+def _step_block(
+    step_key: str,
+    variant: str | None,
+    params: dict | None,
+    *,
+    comparison_html: str = "",
+) -> str:
     doc = STEP_DOCS.get(step_key, {})
     title = doc.get("title") or step_key.replace("_", " ").title()
     what = doc.get("what", "")
@@ -273,9 +307,97 @@ def _step_block(step_key: str, variant: str | None, params: dict | None) -> str:
         f'<h3>{html.escape(title)}{variant_tag}</h3>'
         f'<p class="what">{what}</p>'
         f'{settings_row}'
+        f'{comparison_html}'
         f'<div class="tools"><div class="ttabs">{"".join(tabs)}</div>'
         f'{"".join(panes)}</div>'
         f'</div>'
+    )
+
+
+# Old runs did not write preview_before/preview_after onto every step record,
+# but they did preserve these named checkpoints. Each fallback is a pair of
+# persisted run artifacts from immediately before and after that one operation.
+# Do not add a pair here when the output folds in another step: an honest gap is
+# better evidence than a visually plausible reconstruction.
+_LEGACY_COMPARISON_FILES = {
+    "denoise_linear": (
+        "auto_preview_deconvolution_a0.jpg",
+        "auto_preview_denoise_linear_vframe.jpg",
+    ),
+    "star_sharpen": (
+        "auto_preview_denoise_linear_vframe.jpg",
+        "auto_preview_star_sharpen_vframe.jpg",
+    ),
+    "remove_stars_linear": (
+        "auto_preview_star_sharpen_vframe.jpg",
+        "auto_preview_starless_vframe.jpg",
+    ),
+    "stretch": ("auto_preview_pre_stretch.jpg", "auto_stretch_mas_preview.jpg"),
+    "curves": (
+        "auto_preview_color_boost_a0.jpg",
+        "auto_preview_curves_vframe.jpg",
+    ),
+    "combine_stars_screen": (
+        "auto_preview_curves_vframe.jpg",
+        "auto_preview_combined.jpg",
+    ),
+}
+
+
+def _resolve_preview(run_dir: Path, recorded_name: str | None) -> Path | None:
+    """Resolve a run-local JPEG, including numbered post-run filenames."""
+    if not recorded_name:
+        return None
+    name = Path(recorded_name)
+    if name.name != recorded_name or name.suffix.lower() not in {".jpg", ".jpeg"}:
+        return None
+    direct = run_dir / name
+    if direct.is_file():
+        return direct
+    numbered = sorted(run_dir.glob(f"*_{name.name}"))
+    return numbered[0] if len(numbered) == 1 and numbered[0].is_file() else None
+
+
+def recipe_comparison_sources(run_dir: str | Path) -> dict[str, tuple[Path, Path]]:
+    """Return only genuine, persisted before/after pairs for applied steps."""
+    run_dir = Path(run_dir)
+    data = json.loads((run_dir / "run.log").read_text())
+    records = {
+        record.get("step"): record
+        for record in data.get("step_records", [])
+        if record.get("step")
+    }
+    pairs: dict[str, tuple[Path, Path]] = {}
+    for applied in data.get("steps_applied", []):
+        step, _ = _parse_applied(applied)
+        record = records.get(step, {})
+        names = (record.get("preview_before"), record.get("preview_after"))
+        if not all(names):
+            names = _LEGACY_COMPARISON_FILES.get(step, (None, None))
+        before = _resolve_preview(run_dir, names[0])
+        after = _resolve_preview(run_dir, names[1])
+        if before and after:
+            pairs[step] = (before, after)
+    return pairs
+
+
+def _comparison_html(step_key: str, base_url: str | None, available: set[str]) -> str:
+    if base_url is None:
+        return ""
+    if step_key in available:
+        return (
+            '<div class="step-comparison"><h4>NOVA evidence</h4>'
+            + comparison_slider(
+                step_key,
+                f"{step_key.replace('_', ' ')} in this recorded run",
+                base_url=base_url,
+            )
+            + "</div>"
+        )
+    return (
+        '<div class="comparison-missing"><b>Comparison not recorded.</b> '
+        "This run did not preserve a separate before-and-after preview for this step."
+        "</div>"
     )
 
 
@@ -325,7 +447,7 @@ def _guard_corrections_html(step_records: list[dict]) -> str:
     )
 
 
-def render_recipe_body(run_dir: str | Path) -> dict:
+def render_recipe_body(run_dir: str | Path, *, comparison_base_url: str | None = None) -> dict:
     """Return {'target','workflow','version','score','html'} for one run dir."""
     run_dir = Path(run_dir)
     j = json.loads((run_dir / "run.log").read_text())
@@ -335,10 +457,20 @@ def render_recipe_body(run_dir: str | Path) -> dict:
                       for r in step_records if r.get("step")}
     final = (j.get("final_scores") or {}).get("overall")
 
+    available_comparisons = set(recipe_comparison_sources(run_dir))
     cards = []
     for s in j.get("steps_applied", []):
         key, var = _parse_applied(s)
-        cards.append(_step_block(key, var, params_by_step.get(key)))
+        cards.append(
+            _step_block(
+                key,
+                var,
+                params_by_step.get(key),
+                comparison_html=_comparison_html(
+                    key, comparison_base_url, available_comparisons
+                ),
+            )
+        )
 
     body = (
         f'<div class="prose"><h2>{html.escape(target)} — how NOVA processed it</h2>'
@@ -425,6 +557,10 @@ RECIPE_CSS = """
 .step-card .what{margin:.2rem 0 .6rem;opacity:.85;font-size:.93rem}
 .step-card .settings{font-size:.85rem;margin-bottom:10px}
 .step-card .settings code{background:rgba(88,166,255,.12);padding:2px 6px;border-radius:5px}
+.step-comparison{margin:1rem 0 1.2rem}
+.step-comparison h4{margin:0 0 .45rem;font-size:.7rem;letter-spacing:.06em;text-transform:uppercase}
+.comparison-missing{margin:1rem 0 1.2rem;border:1px solid rgba(128,128,128,.25);
+  padding:.75rem .85rem;font-size:.85rem;opacity:.8}
 .tools .ttabs{display:flex;gap:4px;margin-bottom:8px}
 .ttab{background:rgba(128,128,128,.12);border:1px solid rgba(128,128,128,.3);
   color:inherit;padding:5px 12px;border-radius:7px 7px 0 0;cursor:pointer;font-size:.85rem}
@@ -435,7 +571,7 @@ RECIPE_CSS = """
 .tpane ol{margin:.3rem 0 .3rem 1.1rem}.tpane li{margin:.25rem 0}
 .tpane code{background:rgba(128,128,128,.2);padding:1px 5px;border-radius:4px}
 .prose .sub{opacity:.8}
-"""
+""" + COMPARISON_SLIDER_CSS
 
 RECIPE_JS = """
 document.querySelectorAll('.ttab').forEach(b=>b.addEventListener('click',()=>{
@@ -445,4 +581,4 @@ document.querySelectorAll('.ttab').forEach(b=>b.addEventListener('click',()=>{
   b.classList.add('active');
   document.getElementById(b.dataset.t).classList.add('active');
 }));
-"""
+""" + COMPARISON_SLIDER_JS

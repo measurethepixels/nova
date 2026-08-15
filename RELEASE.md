@@ -1,6 +1,6 @@
 # Release provenance
 
-Source revision: `0e4886a7f514386f7a6b5f7cf261332778e9db8b`
+Source revision: `880e7536a4c27d279c504582e71f69b14816c04b`
 
 This tree passed the export scrub scan and its generated files are listed in `SHA256SUMS`. A Git tag is a separate publication decision: tag only the public commit whose CI smoke check is green.
 

@@ -48,7 +48,7 @@ are).
 
 | Tool | Status | Enables | Without it |
 |---|---|---|---|
-| Siril (`siril-cli`) | **required (free)** | registration + stacking | no pipeline |
+| Siril (`siril-cli`) **≥ 1.4.3** | **required (free)** | registration + stacking | no pipeline |
 | ASTAP + star DB | **required (free)** | plate solving, WCS | no solving/framing |
 | GraXpert | **strongly recommended (free)** | background extraction | gradient removal degraded |
 | Python stack (`requirements.txt`) | **required** | everything | — |
@@ -64,6 +64,15 @@ arsenal and a second stacking engine, all free. Configure what exists; make miss
 cleanly* rather than crash. If you find a step that crashes on a missing optional
 binary, that is a bug worth fixing — but fix it as a capability gate, not by
 deleting the step.
+
+**Siril version requirement:** use Siril **1.4.3 or newer** and confirm with
+`siril-cli --version` before stacking. Siril 1.4.3 fixed the headless
+`seqplatesolve` failure present in 1.4.2; Clean Codespace Trial 1 validated the
+public sample with official Siril 1.4.4. Ubuntu 24.04's default `apt` package
+installed Siril 1.2.1 during that trial and is too old for this workflow. If the
+distribution package is below 1.4.3, install a current official 1.4.x build and
+put its `siril-cli` first on `PATH`; do not treat a successful old-package install
+as a supported capability.
 
 **PixInsight version note:** this project validates against **PixInsight Core
 1.9.3 "Lockhart"**, held there deliberately because 1.9.4 swaps PixInsight's PJSR

@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 from collections.abc import Callable, Iterable
 
-from nas_server.handbook_contract import HandbookArticle, ProcessFamily
+from nas_server.handbook_contract import HandbookArticle, ProcessFamily, process_family_ids
 from nas_server.workflow_docs import (
     COMPARISON_SLIDER_CSS,
     COMPARISON_SLIDER_JS,
@@ -42,7 +42,12 @@ def render_handbook_index(
 ) -> str:
     link_base = html.escape(handbook_base_url.strip("/"), quote=True)
     link_prefix = f"{link_base}/" if link_base else ""
-    values = sorted(articles, key=lambda article: article.process_family.value)
+    # process_family_ids() returns the stable launch taxonomy in ProcessFamily's
+    # declaration order, which NOVA's pipeline order (pedestal removal first,
+    # stretch last) -- sort by that, not alphabetically by the enum's string
+    # value, so the index reads in the sequence NOVA actually runs it.
+    _pipeline_order = process_family_ids()
+    values = sorted(articles, key=lambda article: _pipeline_order.index(article.process_family.value))
     cards = "".join(
         '<article class="hb-card">'
         f'<h2><a href="{link_prefix}{html.escape(article.article_id)}.html">'
@@ -54,10 +59,13 @@ def render_handbook_index(
     )
     if not cards:
         cards = '<p class="empty">Handbook articles are being sourced and reviewed.</p>'
+    count = len(values)
+    method_word = "method" if count == 1 else "methods"
     body = (
         '<header class="hb-head"><h1>NOVA Processing Handbook</h1>'
-        '<p>Process-first guidance across tools, with explicit sources, equivalence, '
-        'measurements, and validation history.</p></header>'
+        f'<p>A growing process-first reference. {count} {method_word} published now, with '
+        'explicit sources, equivalence, measurements, and validation history; additional '
+        'chapters will appear when their evidence is ready.</p></header>'
         f'<div class="hb-grid">{cards}</div>'
     )
     return (page_shell or _default_shell)("NOVA Processing Handbook", body)

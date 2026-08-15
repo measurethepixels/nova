@@ -1,0 +1,2960 @@
+{
+  "version": "1.3",
+  "object_types": {
+    "galaxy": {
+      "priority_qualities": [
+        "color_balance",
+        "detail_level",
+        "dynamic_range"
+      ],
+      "stretch_preference": "ghs"
+    },
+    "emission_nebula": {
+      "priority_qualities": [
+        "noise",
+        "gradient",
+        "detail_level"
+      ],
+      "stretch_preference": "stat"
+    },
+    "reflection_nebula": {
+      "priority_qualities": [
+        "color_balance",
+        "gradient"
+      ],
+      "stretch_preference": "veralux"
+    },
+    "globular_cluster": {
+      "priority_qualities": [
+        "star_roundness",
+        "noise"
+      ],
+      "stretch_preference": "stat"
+    },
+    "planetary_nebula": {
+      "priority_qualities": [
+        "detail_level",
+        "star_roundness"
+      ],
+      "stretch_preference": "ghs"
+    },
+    "open_cluster": {
+      "priority_qualities": [
+        "star_roundness",
+        "color_balance"
+      ],
+      "stretch_preference": "stat"
+    },
+    "unknown": {
+      "priority_qualities": [
+        "overall"
+      ],
+      "stretch_preference": "stat"
+    }
+  },
+  "processing_steps": {
+    "crop": {
+      "seti_astro_fn": "crop_multi",
+      "stage": "pre_process",
+      "note": "Multi-candidate crop. Generates up to four candidates — canonical (reproject onto the fixed per-target WCS, folio targets only), coverage (largest rect with >=80% frame coverage), intersection (largest rect covered by all frames), and lir (coverage-mask largest inscribed rectangle, always available). Selection is canonical-preferred with a Claude override: if canonical clips the subject, falls back to the largest-area crop among coverage/intersection/lir. With no canonical candidate, prefers coverage -> intersection -> lir. coverage/intersection require the stacker's <stack>_coverage.fit map. Legacy single-rectangle crop remains as seti_astro.crop (method=auto/bright/pct).",
+      "parameters": {
+        "method": {
+          "type": "enum",
+          "values": [
+            "auto",
+            "bright",
+            "pct"
+          ],
+          "default": "auto",
+          "description": "auto: coverage-mask + largest inscribed rectangle. bright: legacy row/column brightness threshold. pct: fixed percentage."
+        },
+        "aggressiveness": {
+          "type": "enum",
+          "values": [
+            "conservative",
+            "balanced",
+            "aggressive"
+          ],
+          "default": "balanced",
+          "description": "auto mode: how readily a border tile is rejected as low-coverage (noise multiple of interior + blank fraction)."
+        },
+        "pct": {
+          "type": "float",
+          "min": 0.02,
+          "max": 0.15,
+          "default": 0.05,
+          "step": 0.01,
+          "description": "Used only when method=pct. Fraction to remove from each edge."
+        },
+        "threshold_frac": {
+          "type": "float",
+          "min": 0.6,
+          "max": 0.95,
+          "default": 0.85,
+          "step": 0.05,
+          "description": "auto mode: edge row/column mean must reach this fraction of centre mean to be included."
+        },
+        "buffer_frac": {
+          "type": "float",
+          "min": 0.005,
+          "max": 0.05,
+          "default": 0.02,
+          "step": 0.005,
+          "description": "auto mode: extra safety margin added beyond detected boundary."
+        },
+        "claude_confirm": {
+          "type": "bool",
+          "default": true,
+          "description": "crop_multi: run a Claude vision check on the canonical candidate to decide whether it clips the subject (canonical-preferred override)."
+        }
+      },
+      "quality_impact": [
+        "overall",
+        "gradient"
+      ],
+      "experiment_variants": [
+        {
+          "id": "crop_artifact",
+          "description": "Edge-artifact trim (preferred): stretched-luminance edge profile + noise trim removes ragged/black/grainy edge stacking artifacts while keeping the full target",
+          "engine": "seti_astro",
+          "fn": "crop_multi",
+          "params": {
+            "claude_confirm": false
+          }
+        },
+        {
+          "id": "crop_canonical",
+          "description": "Reproject onto the fixed per-target WCS (canonical framing, folio targets)",
+          "engine": "seti_astro",
+          "fn": "crop_multi",
+          "params": {
+            "claude_confirm": false
+          }
+        },
+        {
+          "id": "crop_coverage",
+          "description": "Largest rectangle with >=80% frame coverage (stacking-driven)",
+          "engine": "seti_astro",
+          "fn": "crop",
+          "params": {
+            "method": "auto",
+            "aggressiveness": "balanced"
+          }
+        },
+        {
+          "id": "crop_intersection",
+          "description": "Largest rectangle covered by all frames (tightest stacking-driven crop)",
+          "engine": "seti_astro",
+          "fn": "crop",
+          "params": {
+            "method": "auto",
+            "aggressiveness": "aggressive"
+          }
+        },
+        {
+          "id": "crop_auto",
+          "description": "Coverage mask + largest inscribed rectangle, balanced (recommended)",
+          "engine": "seti_astro",
+          "fn": "crop",
+          "params": {
+            "method": "auto",
+            "aggressiveness": "balanced"
+          }
+        },
+        {
+          "id": "crop_auto_tight",
+          "description": "Coverage mask, aggressive \u2014 trims low-coverage borders harder",
+          "engine": "seti_astro",
+          "fn": "crop",
+          "params": {
+            "method": "auto",
+            "aggressiveness": "aggressive"
+          }
+        },
+        {
+          "id": "crop_auto_loose",
+          "description": "Coverage mask, conservative \u2014 keeps more, trims only clear borders",
+          "engine": "seti_astro",
+          "fn": "crop",
+          "params": {
+            "method": "auto",
+            "aggressiveness": "conservative"
+          }
+        },
+        {
+          "id": "crop_5pct",
+          "description": "Fixed 5% from each edge \u2014 simple fallback",
+          "engine": "seti_astro",
+          "fn": "crop",
+          "params": {
+            "method": "pct",
+            "pct": 0.05
+          }
+        }
+      ]
+    },
+    "subframe_culling": {
+      "seti_astro_fn": "score_frames",
+      "stage": "pre_stack",
+      "note": "Rank and reject poor sub-frames before stacking. SEP-based FWHM + eccentricity + star count scoring.",
+      "parameters": {
+        "bottom_pct": {
+          "type": "float",
+          "min": 0.0,
+          "max": 0.5,
+          "default": 0.1,
+          "step": 0.05,
+          "description": "Fraction of worst frames to exclude. 0.10 = drop bottom 10%."
+        },
+        "min_stars": {
+          "type": "int",
+          "min": 5,
+          "max": 100,
+          "default": 20,
+          "description": "Minimum stars required; frames below this are always excluded."
+        }
+      },
+      "quality_impact": [
+        "star_roundness",
+        "noise"
+      ],
+      "experiment_variants": [
+        {
+          "id": "keep_all",
+          "description": "No culling \u2014 use all frames",
+          "engine": "none",
+          "fn": null,
+          "params": {}
+        },
+        {
+          "id": "cull_5pct",
+          "description": "Drop worst 5% of frames",
+          "engine": "seti_astro",
+          "fn": "score_frames",
+          "params": {
+            "bottom_pct": 0.05
+          }
+        },
+        {
+          "id": "cull_10pct",
+          "description": "Drop worst 10% (default)",
+          "engine": "seti_astro",
+          "fn": "score_frames",
+          "params": {
+            "bottom_pct": 0.1
+          }
+        },
+        {
+          "id": "cull_20pct",
+          "description": "Drop worst 20% (aggressive quality cut)",
+          "engine": "seti_astro",
+          "fn": "score_frames",
+          "params": {
+            "bottom_pct": 0.2
+          }
+        }
+      ]
+    },
+    "stacking": {
+      "seti_astro_fn": null,
+      "stage": "pre_stack",
+      "note": "Calibration, registration, and integration of sub-frames into a single stacked FITS.",
+      "parameters": {
+        "engine": {
+          "type": "enum",
+          "values": [
+            "siril",
+            "imagemm",
+            "pixinsight_wbpp"
+          ],
+          "default": "siril",
+          "description": "siril: fast, clean, well-tested. imagemm: multi-frame deconvolution = more detail. pixinsight_wbpp: best-in-class but slowest."
+        }
+      },
+      "quality_impact": [
+        "noise",
+        "detail_level",
+        "star_roundness"
+      ],
+      "experiment_variants": [
+        {
+          "id": "siril",
+          "description": "Siril 1.4.2 \u2014 fast, clean sigma-clipping stack",
+          "engine": "siril",
+          "fn": "stack",
+          "params": {}
+        },
+        {
+          "id": "imagemm_default",
+          "description": "Image MM multi-frame deconvolution \u2014 more resolved detail",
+          "engine": "imagemm",
+          "fn": "stack",
+          "params": {
+            "iters": 20,
+            "kappa": 2.0
+          }
+        },
+        {
+          "id": "imagemm_aggressive",
+          "description": "Image MM with more deconvolution iterations",
+          "engine": "imagemm",
+          "fn": "stack",
+          "params": {
+            "iters": 40,
+            "kappa": 2.0
+          }
+        },
+        {
+          "id": "pi_wbpp",
+          "description": "PixInsight WBPP \u2014 noise-weighted integration, best SNR",
+          "engine": "pixinsight_wbpp",
+          "fn": "stack",
+          "params": {}
+        }
+      ]
+    },
+    "remove_pedestal": {
+      "seti_astro_fn": "remove_pedestal",
+      "stage": "pre_process",
+      "force_apply": false,
+      "note": "Optional removal of a documented residual ADC/calibration pedestal. Disabled by default: the global minimum of a calibrated stack is not proof of an electronic pedestal and must not be subtracted merely to force one pixel to zero. Run only when capture/calibration provenance confirms the remaining offset; force_apply is the explicit override.",
+      "parameters": {},
+      "quality_impact": [
+        "dynamic_range"
+      ],
+      "experiment_variants": []
+    },
+    "cosmetic_correction": {
+      "seti_astro_fn": "cosmetic_correction",
+      "stage": "pre_process",
+      "force_apply": true,
+      "note": "Remove residual hot and cold pixels. Per-channel local median filter: pixels deviating > sigma * MAD from their local neighbourhood are replaced with the local median. sigma=5 is conservative \u2014 only true outliers (hot pixels, cosmic ray remnants, stacking misses). Fast scipy op, ~0.5s.",
+      "parameters": {
+        "sigma": {
+          "type": "float",
+          "min": 3.0,
+          "max": 10.0,
+          "default": 5.0,
+          "step": 0.5,
+          "description": "Threshold in MAD units. Lower = more aggressive. 5.0 catches hot/cold pixels without touching signal."
+        },
+        "kernel_size": {
+          "type": "int",
+          "min": 3,
+          "max": 9,
+          "default": 5,
+          "description": "Size of local median kernel in pixels. Must be odd."
+        }
+      },
+      "quality_impact": [
+        "noise"
+      ],
+      "experiment_variants": []
+    },
+    "background_extraction": {
+      "seti_astro_fn": "background_extract",
+      "stage": "linear",
+      "note": "AI gradient and background removal. Apply before stretching on linear data.",
+      "parameters": {
+        "correction": {
+          "type": "enum",
+          "values": [
+            "Subtraction",
+            "Division"
+          ],
+          "default": "Subtraction",
+          "description": "Subtraction for additive gradients (light pollution); Division for multiplicative (vignetting)"
+        },
+        "smoothing": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5,
+          "step": 0.1,
+          "description": "Smoothness of background model. Higher = smoother, less aggressive."
+        },
+        "gpu": {
+          "type": "bool",
+          "default": true
+        }
+      },
+      "quality_impact": [
+        "gradient"
+      ],
+      "experiment_variants": [
+        {
+          "id": "adbe_default",
+          "description": "SASpro ADBE poly+RBF degree-2 (headless, fast)",
+          "engine": "seti_astro",
+          "fn": "adbe",
+          "params": {
+            "degree": 2,
+            "num_samples": 100,
+            "use_rbf": true,
+            "rbf_smooth": 0.1
+          }
+        },
+        {
+          "id": "adbe_cubic",
+          "description": "SASpro ADBE poly+RBF degree-3 (more flexible for complex gradients)",
+          "engine": "seti_astro",
+          "fn": "adbe",
+          "params": {
+            "degree": 3,
+            "num_samples": 120,
+            "use_rbf": true,
+            "rbf_smooth": 0.15
+          }
+        },
+        {
+          "id": "adbe_poly_only",
+          "description": "SASpro ADBE polynomial only (no RBF, faster, gentler)",
+          "engine": "seti_astro",
+          "fn": "adbe",
+          "params": {
+            "degree": 2,
+            "num_samples": 100,
+            "use_rbf": false,
+            "rbf_smooth": 0.1
+          }
+        },
+        {
+          "id": "graxpert_sub",
+          "description": "GraXpert AI subtraction mode",
+          "engine": "seti_astro",
+          "fn": "background_extract",
+          "params": {
+            "correction": "Subtraction",
+            "smoothing": 0.5
+          }
+        },
+        {
+          "id": "graxpert_div",
+          "description": "GraXpert AI division mode (for vignetting)",
+          "engine": "seti_astro",
+          "fn": "background_extract",
+          "params": {
+            "correction": "Division",
+            "smoothing": 0.5
+          }
+        },
+        {
+          "id": "pi_gc",
+          "description": "PixInsight GradientCorrection (modern ABE/DBE replacement)",
+          "engine": "pixinsight",
+          "fn": "gradient_correction",
+          "params": {}
+        },
+        {
+          "id": "none",
+          "description": "No gradient correction (baseline)",
+          "engine": "none",
+          "fn": null,
+          "params": {}
+        }
+      ]
+    },
+    "adbe": {
+      "seti_astro_fn": "adbe",
+      "stage": "linear",
+      "note": "SASpro ADBE: polynomial + optional RBF background model. Fully headless Python. Alternative to GraXpert; handles complex gradients well.",
+      "parameters": {
+        "degree": {
+          "type": "int",
+          "min": 1,
+          "max": 6,
+          "default": 2,
+          "description": "Polynomial degree. 1=plane, 2=quadratic, 3=cubic. Use 2-3 for Seestar."
+        },
+        "num_samples": {
+          "type": "int",
+          "min": 50,
+          "max": 500,
+          "default": 100
+        },
+        "use_rbf": {
+          "type": "bool",
+          "default": true,
+          "description": "RBF refinement after polynomial stage. Handles residuals."
+        },
+        "rbf_smooth": {
+          "type": "float",
+          "min": 0.01,
+          "max": 1.0,
+          "default": 0.1,
+          "step": 0.05
+        }
+      },
+      "quality_impact": [
+        "gradient"
+      ]
+    },
+    "color_calibration": {
+      "seti_astro_fn": "spcc",
+      "force_apply": true,
+      "stage": "linear",
+      "note": "Photometric colour calibration. Broadband default = PixInsight SPCC (Gaia DR3 catalog, Sony SeeStar S50 sensor profiles). LP/dual-band default = SSSC (set via spcc_lp_filter; SASpro solves the system response from Gaia-XP star spectra, the physically correct calibration where SPCC's broadband white reference is wrong). The SSSC broadband variant below is EXPERIMENT-ONLY: the 2026-06-21 validation (C3) showed it only fires on star-rich fields (>=20 XP matches: clusters yes, galaxies/nebulae fall back to SPCC) and merely ties SPCC's sky neutrality where it runs, so it is NOT the broadband default.",
+      "parameters": {
+        "spcc_lp_filter": {
+          "type": "bool",
+          "default": false,
+          "description": "Set true if an LP filter was used during capture"
+        }
+      },
+      "experiment_variants": [
+        {
+          "id": "cc_spcc",
+          "description": "PixInsight SPCC \u2014 photometric calibration (Gaia DR3). Broadband default.",
+          "engine": "pixinsight",
+          "fn": "color_calibration_spcc",
+          "params": {}
+        },
+        {
+          "id": "cc_sssc",
+          "description": "SASpro SSSC \u2014 spectrophotometric calibration; solves system response from Gaia-XP star spectra. Needs >=20 XP-matched stars (star-rich fields only); auto-falls back to SPCC otherwise.",
+          "engine": "seti_astro",
+          "fn": "sssc_calibrate",
+          "params": {
+            "lp": false
+          }
+        },
+        {
+          "id": "cc_pi",
+          "description": "PixInsight ColorCalibration \u2014 background-neutral white reference (no catalog).",
+          "engine": "pixinsight",
+          "fn": "color_calibration_cc",
+          "params": {}
+        },
+        {
+          "id": "cc_none",
+          "description": "No colour calibration (control).",
+          "engine": "none",
+          "fn": null,
+          "params": {}
+        }
+      ],
+      "quality_impact": [
+        "color_balance"
+      ]
+    },
+    "deconvolution": {
+      "seti_astro_fn": "bxt_deconvolve",
+      "stage": "linear",
+      "note": "AI or mathematical deconvolution to recover spatial detail blurred by seeing and optics. Apply on linear data before stretch. IMPORTANT: BXT is best-in-class for SeeStar data and is always the reference, so the standard-mode default is now bxt_deconvolve (full BlurXTerminator). cc_sharpen may look sharper on a linear preview but creates star ringing halos that become catastrophic after stretch and star removal; it remains the automatic fallback inside bxt_deconvolve when PixInsight is unavailable, and the explicit cc_sharpen variant below for comparison.",
+      "parameters": {
+        "stellar_amount": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5,
+          "step": 0.1
+        },
+        "nonstellar_amount": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.3,
+          "step": 0.1
+        }
+      },
+      "quality_impact": [
+        "star_roundness",
+        "detail_level"
+      ],
+      "experiment_variants": [
+        {
+          "id": "bxt_standard",
+          "description": "PixInsight BXT \u2014 AI PSF deconvolution, best-in-class",
+          "engine": "pixinsight",
+          "fn": "bxt",
+          "params": {
+            "bxt": true,
+            "bxt_psf": 4.0,
+            "bxt_nonstellar": 0.3,
+            "bxt_stars": 0.5
+          }
+        },
+        {
+          "id": "bxt_conservative",
+          "description": "PixInsight BXT conservative (less stars correction)",
+          "engine": "pixinsight",
+          "fn": "bxt",
+          "params": {
+            "bxt": true,
+            "bxt_psf": 4.0,
+            "bxt_nonstellar": 0.2,
+            "bxt_stars": 0.3
+          }
+        },
+        {
+          "id": "bxt_aggressive",
+          "description": "PixInsight BXT aggressive (more sharpening)",
+          "engine": "pixinsight",
+          "fn": "bxt",
+          "params": {
+            "bxt": true,
+            "bxt_psf": 4.0,
+            "bxt_nonstellar": 0.4,
+            "bxt_stars": 0.6
+          }
+        },
+        {
+          "id": "cc_sharpen_moderate",
+          "description": "Cosmic Clarity AI sharpening (moderate) \u2014 headless, no PI needed",
+          "engine": "seti_astro",
+          "fn": "cc_sharpen_inprocess",
+          "params": {
+            "stellar_amount": 0.5,
+            "nonstellar_amount": 0.3,
+            "sharpening_mode": "Both"
+          }
+        },
+        {
+          "id": "cc_sharpen_nonstellar",
+          "description": "Cosmic Clarity non-stellar only \u2014 preserves star shapes",
+          "engine": "seti_astro",
+          "fn": "cc_sharpen_inprocess",
+          "params": {
+            "stellar_amount": 0.1,
+            "nonstellar_amount": 0.5,
+            "sharpening_mode": "NonStellar"
+          }
+        },
+        {
+          "id": "rl_mild",
+          "description": "Richardson-Lucy deconvolution 20 iterations (math baseline)",
+          "engine": "seti_astro",
+          "fn": "deconvolve_rl",
+          "params": {
+            "iterations": 20,
+            "psf_sigma": 1.5,
+            "psf_size": 7
+          }
+        },
+        {
+          "id": "rl_strong",
+          "description": "Richardson-Lucy deconvolution 40 iterations",
+          "engine": "seti_astro",
+          "fn": "deconvolve_rl",
+          "params": {
+            "iterations": 40,
+            "psf_sigma": 1.5,
+            "psf_size": 7
+          }
+        },
+        {
+          "id": "bxt_manual_psf",
+          "description": "PixInsight BXT with manual PSF \u2014 override auto-PSF for finer control",
+          "engine": "pixinsight",
+          "fn": "bxt",
+          "params": {
+            "bxt": true,
+            "bxt_auto_psf": false,
+            "bxt_nonstellar": 0.3,
+            "bxt_stars": 0.5
+          }
+        },
+        {
+          "id": "bxt_globular",
+          "description": "BXT with luminance mask protecting the bright core \u2014 applies deconvolution to outer halo stars (lum < 0.5) only, preventing ringing halos in the saturated core",
+          "engine": "pixinsight",
+          "fn": "bxt",
+          "lum_mask": {
+            "lower": 0.0,
+            "upper": 0.5,
+            "fuzziness": 0.15,
+            "blur": 6
+          },
+          "params": {
+            "bxt": true,
+            "bxt_psf": 4.0,
+            "bxt_nonstellar": 0.0,
+            "bxt_stars": 0.6,
+            "bxt_auto_psf": true
+          }
+        },
+        {
+          "id": "cosmic_clarity_sharpen_low",
+          "description": "Cosmic Clarity low sharpening \u2014 subtle nonstellar only",
+          "engine": "seti_astro",
+          "fn": "cc_sharpen_inprocess",
+          "params": {
+            "stellar_amount": 0.5,
+            "nonstellar_amount": 0.2,
+            "sharpening_mode": "Both"
+          }
+        },
+        {
+          "id": "cosmic_clarity_sharpen_medium",
+          "description": "Cosmic Clarity medium sharpening \u2014 balanced stars + nebulosity",
+          "engine": "seti_astro",
+          "fn": "cc_sharpen_inprocess",
+          "params": {
+            "stellar_amount": 0.7,
+            "nonstellar_amount": 0.4,
+            "sharpening_mode": "Both"
+          }
+        },
+        {
+          "id": "none",
+          "description": "No deconvolution (baseline)",
+          "engine": "none",
+          "fn": null,
+          "params": {}
+        }
+      ]
+    },
+    "sharpen_linear": {
+      "seti_astro_fn": "sharpen",
+      "stage": "linear",
+      "note": "Cosmic Clarity AI sharpening on linear data via CLI subprocess.",
+      "parameters": {
+        "stellar_amount": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5,
+          "step": 0.1
+        },
+        "nonstellar_amount": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.3,
+          "step": 0.1
+        },
+        "mode": {
+          "type": "enum",
+          "values": [
+            "Both",
+            "Stellar",
+            "NonStellar"
+          ],
+          "default": "Both"
+        },
+        "gpu": {
+          "type": "bool",
+          "default": true
+        }
+      },
+      "quality_impact": [
+        "star_roundness",
+        "detail_level"
+      ],
+      "experiment_variants": [
+        {
+          "id": "cc_conservative",
+          "description": "Cosmic Clarity light sharpening",
+          "engine": "seti_astro",
+          "fn": "sharpen",
+          "params": {
+            "stellar_amount": 0.3,
+            "nonstellar_amount": 0.2,
+            "mode": "Both"
+          }
+        },
+        {
+          "id": "cc_moderate",
+          "description": "Cosmic Clarity moderate sharpening (default)",
+          "engine": "seti_astro",
+          "fn": "sharpen",
+          "params": {
+            "stellar_amount": 0.5,
+            "nonstellar_amount": 0.3,
+            "mode": "Both"
+          }
+        },
+        {
+          "id": "cc_nonstellar",
+          "description": "Cosmic Clarity non-stellar only (preserves stars)",
+          "engine": "seti_astro",
+          "fn": "sharpen",
+          "params": {
+            "stellar_amount": 0.1,
+            "nonstellar_amount": 0.5,
+            "mode": "NonStellar"
+          }
+        },
+        {
+          "id": "cc_aggressive",
+          "description": "Cosmic Clarity aggressive sharpening",
+          "engine": "seti_astro",
+          "fn": "sharpen",
+          "params": {
+            "stellar_amount": 0.7,
+            "nonstellar_amount": 0.6,
+            "mode": "Both"
+          }
+        }
+      ]
+    },
+    "denoise_linear": {
+      "seti_astro_fn": "denoise",
+      "stage": "linear",
+      "note": "Cosmic Clarity AI noise reduction on linear data via CLI subprocess.",
+      "parameters": {
+        "denoise_luma": {
+          "type": "float",
+          "min": 0.1,
+          "max": 1.0,
+          "default": 0.5,
+          "step": 0.1
+        },
+        "denoise_color": {
+          "type": "float",
+          "min": 0.1,
+          "max": 1.0,
+          "default": 0.7,
+          "step": 0.1
+        },
+        "gpu": {
+          "type": "bool",
+          "default": true
+        }
+      },
+      "quality_impact": [
+        "noise"
+      ],
+      "experiment_variants": [
+        {
+          "id": "cc_denoise_light",
+          "description": "Cosmic Clarity light denoising \u2014 preserves detail",
+          "engine": "seti_astro",
+          "fn": "denoise",
+          "params": {
+            "denoise_luma": 0.5,
+            "denoise_color": 0.4
+          }
+        },
+        {
+          "id": "cosmic_clarity_conservative",
+          "description": "Cosmic Clarity conservative \u2014 very gentle, maximum detail retention",
+          "engine": "seti_astro",
+          "fn": "denoise",
+          "params": {
+            "denoise_luma": 0.5,
+            "denoise_color": 0.3
+          }
+        },
+        {
+          "id": "cosmic_clarity_standard",
+          "description": "Cosmic Clarity standard \u2014 balanced luma/color reduction",
+          "engine": "seti_astro",
+          "fn": "denoise",
+          "params": {
+            "denoise_luma": 0.7,
+            "denoise_color": 0.5
+          }
+        },
+        {
+          "id": "cc_denoise_moderate",
+          "description": "Cosmic Clarity moderate denoising (default)",
+          "engine": "seti_astro",
+          "fn": "denoise",
+          "params": {
+            "denoise_luma": 0.9,
+            "denoise_color": 0.7
+          }
+        },
+        {
+          "id": "cc_denoise_strong",
+          "description": "Cosmic Clarity aggressive denoising \u2014 for very noisy data",
+          "engine": "seti_astro",
+          "fn": "denoise",
+          "params": {
+            "denoise_luma": 1.0,
+            "denoise_color": 0.9
+          }
+        },
+        {
+          "id": "nxt",
+          "description": "PixInsight NoiseXTerminator (best-in-class, requires PI)",
+          "engine": "pixinsight",
+          "fn": "denoise_nxt",
+          "params": {
+            "nxt_denoise": 0.7,
+            "nxt_detail": 0.15
+          }
+        },
+        {
+          "id": "nxt_conservative",
+          "description": "PixInsight NXT conservative \u2014 less aggressive, more detail retention",
+          "engine": "pixinsight",
+          "fn": "denoise_nxt",
+          "params": {
+            "nxt_denoise": 0.5,
+            "nxt_iterations": 2,
+            "nxt_detail": 0.2
+          }
+        },
+        {
+          "id": "nxt_two_pass",
+          "description": "PixInsight NXT two-pass \u2014 run NXT twice at conservative settings",
+          "engine": "pixinsight",
+          "fn": "denoise_nxt",
+          "params": {
+            "nxt_denoise": 0.5,
+            "nxt_iterations": 2,
+            "nxt_detail": 0.2,
+            "nxt_two_pass": true
+          }
+        },
+        {
+          "id": "nxt_strong",
+          "description": "PixInsight NXT strong \u2014 amount=0.90, 2 iterations. Matches Henry's manual PI workflow for globulars (C 80 2026-05-24, final score 8.2/10). Full noise removal appropriate when upstream BXT has already sharpened and the outer halo needs clean sky between stars.",
+          "engine": "pixinsight",
+          "fn": "denoise_nxt",
+          "params": {
+            "nxt_denoise": 0.9,
+            "nxt_iterations": 2,
+            "nxt_detail": 0.15
+          }
+        }
+      ]
+    },
+    "star_sharpen": {
+      "seti_astro_fn": "bxt_star_correct",
+      "stage": "linear",
+      "note": "BXT correct-only mode: fixes star shapes (roundness/elongation) without deblurring or sharpening background nebulosity. Applied after denoise_linear on dense star fields (globulars, open clusters) where denoise inflates FWHM. Uses BXT AI model with auto PSF; sharpen_stars=0, sharpen_nonstellar=0 \u2014 pure geometric star correction.",
+      "parameters": {
+        "bxt_auto_psf": {
+          "type": "bool",
+          "default": true,
+          "description": "Auto-detect PSF. Recommended for SeeStar data."
+        }
+      },
+      "quality_impact": [
+        "star_roundness"
+      ],
+      "experiment_variants": [
+        {
+          "id": "bxt_correct_only",
+          "description": "BXT correct-only \u2014 AI star roundness correction, no background sharpening. Default.",
+          "engine": "pixinsight",
+          "fn": "bxt",
+          "params": {
+            "bxt": true,
+            "bxt_correct_only": true,
+            "bxt_auto_psf": true,
+            "bxt_stars": 0.0,
+            "bxt_nonstellar": 0.0
+          }
+        },
+        {
+          "id": "cc_stellar",
+          "description": "Cosmic Clarity Stellar-only sharpening \u2014 sharpens stars without touching background. Fallback if PI unavailable.",
+          "engine": "seti_astro",
+          "fn": "cc_sharpen_inprocess",
+          "params": {
+            "stellar_amount": 0.7,
+            "nonstellar_amount": 0.05,
+            "sharpening_mode": "Stellar"
+          }
+        }
+      ]
+    },
+    "stretch": {
+      "seti_astro_fn": "stat_stretch",
+      "stage": "stretch",
+      "note": "Histogram stretch to convert linear data to non-linear for visual display. This is the critical perceptual step.",
+      "parameters": {
+        "method": {
+          "type": "enum",
+          "values": [
+            "stat",
+            "ghs",
+            "veralux"
+          ],
+          "default": "stat"
+        }
+      },
+      "quality_impact": [
+        "stretch_quality",
+        "color_balance",
+        "detail_level"
+      ],
+      "experiment_variants": [
+        {
+          "id": "stat_default",
+          "description": "Statistical stretch \u2014 linked, sky-dark target 0.08 + curves boost. Sky bg should land ~0.06-0.08 after stretch.",
+          "engine": "seti_astro",
+          "fn": "stat_stretch",
+          "params": {
+            "target_median": 0.08,
+            "linked": true,
+            "blackpoint_sigma": 4.0,
+            "curves_boost": 0.05
+          }
+        },
+        {
+          "id": "stat_bright",
+          "description": "Statistical stretch \u2014 slightly brighter (0.13) for dim targets or very dark skies",
+          "engine": "seti_astro",
+          "fn": "stat_stretch",
+          "params": {
+            "target_median": 0.13,
+            "linked": true,
+            "blackpoint_sigma": 4.0,
+            "curves_boost": 0.05
+          }
+        },
+        {
+          "id": "ghs_default",
+          "description": "GHS stretch \u2014 better dynamic range, good for galaxies. Pivot near sky background level.",
+          "engine": "seti_astro",
+          "fn": "ghs_stretch",
+          "params": {
+            "alpha": 5.0,
+            "beta": 0.0,
+            "gamma": 3.0,
+            "pivot": 0.02,
+            "channel": "K"
+          }
+        },
+        {
+          "id": "ghs_galaxy",
+          "description": "GHS tuned for galaxies \u2014 stronger core-to-arm range with sky-aligned pivot",
+          "engine": "seti_astro",
+          "fn": "ghs_stretch",
+          "params": {
+            "alpha": 8.0,
+            "beta": -0.2,
+            "gamma": 4.0,
+            "pivot": 0.02,
+            "channel": "K"
+          }
+        },
+        {
+          "id": "stf_galaxy",
+          "description": "PI-STF stretch targeting background at 0.07 \u2014 linked (single curve from luminance), preserves SPCC white balance. Best for galaxies.",
+          "engine": "seti_astro",
+          "fn": "stf_stretch",
+          "params": {
+            "target_bg": 0.07,
+            "shadow_clip_k": 1.25,
+            "linked": true
+          }
+        },
+        {
+          "id": "stf_nebula",
+          "description": "PI-STF stretch targeting background at 0.09 \u2014 linked, slightly brighter for emission/reflection nebulae.",
+          "engine": "seti_astro",
+          "fn": "stf_stretch",
+          "params": {
+            "target_bg": 0.09,
+            "shadow_clip_k": 1.25,
+            "linked": true
+          }
+        },
+        {
+          "id": "stat_globular",
+          "description": "Statistical stretch for globular clusters: targetMedian=0.11, blackpoint_sigma=5.0, curves_boost=0.05. Matches Henry's manual PI workflow (statisticalstretch.js). Shadow clip at Med-7.4\u00d7MAD is ~6\u00d7 more conservative than stf_nebula (1.25\u00d7MAD), preserving the faint outer halo. CONFIRMED GOOD: C 80 manual result 8.2/10 vs pipeline stf_nebula 6.2/10 (2026-05-24). NOTE: lowered 0.15\u21920.11 (2026-05-29) after M13 run showed sky_bg=0.148 (over-stretched) and core clipping at p9999=0.999 before curves; dense globulars need more headroom.",
+          "engine": "seti_astro",
+          "fn": "stat_stretch",
+          "params": {
+            "target_median": 0.11,
+            "linked": true,
+            "blackpoint_sigma": 5.0,
+            "curves_boost": 0.05
+          }
+        },
+        {
+          "id": "veralux_default",
+          "description": "Veralux arcsinh \u2014 fully linked (color_grip=1.0 preserves SPCC calibration)",
+          "engine": "seti_astro",
+          "fn": "veralux_stretch",
+          "params": {
+            "log_d": 4.0,
+            "sp": 0.0,
+            "color_grip": 1.0,
+            "shadow_convergence": 0.5
+          }
+        },
+        {
+          "id": "veralux_colorful",
+          "description": "Veralux with max colour grip and slightly stronger stretch",
+          "engine": "seti_astro",
+          "fn": "veralux_stretch",
+          "params": {
+            "log_d": 4.5,
+            "sp": 0.0,
+            "color_grip": 1.0,
+            "shadow_convergence": 0.5
+          }
+        },
+        {
+          "id": "veralux_globular",
+          "description": "Veralux arcsinh for globular clusters with auto-SP background detection. sp=0.0 triggers auto-measure of sky background from image corners; that value becomes the symmetry point so sky \u2192 0. log_d=4.0 then maps faint halo stars (3\u00d7 background) to ~0.45 and bright core stars to ~0.80 \u2014 dark sky, visible halo, unclipped core. target_bg=0.08 lifts the post-stretch sky to a near-black reference level.",
+          "engine": "seti_astro",
+          "fn": "veralux_stretch",
+          "params": {
+            "log_d": 4.0,
+            "sp": 0.0,
+            "color_grip": 1.0,
+            "shadow_convergence": 0.4,
+            "target_bg": 0.08
+          }
+        },
+        {
+          "id": "pi_mas",
+          "description": "PixInsight MultiscaleAdaptiveStretch \u2014 self-calibrating, best for preserving faint detail",
+          "engine": "pixinsight",
+          "fn": "mas",
+          "params": {}
+        },
+        {
+          "id": "smart_default",
+          "description": "Adaptive multi-tool stretch: profiles DR/star_frac \u2192 selects STF/veralux/GHS/stat \u2192 verify bg+midtone+clip \u2192 corrects with GHS boost or veralux re-stretch. target_bg=0.08, max 3 iterations.",
+          "engine": "seti_astro",
+          "fn": "smart_stretch",
+          "params": {
+            "target_bg": 0.08,
+            "max_iterations": 3,
+            "allow_ghs_boost": true,
+            "allow_stat_bg": true
+          }
+        },
+        {
+          "id": "smart_dark",
+          "description": "Smart stretch targeting very dark sky (target_bg=0.05) \u2014 for targets with large faint halos where extra shadow depth is needed.",
+          "engine": "seti_astro",
+          "fn": "smart_stretch",
+          "params": {
+            "target_bg": 0.05,
+            "max_iterations": 3,
+            "allow_ghs_boost": true,
+            "allow_stat_bg": true
+          }
+        }
+      ]
+    },
+    "stretch_stat": {
+      "seti_astro_fn": "stat_stretch",
+      "stage": "stretch",
+      "note": "SASpro statistical stretch. Good general-purpose starting point.",
+      "parameters": {
+        "target_median": {
+          "type": "float",
+          "min": 0.05,
+          "max": 0.2,
+          "default": 0.08,
+          "step": 0.01
+        },
+        "linked": {
+          "type": "bool",
+          "default": true
+        },
+        "blackpoint_sigma": {
+          "type": "float",
+          "min": 2.0,
+          "max": 8.0,
+          "default": 5.0,
+          "step": 0.5
+        }
+      },
+      "quality_impact": [
+        "stretch_quality",
+        "color_balance"
+      ]
+    },
+    "stretch_ghs": {
+      "seti_astro_fn": "ghs_stretch",
+      "stage": "stretch",
+      "note": "Generalised Hyperbolic Stretch. Better dynamic range; recommended for galaxies.",
+      "parameters": {
+        "alpha": {
+          "type": "float",
+          "min": 1.0,
+          "max": 20.0,
+          "default": 5.0,
+          "step": 1.0
+        },
+        "beta": {
+          "type": "float",
+          "min": -1.0,
+          "max": 1.0,
+          "default": 0.0,
+          "step": 0.1
+        },
+        "gamma": {
+          "type": "float",
+          "min": 1.0,
+          "max": 10.0,
+          "default": 3.0,
+          "step": 0.5
+        },
+        "pivot": {
+          "type": "float",
+          "min": 0.005,
+          "max": 0.1,
+          "default": 0.02,
+          "step": 0.005
+        },
+        "channel": {
+          "type": "enum",
+          "values": [
+            "K",
+            "R",
+            "G",
+            "B"
+          ],
+          "default": "K"
+        }
+      },
+      "quality_impact": [
+        "stretch_quality",
+        "color_balance",
+        "detail_level"
+      ]
+    },
+    "stretch_veralux": {
+      "seti_astro_fn": "veralux_stretch",
+      "stage": "stretch",
+      "note": "Veralux HyperMetric arcsinh with colour grip. Good for reflection nebulae and colour targets.",
+      "parameters": {
+        "log_d": {
+          "type": "float",
+          "min": 1.0,
+          "max": 8.0,
+          "default": 4.0,
+          "step": 0.5
+        },
+        "sp": {
+          "type": "float",
+          "min": 0.0,
+          "max": 0.3,
+          "default": 0.0,
+          "step": 0.01
+        },
+        "color_grip": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5,
+          "step": 0.1
+        },
+        "shadow_convergence": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5,
+          "step": 0.1
+        }
+      },
+      "quality_impact": [
+        "stretch_quality",
+        "color_balance"
+      ]
+    },
+    "scnr": {
+      "seti_astro_fn": "scnr",
+      "stage": "nonlinear",
+      "note": "Selective Colour Noise Reduction \u2014 removes green channel cast (teal artifact from Seestar OSC). Apply after stretch.",
+      "parameters": {
+        "amount": {
+          "type": "float",
+          "min": 0.3,
+          "max": 1.0,
+          "default": 0.7,
+          "step": 0.05
+        },
+        "mode": {
+          "type": "enum",
+          "values": [
+            "avg",
+            "max"
+          ],
+          "default": "avg",
+          "description": "avg: average neutral protection (standard). max: maximum neutral protection (gentler)."
+        },
+        "preserve_lightness": {
+          "type": "bool",
+          "default": true
+        }
+      },
+      "quality_impact": [
+        "color_balance"
+      ],
+      "experiment_variants": [
+        {
+          "id": "scnr_avg_90",
+          "description": "SCNR average mode 90% \u2014 standard Seestar teal removal",
+          "engine": "seti_astro",
+          "fn": "scnr",
+          "params": {
+            "amount": 0.9,
+            "mode": "avg",
+            "preserve_lightness": true
+          }
+        },
+        {
+          "id": "scnr_avg_70",
+          "description": "SCNR average mode 70% \u2014 gentle green cast reduction",
+          "engine": "seti_astro",
+          "fn": "scnr",
+          "params": {
+            "amount": 0.7,
+            "mode": "avg",
+            "preserve_lightness": true
+          }
+        },
+        {
+          "id": "scnr_max_90",
+          "description": "SCNR maximum neutral protection \u2014 most conservative",
+          "engine": "seti_astro",
+          "fn": "scnr",
+          "params": {
+            "amount": 0.9,
+            "mode": "max",
+            "preserve_lightness": true
+          }
+        },
+        {
+          "id": "none",
+          "description": "No SCNR (baseline \u2014 for targets that are genuinely green)",
+          "engine": "none",
+          "fn": null,
+          "params": {}
+        }
+      ]
+    },
+    "background_neutralize": {
+      "seti_astro_fn": "background_neutralize",
+      "stage": "nonlinear",
+      "note": "Conditional post-stretch background neutralisation. Skip when representative sky ratios remain neutral after successful background extraction, SPCC, and linked stretch. Run only when measured sky G/R or B/R differs from 1.0 by more than 0.10; force_apply remains the explicit override.",
+      "parameters": {
+        "mode": {
+          "type": "enum",
+          "values": [
+            "pivot1",
+            "pivot2",
+            "pivot3"
+          ],
+          "default": "pivot1",
+          "description": "pivot1: darkest background region. pivot2: median bg. pivot3: conservative (less aggressive)."
+        }
+      },
+      "quality_impact": [
+        "gradient",
+        "color_balance"
+      ],
+      "experiment_variants": [
+        {
+          "id": "bg_neutral_pivot1",
+          "description": "Background neutralize \u2014 darkest region pivot (most aggressive)",
+          "engine": "seti_astro",
+          "fn": "background_neutralize",
+          "params": {
+            "mode": "pivot1"
+          }
+        },
+        {
+          "id": "bg_neutral_pivot3",
+          "description": "Background neutralize \u2014 conservative pivot (gentler)",
+          "engine": "seti_astro",
+          "fn": "background_neutralize",
+          "params": {
+            "mode": "pivot3"
+          }
+        },
+        {
+          "id": "none",
+          "description": "No background neutralization (baseline)",
+          "engine": "none",
+          "fn": null,
+          "params": {}
+        }
+      ]
+    },
+    "clahe": {
+      "seti_astro_fn": "clahe",
+      "stage": "nonlinear",
+      "note": "Contrast Limited Adaptive Histogram Equalisation \u2014 local contrast enhancement. Brings out fine structure.",
+      "parameters": {
+        "clip_limit": {
+          "type": "float",
+          "min": 0.5,
+          "max": 8.0,
+          "default": 2.0,
+          "step": 0.5
+        },
+        "tile_size": {
+          "type": "int",
+          "min": 4,
+          "max": 64,
+          "default": 8
+        }
+      },
+      "quality_impact": [
+        "detail_level"
+      ],
+      "experiment_variants": [
+        {
+          "id": "clahe_whisper",
+          "fn": "clahe",
+          "params": {
+            "clip_limit": 1.0,
+            "tile_size": 8
+          }
+        },
+        {
+          "id": "clahe_mild",
+          "fn": "clahe",
+          "params": {
+            "clip_limit": 1.5,
+            "tile_size": 8
+          }
+        },
+        {
+          "id": "clahe_standard",
+          "fn": "clahe",
+          "params": {
+            "clip_limit": 2.0,
+            "tile_size": 8
+          }
+        },
+        {
+          "id": "clahe_fine",
+          "fn": "clahe",
+          "params": {
+            "clip_limit": 1.5,
+            "tile_size": 4
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "noise_reduction": {
+      "seti_astro_fn": "cc_denoise_inprocess",
+      "stage": "nonlinear",
+      "note": "Post-stretch noise reduction. Less effective than linear-stage but useful for residual noise after strong stretch.",
+      "parameters": {
+        "denoise_luma": {
+          "type": "float",
+          "min": 0.1,
+          "max": 1.0,
+          "default": 0.7,
+          "step": 0.1
+        },
+        "denoise_color": {
+          "type": "float",
+          "min": 0.1,
+          "max": 1.0,
+          "default": 0.5,
+          "step": 0.1
+        }
+      },
+      "quality_impact": [
+        "noise"
+      ],
+      "experiment_variants": [
+        {
+          "id": "nxt_gentle",
+          "fn": "nxt_denoise",
+          "params": {
+            "nxt_denoise": 0.45,
+            "nxt_detail": 0.25
+          }
+        },
+        {
+          "id": "nxt_standard",
+          "fn": "nxt_denoise",
+          "params": {
+            "nxt_denoise": 0.65,
+            "nxt_detail": 0.18
+          }
+        },
+        {
+          "id": "nxt_strong",
+          "fn": "nxt_denoise",
+          "params": {
+            "nxt_denoise": 0.8,
+            "nxt_detail": 0.12
+          }
+        },
+        {
+          "id": "cc_denoise_gentle",
+          "fn": "cc_denoise",
+          "params": {
+            "denoise_luma": 0.5,
+            "denoise_color": 0.35
+          }
+        },
+        {
+          "id": "cc_denoise_moderate",
+          "fn": "cc_denoise",
+          "params": {
+            "denoise_luma": 0.7,
+            "denoise_color": 0.5
+          }
+        },
+        {
+          "id": "prism_mini_gentle",
+          "fn": "syqon_prism_denoise",
+          "description": "SyQon Prism Mini denoiser — gentle strength (0.65), free weights",
+          "params": {
+            "strength": 0.65,
+            "tile": 512,
+            "overlap": 64,
+            "pad": 64,
+            "use_mtf": true,
+            "mtf_target": 0.10
+          }
+        },
+        {
+          "id": "prism_mini_standard",
+          "fn": "syqon_prism_denoise",
+          "description": "SyQon Prism Mini denoiser — standard strength (0.85), free weights",
+          "params": {
+            "strength": 0.85,
+            "tile": 512,
+            "overlap": 64,
+            "pad": 64,
+            "use_mtf": true,
+            "mtf_target": 0.10
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "star_removal": {
+      "seti_astro_fn": "remove_stars_inprocess",
+      "stage": "nonlinear",
+      "note": "Remove stars for nebula/galaxy processing (process starless, then recombine). Optional \u2014 skip for targets where stars are desired.",
+      "parameters": {
+        "mode": {
+          "type": "enum",
+          "values": [
+            "unscreen",
+            "additive"
+          ],
+          "default": "unscreen",
+          "description": "unscreen: standard recombination mode. additive: alternative for bright star halos."
+        },
+        "use_gpu": {
+          "type": "bool",
+          "default": true
+        }
+      },
+      "quality_impact": [
+        "detail_level"
+      ],
+      "experiment_variants": [
+        {
+          "id": "darkstar_unscreen",
+          "description": "SASpro DarkStar AI star removal (unscreen mode) \u2014 headless",
+          "engine": "seti_astro",
+          "fn": "remove_stars_inprocess",
+          "params": {
+            "mode": "unscreen",
+            "use_gpu": true
+          }
+        },
+        {
+          "id": "darkstar_additive",
+          "description": "SASpro DarkStar AI star removal (additive mode)",
+          "engine": "seti_astro",
+          "fn": "remove_stars_inprocess",
+          "params": {
+            "mode": "additive",
+            "use_gpu": true
+          }
+        },
+        {
+          "id": "pi_starxt",
+          "description": "PixInsight StarXTerminator \u2014 best-in-class star removal",
+          "engine": "pixinsight",
+          "fn": "star_removal_starxt",
+          "params": {}
+        },
+        {
+          "id": "none",
+          "description": "No star removal (keep stars)",
+          "engine": "none",
+          "fn": null,
+          "params": {}
+        }
+      ]
+    },
+    "curves": {
+      "seti_astro_fn": "curves",
+      "stage": "nonlinear",
+      "note": "Parametric tone curve for final brightness/contrast/colour adjustment. Applied on the starless stretched image (before star recombination). Use conservative amounts \u2014 the image is already well-stretched and small adjustments are better than large ones. lift_shadows brightens the background which reduces contrast and almost always scores worse; avoid it here.",
+      "parameters": {
+        "shape": {
+          "type": "enum",
+          "values": [
+            "linear",
+            "s_mild",
+            "s_med",
+            "s_strong",
+            "lift_shadows",
+            "crush_shadows",
+            "fade_blacks",
+            "rolloff_highlights"
+          ],
+          "default": "s_mild",
+          "description": "s_mild: gentle contrast boost (default, most versatile). rolloff_highlights: protect bright nebula cores. AVOID lift_shadows \u2014 it brightens the already-dark background and consistently scores as no improvement on stretched nebulae."
+        },
+        "amount": {
+          "type": "float",
+          "min": 0.1,
+          "max": 1.0,
+          "default": 0.3,
+          "step": 0.1,
+          "description": "Start at 0.3 (conservative). Only go above 0.5 if the image clearly needs a strong contrast push."
+        },
+        "channel": {
+          "type": "enum",
+          "values": [
+            "all",
+            "L",
+            "R",
+            "G",
+            "B"
+          ],
+          "default": "all"
+        }
+      },
+      "quality_impact": [
+        "detail_level",
+        "color_balance"
+      ],
+      "experiment_variants": [
+        {
+          "id": "feather",
+          "fn": "curves",
+          "params": {
+            "shape": "s_mild",
+            "amount": 0.12,
+            "channel": "all"
+          }
+        },
+        {
+          "id": "s_mild",
+          "fn": "curves",
+          "params": {
+            "shape": "s_mild",
+            "amount": 0.2,
+            "channel": "all"
+          }
+        },
+        {
+          "id": "s_med",
+          "fn": "curves",
+          "params": {
+            "shape": "s_med",
+            "amount": 0.28,
+            "channel": "all"
+          }
+        },
+        {
+          "id": "lift_shadows",
+          "fn": "curves",
+          "params": {
+            "shape": "lift_shadows",
+            "amount": 0.18,
+            "channel": "all"
+          }
+        },
+        {
+          "id": "rolloff_highlights",
+          "fn": "curves",
+          "params": {
+            "shape": "rolloff_highlights",
+            "amount": 0.15,
+            "channel": "all"
+          }
+        },
+        {
+          "id": "s_strong",
+          "fn": "curves",
+          "params": {
+            "shape": "s_strong",
+            "amount": 0.38,
+            "channel": "all"
+          }
+        },
+        {
+          "id": "pi_curves",
+          "engine": "pixinsight",
+          "fn": "pi_curves",
+          "params": {}
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        },
+        {
+          "id": "pi_s_mild_globular",
+          "engine": "pixinsight",
+          "fn": "pi_curves",
+          "params": {
+            "curves_shape": "globular_balanced"
+          }
+        },
+        {
+          "id": "pi_globular_core_rolloff",
+          "description": "PI CurvesTransformation \u2014 compact globular (M13, M3, M5, M92): darkens sky from ~0.15\u21920.12, neutral halo midrange (0.35\u20130.50 zone untouched), strong shoulder starts at 0.62, cap 0.88. Prevents blown-out core on tight high-surface-brightness globulars.",
+          "engine": "pixinsight",
+          "fn": "pi_curves",
+          "params": {
+            "curves_shape": "globular_core_rolloff"
+          }
+        }
+      ]
+    },
+    "color_sat": {
+      "seti_astro_fn": null,
+      "stage": "nonlinear",
+      "note": "Boost colour saturation post-stretch. Applied after curves to lift the muted star colours from stat_stretch.",
+      "parameters": {
+        "color_sat_boost": {
+          "type": "float",
+          "min": 0.1,
+          "max": 0.6,
+          "default": 0.25,
+          "step": 0.05,
+          "description": "PI ColorSaturation HS delta \u2014 uniform hue boost. 0.25 = moderate lift. >0.4 risks garish stars."
+        }
+      },
+      "quality_impact": [
+        "color_balance",
+        "star_roundness"
+      ],
+      "experiment_variants": [
+        {
+          "id": "sat_feather",
+          "fn": "color_sat",
+          "params": {
+            "color_sat_boost": 0.08
+          }
+        },
+        {
+          "id": "sat_gentle",
+          "fn": "color_sat",
+          "params": {
+            "color_sat_boost": 0.15
+          }
+        },
+        {
+          "id": "sat_moderate",
+          "fn": "color_sat",
+          "params": {
+            "color_sat_boost": 0.25
+          }
+        },
+        {
+          "id": "sat_strong",
+          "fn": "color_sat",
+          "params": {
+            "color_sat_boost": 0.38
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "hdr_compression": {
+      "seti_astro_fn": "hdr_compression",
+      "stage": "nonlinear",
+      "note": "Wavelet HDR compression \u2014 preserves highlight detail while boosting faint structure. Good for galaxies and bright nebulae.",
+      "parameters": {
+        "n_scales": {
+          "type": "int",
+          "min": 3,
+          "max": 8,
+          "default": 5,
+          "description": "Wavelet decomposition scales. More scales = affects broader structures."
+        },
+        "compression_factor": {
+          "type": "float",
+          "min": 0.5,
+          "max": 4.0,
+          "default": 1.5,
+          "step": 0.25,
+          "description": ">1 compresses highlights, <1 boosts them."
+        },
+        "mask_gamma": {
+          "type": "float",
+          "min": 0.5,
+          "max": 3.0,
+          "default": 1.0,
+          "step": 0.25,
+          "description": "Luminance mask curve. >1 protects more highlights."
+        }
+      },
+      "quality_impact": [
+        "detail_level",
+        "dynamic_range"
+      ],
+      "experiment_variants": [
+        {
+          "id": "hdr_whisper",
+          "fn": "hdr_compression",
+          "params": {
+            "n_scales": 5,
+            "compression_factor": 1.1,
+            "mask_gamma": 1.0
+          }
+        },
+        {
+          "id": "hdr_mild",
+          "fn": "hdr_compression",
+          "params": {
+            "n_scales": 5,
+            "compression_factor": 1.3,
+            "mask_gamma": 1.0
+          }
+        },
+        {
+          "id": "hdr_standard",
+          "fn": "hdr_compression",
+          "params": {
+            "n_scales": 5,
+            "compression_factor": 1.6,
+            "mask_gamma": 1.0
+          }
+        },
+        {
+          "id": "pi_ihdr_standard",
+          "fn": "pi_ihdr",
+          "params": {
+            "ihdr_iterations": 5,
+            "ihdr_preservation": 5,
+            "ihdr_mask_strength": 1.25
+          }
+        },
+        {
+          "id": "pi_hdrmt_standard",
+          "fn": "pi_hdrmt",
+          "params": {
+            "hdrmt_layers": 6,
+            "hdrmt_iterations": 3,
+            "hdrmt_overdrive": 0.0
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "hdr_core_blend": {
+      "seti_astro_fn": "hdr_core_blend",
+      "stage": "nonlinear",
+      "note": "Wavelet HDR compression blended in ONLY under a feathered bright-core luminance mask (typically 0.3–2.7% of frame). Recovers blown-core detail without dimming faint outer signal the way global HDR does. Threshold set per object type by the pipeline (0.72 nebula / 0.80 galaxy). Clip-gated upstream; never stats-vetoed.",
+      "parameters": {
+        "threshold": {
+          "type": "float",
+          "min": 0.5,
+          "max": 0.95,
+          "default": 0.72,
+          "step": 0.02,
+          "description": "Core mask onset on smoothed luminance. Higher = only the very brightest core is touched."
+        },
+        "n_scales": {
+          "type": "int",
+          "min": 3,
+          "max": 8,
+          "default": 5,
+          "description": "Wavelet decomposition scales for the HDR layer."
+        },
+        "compression_factor": {
+          "type": "float",
+          "min": 0.5,
+          "max": 4.0,
+          "default": 1.5,
+          "step": 0.25,
+          "description": ">1 compresses highlights, <1 boosts them."
+        },
+        "mask_gamma": {
+          "type": "float",
+          "min": 0.5,
+          "max": 3.0,
+          "default": 1.0,
+          "step": 0.25,
+          "description": "Internal HDR luminance mask curve. >1 protects more highlights."
+        },
+        "feather": {
+          "type": "float",
+          "min": 5.0,
+          "max": 50.0,
+          "default": 20.0,
+          "step": 5.0,
+          "description": "Gaussian feather of the core mask edge."
+        }
+      },
+      "quality_impact": [
+        "dynamic_range",
+        "detail_level"
+      ],
+      "experiment_variants": [
+        {
+          "id": "hdr_core_soft",
+          "fn": "hdr_core_blend",
+          "params": {
+            "threshold": 0.80,
+            "compression_factor": 1.3
+          }
+        },
+        {
+          "id": "hdr_core_standard",
+          "fn": "hdr_core_blend",
+          "params": {
+            "threshold": 0.72,
+            "compression_factor": 1.5
+          }
+        },
+        {
+          "id": "hdr_core_strong",
+          "fn": "hdr_core_blend",
+          "params": {
+            "threshold": 0.68,
+            "compression_factor": 1.8
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "sky_green_rebalance": {
+      "seti_astro_fn": "sky_green_rebalance",
+      "stage": "nonlinear",
+      "note": "SPCC-safe SCNR substitute: caps green at max(R,B) inside an inverted feathered luminance mask, so only the sky background is neutralized — object signal colour and SPCC star colours pass through untouched, and a green tint can never be inverted into magenta. Self-gates on measured sky G/R (no-op when <= min_gr).",
+      "parameters": {
+        "amount": {
+          "type": "float",
+          "min": 0.3,
+          "max": 1.0,
+          "default": 0.85,
+          "step": 0.05,
+          "description": "Fraction of the sky green excess removed."
+        },
+        "min_gr": {
+          "type": "float",
+          "min": 1.0,
+          "max": 1.1,
+          "default": 1.03,
+          "step": 0.01,
+          "description": "Sky G/R below which the step passes through unchanged."
+        }
+      },
+      "quality_impact": [
+        "color_balance"
+      ],
+      "experiment_variants": [
+        {
+          "id": "sgr_soft",
+          "fn": "sky_green_rebalance",
+          "params": {
+            "amount": 0.6
+          }
+        },
+        {
+          "id": "sgr_standard",
+          "fn": "sky_green_rebalance",
+          "params": {
+            "amount": 0.85
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "dark_enhance": {
+      "seti_astro_fn": "dark_enhance",
+      "stage": "nonlinear",
+      "note": "Wavelet dark structure enhancement. Boosts faint shadow detail: IFN, dust lanes, outer galaxy arms. Apply after HDR compression.",
+      "parameters": {
+        "n_scales": {
+          "type": "int",
+          "min": 3,
+          "max": 8,
+          "default": 6
+        },
+        "boost_factor": {
+          "type": "float",
+          "min": 1.0,
+          "max": 5.0,
+          "default": 2.0,
+          "step": 0.5,
+          "description": "Darkness boost multiplier. Start gentle (2.0). Only increase if faint structure is clearly missing. Max 5.0 \u2014 above this amplifies noise more than signal."
+        },
+        "mask_gamma": {
+          "type": "float",
+          "min": 0.5,
+          "max": 3.0,
+          "default": 1.0,
+          "step": 0.25
+        }
+      },
+      "quality_impact": [
+        "detail_level"
+      ],
+      "experiment_variants": [
+        {
+          "id": "dse_whisper",
+          "fn": "dark_enhance",
+          "params": {
+            "n_scales": 6,
+            "boost_factor": 1.0,
+            "mask_gamma": 1.0
+          }
+        },
+        {
+          "id": "dse_gentle",
+          "fn": "dark_enhance",
+          "params": {
+            "n_scales": 6,
+            "boost_factor": 1.3,
+            "mask_gamma": 1.0
+          }
+        },
+        {
+          "id": "dse_mild",
+          "fn": "dark_enhance",
+          "params": {
+            "n_scales": 6,
+            "boost_factor": 1.8,
+            "mask_gamma": 1.0
+          }
+        },
+        {
+          "id": "dse_standard",
+          "fn": "dark_enhance",
+          "params": {
+            "n_scales": 6,
+            "boost_factor": 2.5,
+            "mask_gamma": 1.0
+          }
+        },
+        {
+          "id": "pi_lhe_dark",
+          "fn": "pi_lhe_dark",
+          "params": {
+            "lhe_kernel_r": 64,
+            "lhe_slope_limit": 2.0,
+            "lhe_amount": 0.4
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "remove_stars_linear": {
+      "seti_astro_fn": "remove_stars_split",
+      "step_type": "star_split",
+      "stage": "pre_stretch",
+      "note": "Split image into starless and stars-only FITS before stretching. Starless continues the main pipeline; stars are stretched separately and recombined with combine_stars_screen.",
+      "parameters": {
+        "mode": {
+          "type": "enum",
+          "values": [
+            "unscreen",
+            "additive"
+          ],
+          "default": "unscreen",
+          "description": "unscreen: correct screen-blend inverse (recommended). additive: for images with additive star halos."
+        },
+        "use_gpu": {
+          "type": "bool",
+          "default": true
+        }
+      },
+      "quality_impact": [
+        "detail_level",
+        "star_roundness"
+      ]
+    },
+    "stretch_stars": {
+      "seti_astro_fn": "star_stretch",
+      "step_type": "star_process",
+      "stage": "stretch",
+      "note": "Stretch the stars-only FITS using SASpro Star Stretch. Applied to the aux stars layer, not the main (starless) pipeline path.",
+      "parameters": {
+        "stretch_factor": {
+          "type": "float",
+          "min": 0.0,
+          "max": 8.0,
+          "default": 2.0,
+          "step": 0.5,
+          "description": "Star stretch amount \u2014 higher = brighter/larger stars. At runtime this is overridden by a data-driven auto-selection based on the star layer's p90 brightness (target: p90 star \u2192 0.25 post-stretch, 'subtle \u2014 secondary to nebula'). The default 2.0 is used only if auto-detection fails."
+        },
+        "saturation": {
+          "type": "float",
+          "min": 0.8,
+          "max": 2.0,
+          "default": 1.2,
+          "step": 0.1,
+          "description": "Post-stretch colour saturation boost for stars."
+        },
+        "do_scnr": {
+          "type": "bool",
+          "default": true
+        },
+        "scnr_amount": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.9,
+          "description": "SCNR green removal strength \u2014 injected from the starless SCNR experiment winner at runtime."
+        },
+        "gamma": {
+          "type": "float",
+          "min": 0.5,
+          "max": 1.5,
+          "default": 1.0,
+          "description": "Curves brightness adjustment. Values < 1.0 brighten midtones (e.g. 0.85 = mild boost matching user's typical curves step)."
+        }
+      },
+      "quality_impact": [
+        "star_roundness",
+        "color_balance"
+      ],
+      "experiment_variants": [
+        {
+          "id": "star_stretch_default",
+          "description": "SASpro star stretch \u2014 factor auto-selected from star layer data (target p90\u21920.25, typically 1.0\u20133.0). SCNR=0.9.",
+          "engine": "seti_astro",
+          "fn": "star_stretch",
+          "params": {
+            "stretch_factor": 2.0,
+            "saturation": 1.2,
+            "do_scnr": true,
+            "scnr_amount": 0.9,
+            "gamma": 1.0
+          }
+        }
+      ]
+    },
+    "combine_stars_screen": {
+      "seti_astro_fn": "combine_stars_screen",
+      "step_type": "star_combine",
+      "stage": "nonlinear",
+      "note": "Screen-blend recombination of stretched starless + stretched stars. Must follow remove_stars_linear + stretch + stretch_stars.",
+      "parameters": {},
+      "quality_impact": [
+        "overall",
+        "star_roundness"
+      ]
+    },
+    "halo_suppression": {
+      "seti_astro_fn": "halo_suppress",
+      "stage": "nonlinear",
+      "note": "Star halo reduction via SASpro HaloBGon. Reduces colour halos and bloat around bright stars. Start conservative \u2014 level 1 is usually sufficient. Dense star fields (Cygnus, Sagittarius) must use level 1 only; higher levels crush thousands of stars at once and produce artificial blue-dominant colour casts.",
+      "parameters": {
+        "reduction_level": {
+          "type": "int",
+          "min": 1,
+          "max": 2,
+          "default": 1,
+          "description": "Halo reduction aggressiveness. 1=minimal (default, safe for all fields). 2=moderate. Never use 3+ \u2014 causes severe colour artefacts in dense star fields."
+        },
+        "is_linear": {
+          "type": "bool",
+          "default": false,
+          "description": "Set true only if applying on linear data (unusual)."
+        }
+      },
+      "quality_impact": [
+        "star_roundness",
+        "color_balance"
+      ],
+      "experiment_variants": [
+        {
+          "id": "halo_minimal",
+          "fn": "halo_suppress",
+          "params": {
+            "reduction_level": 0,
+            "is_linear": false
+          }
+        },
+        {
+          "id": "halo_mild",
+          "fn": "halo_suppress",
+          "params": {
+            "reduction_level": 1,
+            "is_linear": false
+          }
+        },
+        {
+          "id": "halo_standard",
+          "fn": "halo_suppress",
+          "params": {
+            "reduction_level": 2,
+            "is_linear": false
+          }
+        },
+        {
+          "id": "none",
+          "fn": "none",
+          "params": {}
+        }
+      ]
+    },
+    "color_boost": {
+      "seti_astro_fn": "color_boost",
+      "stage": "nonlinear",
+      "force_apply": true,
+      "params": {
+        "preset": "galaxy",
+        "global_sat_lift": 0.0
+      },
+      "variants": {
+        "boost_galaxy": {
+          "preset": "galaxy"
+        },
+        "boost_galaxy_strong": {
+          "preset": "galaxy",
+          "global_sat_lift": 0.04
+        },
+        "boost_nebula": {
+          "preset": "nebula"
+        },
+        "boost_nebula_strong": {
+          "preset": "nebula",
+          "global_sat_lift": 0.04
+        },
+        "boost_nbn": {
+          "preset": "nbn",
+          "global_sat_lift": 0.06
+        }
+      },
+      "note": "Hue-selective saturation via HSV Gaussian kernels. Galaxy: boost blues (spiral arms 210\u2013270\u00b0), dampen yellows. Nebula: boost Ha-red (0\u00b0/350\u00b0), OIII-cyan (190\u00b0), magenta blend zone (300\u00b0). NBN: warm gold/copper dust (35\u00b0) + amber bleed (18\u00b0) + teal OIII core (195\u00b0), auto-selected when narrowband_norm is forced. Applied post-background_neutralize."
+    },
+    "nb_palette": {
+      "seti_astro_fn": "nb_palette",
+      "stage": "nonlinear",
+      "force_apply": false,
+      "force_only": true,
+      "aesthetic": true,
+      "params": {
+        "palette": "hoo",
+        "stretch_mode": "linked",
+        "s_mix": 0.8
+      },
+      "variants": {
+        "nbp_hoo": {
+          "palette": "hoo",
+          "stretch_mode": "linked"
+        },
+        "nbp_foraxx": {
+          "palette": "foraxx",
+          "stretch_mode": "linked"
+        },
+        "nbp_sho_gold": {
+          "palette": "sho",
+          "stretch_mode": "linked",
+          "s_mix": 0.8
+        },
+        "nbp_hoo_aggressive": {
+          "palette": "hoo",
+          "stretch_mode": "per_channel"
+        }
+      },
+      "experiment_variants": [
+        {
+          "id": "nbp_hoo",
+          "description": "HOO bicolor from true XP-extracted channels (R=Ha, G=B=OIII), linked stretch preserves the real line ratio",
+          "engine": "seti_astro",
+          "fn": "nb_palette",
+          "params": {
+            "palette": "hoo",
+            "stretch_mode": "linked"
+          }
+        },
+        {
+          "id": "nbp_foraxx",
+          "description": "Foraxx dynamic palette (R=Ha, B=OIII, G=w*Ha+(1-w)*OIII with w=O^(1-O)), linked stretch",
+          "engine": "seti_astro",
+          "fn": "nb_palette",
+          "params": {
+            "palette": "foraxx",
+            "stretch_mode": "linked"
+          }
+        },
+        {
+          "id": "nbp_sho_gold",
+          "description": "Synthetic SHO / Hubble (R=0.8*Ha, G=Ha, B=OIII) — golden-olive Ha regions, blue OIII",
+          "engine": "seti_astro",
+          "fn": "nb_palette",
+          "params": {
+            "palette": "sho",
+            "stretch_mode": "linked",
+            "s_mix": 0.8
+          }
+        },
+        {
+          "id": "nbp_hoo_aggressive",
+          "description": "HOO with per-channel statistical stretch — surfaces faint OIII aggressively; only sane on OIII-strong fields",
+          "engine": "seti_astro",
+          "fn": "nb_palette",
+          "params": {
+            "palette": "hoo",
+            "stretch_mode": "per_channel"
+          }
+        }
+      ],
+      "note": "Narrowband palette composite from the TRUE Ha/OIII channels written by the xp_channel_extract hook (Gaia-XP mixing-matrix NNLS unmixing of LP dual-band data; fit on the star-full post-background_extraction image, applied to the starless linear image at the stretch boundary). REPLACES the post-stretch starless working image; stars are re-screened by the existing tail machinery. No-ops (keeps current image) when xp channels are missing or dims mismatch. Aesthetic step — never score-gate palette choice. SCNR is skipped when this step is forced (it would clip the palette's G/teal). Alternative to the narrowband_norm approximation path — force one or the other, not both.",
+      "quality_impact": []
+    },
+    "narrowband_norm": {
+      "seti_astro_fn": "narrowband_normalize",
+      "stage": "nonlinear",
+      "force_apply": false,
+      "force_only": true,
+      "aesthetic": true,
+      "params": {
+        "o3_boost": 1.0
+      },
+      "variants": {
+        "nbn_o3_soft": {
+          "o3_boost": 1.3
+        },
+        "nbn_o3_strong": {
+          "o3_boost": 1.7
+        }
+      },
+      "note": "PI NarrowbandNormalization on the HOO palette. The vibrancy lever is o3Boost (OIII boost) — auto-scaled from Ha dominance (ha_dominance_ratio) via o3Boost=clamp(0.50+0.395·ratio, 1.25, 1.7): a more Ha-dominant target needs more OIII boost to surface its weak teal core. Manual overrides nbn_o3_soft(1.3)/nbn_o3_strong(1.7). The old method (MaximumStars/Equalize) was a silent no-op in PI 1.9.3 (normalizationMode doesn't exist). The in-JS HOO saturation restore is disabled (hoo_boost=0); the dedicated nbn color_boost preset is the sole saturation pass. SCNR is SKIPPED on the narrowband path so OIII (which lands across green+blue on SeeStar duo-band OSC) isn't stripped before NBN balances. Placed where scnr would run, before background_neutralize. Equalize LIFTS OIII to match Ha (SHO/gold-blue look) — for a natural Ha-red-dominant result use narrowband_hoo instead."
+    },
+    "narrowband_hoo": {
+      "seti_astro_fn": "narrowband_hoo",
+      "stage": "nonlinear",
+      "force_apply": false,
+      "force_only": true,
+      "aesthetic": true,
+      "params": {
+        "oiii_cap": 0.85
+      },
+      "variants": {
+        "hoo_oiii_soft": {
+          "oiii_cap": 0.6
+        },
+        "hoo_oiii_strong": {
+          "oiii_cap": 1.0
+        }
+      },
+      "note": "HOO-preserving alternative to narrowband_norm (2026-07-08): Ha stays the DOMINANT red, OIII is a bounded blue/teal accent — the opposite intent to Equalize, which lifts OIII to match Ha. R=Ha, G=0.15·Ha+0.9·O, B=O with O=min(OIII, oiii_cap·Ha). The local cap guarantees Ha dominance and forces O→0 where there is no Ha, auto-killing the field-flood that a naive OIII surface produces on Ha-dominant fields. oiii_cap is the one knob (0.6 near-pure-red, 1.0 max teal while Ha-led); soft/strong variants. OIII source: run_dir/xp_oiii.fit (real Gaia-XP channels) preferred, RGB blue-cyan-excess proxy fallback. IMPORTANT: needs SPATIALLY-DISTINCT OIII to show teal — on HII regions where OIII co-locates with Ha (IC 1805) the overlap reads gray, not teal; best for planetary nebulae / Veil / OIII-rich bicolor targets. Force via force_hoo (mutually exclusive with narrowband_norm/nb_palette). SCNR skipped on this path like the other NB steps."
+    },
+    "narrowband_composite": {
+      "seti_astro_fn": "narrowband_composite_dispatch",
+      "stage": "linear",
+      "force_apply": true,
+      "params": {
+        "palette": "foraxx"
+      },
+      "variants": {
+        "sho_palette": {
+          "palette": "sho"
+        },
+        "foraxx_palette": {
+          "palette": "foraxx"
+        }
+      },
+      "note": "Combine mono Ha/OIII/SII FITS into RGB using SHO (R=SII G=Ha B=OIII) or Foraxx (R=Ha*0.76+OIII*0.24, G=OIII*0.85+Ha*0.15, B=OIII) palette. Source paths provided via job extra_params['narrowband']."
+    }
+  },
+  "quality_dimensions": {
+    "overall": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 7
+    },
+    "noise": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 6,
+      "remediation_steps": [
+        "denoise_linear",
+        "noise_reduction",
+        "clahe"
+      ]
+    },
+    "gradient": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 6,
+      "remediation_steps": [
+        "background_extraction",
+        "background_neutralize"
+      ]
+    },
+    "star_roundness": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 6,
+      "remediation_steps": [
+        "deconvolution",
+        "sharpen_linear",
+        "halo_suppression"
+      ]
+    },
+    "stretch_quality": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 6,
+      "remediation_steps": [
+        "stretch",
+        "curves"
+      ]
+    },
+    "color_balance": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 6,
+      "remediation_steps": [
+        "scnr",
+        "background_neutralize",
+        "color_calibration"
+      ]
+    },
+    "detail_level": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 6,
+      "remediation_steps": [
+        "deconvolution",
+        "clahe",
+        "dark_enhance",
+        "hdr_compression"
+      ]
+    },
+    "dynamic_range": {
+      "range": [
+        1,
+        10
+      ],
+      "action_threshold": 6,
+      "remediation_steps": [
+        "hdr_compression",
+        "dark_enhance",
+        "curves"
+      ]
+    }
+  },
+  "stretch_quality_targets": {
+    "_description": "Pixel-level targets after final stretch. Sky bg = corner median. Used to anchor Claude's visual assessment to objective data.",
+    "galaxy": {
+      "bg_level": [
+        0.05,
+        0.08
+      ],
+      "p99_range": [
+        0.48,
+        0.68
+      ],
+      "score_excellent": "bg 0.05-0.07, p99 0.50-0.62, spiral/arm detail visible against a dark sky, no clipped cores \u2014 score 8-10",
+      "score_good": "bg 0.07-0.09, p99 0.45-0.70, minor clipping in very bright stars only \u2014 score 6-7",
+      "score_poor": "bg > 0.10 (muddy/brown sky) OR p99 > 0.75 (galaxy washed out / over-bright) OR p99 < 0.40 (flat/under-stretched) \u2014 score \u2264 4",
+      "typical_target_median": 0.06,
+      "note": "M51, M81, M101, Andromeda \u2014 sky-dominated. Henry prefers a DARKER galaxy with high contrast (preferred M51 p99\u22480.56, sky bg\u22480.06); the old 0.78-0.93 p99 floor over-brightened to his eye. Keep structure punchy but not washed; mute the sky into the bg band."
+    },
+    "nebula": {
+      "bg_level": [
+        0.06,
+        0.1
+      ],
+      "p99_range": [
+        0.72,
+        0.9
+      ],
+      "score_excellent": "bg 0.06-0.09, emission regions 0.30-0.70, dark lanes clearly visible \u2014 score 8-10",
+      "score_good": "bg 0.09-0.12, most emission detail visible \u2014 score 6-7",
+      "score_poor": "bg > 0.13 OR dark lanes invisible OR widespread halos \u2014 score \u2264 4",
+      "typical_target_median": 0.09,
+      "note": "IC1396, M42, Orion, Rosette \u2014 emission fills more of frame"
+    },
+    "star_cluster": {
+      "bg_level": [
+        0.04,
+        0.08
+      ],
+      "score_excellent": "black background, stars distinct points, no halos \u2014 score 8-10",
+      "score_poor": "grey background OR halos OR merged faint stars \u2014 score \u2264 4",
+      "typical_target_median": 0.07,
+      "note": "M45, M44, globulars \u2014 pure stellar field, dark bg important"
+    },
+    "supernova_remnant": {
+      "bg_level": [
+        0.05,
+        0.09
+      ],
+      "p99_range": [
+        0.72,
+        0.88
+      ],
+      "typical_target_median": 0.08,
+      "note": "M1 Crab, Veil \u2014 faint filamentary, needs dark bg to see threads"
+    }
+  },
+  "iteration_rules": {
+    "max_iterations_per_step": 5,
+    "improvement_threshold": 1.5,
+    "stop_if_overall_gte": 8,
+    "linear_stage_budget_seconds": 600,
+    "abort_if_initial_below": 2,
+    "abort_if_post_stretch_below": 3,
+    "warn_if_final_below": 5
+  },
+  "workflows": {
+    "seestar_broadband": {
+      "description": "Full Seestar OSC broadband: crop \u2192 BGE \u2192 SPCC \u2192 deconvolution \u2192 denoise \u2192 star split \u2192 stretch starless \u2192 SCNR \u2192 BG neutralize \u2192 CLAHE \u2192 noise \u2192 curves \u2192 HDR \u2192 stretch stars \u2192 recombine \u2192 halo",
+      "force_apply_steps": [
+        "background_extraction",
+        "denoise_linear",
+        "star_sharpen",
+        "curves"
+      ],
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_pre_stretch",
+        "remove_stars_linear",
+        "stretch",
+        "assess_post_stretch",
+        "scnr",
+        "background_neutralize",
+        "clahe",
+        "noise_reduction",
+        "curves",
+        "hdr_compression",
+        "stretch_stars",
+        "combine_stars_screen",
+        "halo_suppression",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "dark_enhance",
+        "color_sat"
+      ],
+      "force_variants": {
+        "star_sharpen": "bxt_correct_only",
+        "curves": "pi_curves"
+      }
+    },
+    "seestar_fast": {
+      "description": "Quick pipeline: crop \u2192 BGE \u2192 stretch \u2192 SCNR.",
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "stretch",
+        "scnr",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "clahe",
+        "curves",
+        "color_sat",
+        "hdr_compression"
+      ]
+    },
+    "seestar_galaxy": {
+      "description": "Galaxy optimised: crop \u2192 BGE \u2192 SPCC \u2192 deconvolution \u2192 denoise \u2192 star split \u2192 GHS stretch starless \u2192 SCNR \u2192 BG neutralize \u2192 CLAHE \u2192 curves \u2192 stretch stars \u2192 recombine \u2192 halo. HDR/dark-enhance are optional (added only when the adaptive plan finds a blown core), to avoid over-cooking low-dynamic-range galaxy disks.",
+      "force_apply_steps": [
+        "background_extraction",
+        "denoise_linear",
+        "star_sharpen",
+        "curves"
+      ],
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_pre_stretch",
+        "remove_stars_linear",
+        "stretch",
+        "assess_post_stretch",
+        "scnr",
+        "background_neutralize",
+        "color_boost",
+        "clahe",
+        "curves",
+        "stretch_stars",
+        "combine_stars_screen",
+        "halo_suppression",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "color_sat",
+        "hdr_core_blend",
+        "dark_enhance",
+        "sky_green_rebalance"
+      ],
+      "force_variants": {
+        "denoise_linear": "nxt",
+        "star_sharpen": "bxt_correct_only",
+        "curves": "pi_curves"
+      }
+    },
+    "seestar_nebula": {
+      "description": "Emission/reflection nebula: crop \u2192 BGE \u2192 SPCC \u2192 deconvolution \u2192 denoise \u2192 star split \u2192 stretch starless \u2192 SCNR \u2192 BG neutralize \u2192 CLAHE \u2192 noise \u2192 curves \u2192 stretch stars \u2192 recombine \u2192 halo",
+      "force_apply_steps": [
+        "background_extraction",
+        "denoise_linear",
+        "star_sharpen",
+        "curves"
+      ],
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_pre_stretch",
+        "remove_stars_linear",
+        "stretch",
+        "assess_post_stretch",
+        "nb_palette",
+        "scnr",
+        "narrowband_norm",
+        "background_neutralize",
+        "color_boost",
+        "clahe",
+        "noise_reduction",
+        "curves",
+        "stretch_stars",
+        "combine_stars_screen",
+        "halo_suppression",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "color_sat",
+        "hdr_core_blend",
+        "dark_enhance",
+        "sky_green_rebalance"
+      ],
+      "force_variants": {
+        "denoise_linear": "nxt",
+        "star_sharpen": "bxt_correct_only",
+        "curves": "pi_curves"
+      }
+    },
+    "public_free_core": {
+      "description": "Public golden-verification profile: the measured nebula sequence pinned to free/headless tools only. No PixInsight, RC-Astro, Telegram, or aesthetic API is required.",
+      "force_apply_steps": [
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "curves"
+      ],
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_pre_stretch",
+        "remove_stars_linear",
+        "stretch",
+        "assess_post_stretch",
+        "nb_palette",
+        "scnr",
+        "narrowband_norm",
+        "background_neutralize",
+        "color_boost",
+        "clahe",
+        "noise_reduction",
+        "curves",
+        "stretch_stars",
+        "combine_stars_screen",
+        "halo_suppression",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "color_sat",
+        "hdr_core_blend",
+        "dark_enhance",
+        "sky_green_rebalance"
+      ],
+      "force_variants": {
+        "color_calibration": "cc_sssc",
+        "deconvolution": "cc_sharpen_moderate",
+        "denoise_linear": "cosmic_clarity_conservative",
+        "star_sharpen": "cc_stellar",
+        "curves": "s_mild"
+      }
+    },
+    "linear_only": {
+      "description": "Linear-stage only: crop \u2192 BGE \u2192 deconvolution \u2192 denoise. No stretch. Use when stretching manually.",
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [],
+      "force_apply_steps": [
+        "star_sharpen"
+      ],
+      "force_variants": {
+        "star_sharpen": "bxt_correct_only"
+      }
+    },
+    "seestar_starless_stretch": {
+      "description": "Starless/star-split stretch workflow: remove stars before stretch, stretch starless and stars separately (SASpro Star Stretch), then screen-blend recombine. Best for galaxies and nebulae where star size/color needs independent control.",
+      "force_apply_steps": [
+        "background_extraction",
+        "denoise_linear",
+        "curves"
+      ],
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "assess_pre_stretch",
+        "remove_stars_linear",
+        "stretch",
+        "assess_post_stretch",
+        "scnr",
+        "background_neutralize",
+        "clahe",
+        "noise_reduction",
+        "curves",
+        "hdr_compression",
+        "stretch_stars",
+        "combine_stars_screen",
+        "halo_suppression",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "dark_enhance",
+        "color_sat"
+      ],
+      "force_variants": {
+        "curves": "pi_curves"
+      }
+    },
+    "experiment_full": {
+      "description": "Full experiment pipeline \u2014 all steps with all variants, Claude picks best at each. Star split before stretch.",
+      "force_apply_steps": [
+        "background_extraction",
+        "denoise_linear",
+        "star_sharpen",
+        "curves"
+      ],
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_pre_stretch",
+        "remove_stars_linear",
+        "stretch",
+        "assess_post_stretch",
+        "scnr",
+        "background_neutralize",
+        "clahe",
+        "noise_reduction",
+        "curves",
+        "hdr_compression",
+        "dark_enhance",
+        "stretch_stars",
+        "combine_stars_screen",
+        "halo_suppression",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "color_sat"
+      ],
+      "force_variants": {
+        "star_sharpen": "bxt_correct_only",
+        "curves": "pi_curves"
+      }
+    },
+    "spcc_only": {
+      "description": "Single-step SPCC test: runs only the color_calibration experiment (SPCC vs CC vs none) on an existing stack.",
+      "steps": [
+        "color_calibration"
+      ],
+      "optional_nonlinear_steps": []
+    },
+    "seestar_globular": {
+      "description": "Globular cluster optimised: crop \u2192 GraXpert BGE (fallback ADBE) \u2192 SPCC \u2192 BXT \u2192 NXT \u2192 stat_globular stretch (targetMedian=0.11, shadow clip at Med-7.4\u00d7MAD) \u2192 globular_balanced curves (lift halo, roll off core highlights) \u2192 assess. CALIBRATED 2026-05-24 from Henry's manual C 80 PI workflow (curves-only 8.2/10). KEY FINDINGS: color_sat harms result (8.2\u21926.2, green cast) \u2014 REMOVED. globular_balanced curve replaces s_mild: lifts faint halo, rolls off bright core. GraXpert>ADBE for large globulars despite gradient metric increase (cluster halo effect). targetMedian lowered 0.15\u21920.11 (2026-05-29): M13 run sky_bg=0.148 was over-bright; dense cores need headroom for curves to roll off highlights.",
+      "force_apply_steps": [
+        "background_extraction",
+        "denoise_linear",
+        "crop",
+        "curves",
+        "star_sharpen"
+      ],
+      "force_variants": {
+        "background_extraction": "graxpert_sub",
+        "deconvolution": "bxt_globular",
+        "denoise_linear": "nxt_strong",
+        "stretch": "stat_globular",
+        "curves": "pi_globular_core_rolloff",
+        "star_sharpen": "bxt_correct_only"
+      },
+      "steps": [
+        "assess_initial",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_pre_stretch",
+        "stretch",
+        "curves",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "hdr_compression",
+        "dark_enhance"
+      ]
+    },
+    "quick_default": {
+      "description": "GraXpert AI \u2192 SPCC (LP filter auto-detected) \u2192 BXT \u2192 NXT \u2192 SxT star split \u2192 star stretch \u2192 STF starless (linked, preserves SPCC balance) \u2192 screen recombine \u2192 assess. No intermediate assessments.",
+      "force_variants": {
+        "background_extraction": "graxpert_sub",
+        "deconvolution": "bxt_standard",
+        "denoise_linear": "nxt",
+        "stretch_stars": "star_stretch_default",
+        "stretch": "stf_galaxy",
+        "star_sharpen": "bxt_correct_only"
+      },
+      "force_apply_steps": [
+        "color_calibration",
+        "star_sharpen"
+      ],
+      "steps": [
+        "background_extraction",
+        "color_calibration",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "remove_stars_linear",
+        "stretch_stars",
+        "stretch",
+        "combine_stars_screen",
+        "assess_final"
+      ],
+      "optional_nonlinear_steps": [
+        "scnr",
+        "clahe",
+        "color_sat",
+        "hdr_compression",
+        "dark_enhance"
+      ]
+    },
+    "seestar_narrowband": {
+      "description": "Full narrowband palette workflow: Ha/OIII/SII \u2192 SHO or Foraxx composite \u2192 full processing chain with NBN and nebula color boost.",
+      "steps": [
+        "assess_initial",
+        "narrowband_composite",
+        "crop",
+        "remove_pedestal",
+        "cosmetic_correction",
+        "background_extraction",
+        "deconvolution",
+        "denoise_linear",
+        "star_sharpen",
+        "assess_pre_stretch",
+        "remove_stars_linear",
+        "stretch",
+        "assess_post_stretch",
+        "nb_palette",
+        "narrowband_norm",
+        "scnr",
+        "background_neutralize",
+        "color_boost",
+        "clahe",
+        "noise_reduction",
+        "curves",
+        "stretch_stars",
+        "combine_stars_screen",
+        "halo_suppression",
+        "assess_final"
+      ],
+      "force_apply_steps": [
+        "star_sharpen",
+        "curves",
+        "narrowband_norm"
+      ],
+      "force_variants": {
+        "star_sharpen": "bxt_correct_only",
+        "curves": "pi_curves"
+      }
+    }
+  }
+}
