@@ -15,12 +15,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
-    required = ("README.md", "REPLICATE.md", "RELEASE.md", "SHA256SUMS", "settings.example.json")
+    required = (
+        "README.md",
+        "REPLICATE.md",
+        "RELEASE.md",
+        "SHA256SUMS",
+        "settings.example.json",
+        "nas_server/processing_ontology.json",
+    )
     missing = [name for name in required if not (ROOT / name).is_file()]
     if missing:
         raise SystemExit("missing release files: " + ", ".join(missing))
 
     example = json.loads((ROOT / "settings.example.json").read_text(encoding="utf-8"))
+    ontology = json.loads(
+        (ROOT / "nas_server" / "processing_ontology.json").read_text(encoding="utf-8")
+    )
+    if "public_free_core" not in ontology.get("workflows", {}):
+        raise SystemExit("processing ontology is missing the public_free_core workflow")
     if not compileall.compile_dir(ROOT / "nas_server", quiet=1):
         raise SystemExit("Python source compilation failed")
 

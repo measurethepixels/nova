@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import urllib.error
@@ -64,6 +65,26 @@ def probe_executable(name: str, configured: str) -> dict[str, Any]:
         path=resolved,
         version=version,
     )
+
+
+def probe_siril() -> dict[str, Any]:
+    """Report Siril availability and the supported headless-version contract."""
+    result = probe_executable("siril", "siril-cli")
+    result["minimum_version"] = "1.4.3"
+    version_text = result.get("version") or ""
+    match = re.search(r"(?:siril\s+)?(\d+)\.(\d+)\.(\d+)", version_text, re.I)
+    if not result["available"]:
+        result["compatible"] = False
+        return result
+    if match is None:
+        result["compatible"] = None
+        result["detail"] += "; compatibility unknown (could not parse version; need >= 1.4.3)"
+        return result
+    installed = tuple(int(value) for value in match.groups())
+    result["compatible"] = installed >= (1, 4, 3)
+    if not result["compatible"]:
+        result["detail"] += "; unsupported for headless stacking (need >= 1.4.3)"
+    return result
 
 
 def probe_pixinsight(configured: str) -> dict[str, Any]:
@@ -182,7 +203,7 @@ def run_doctor(settings: Mapping[str, Any]) -> dict[str, Any]:
         except Exception as exc:  # a broken optional probe must not abort the report
             return _result(getattr(probe, "__name__", "probe"), None, f"probe error: {exc}")
 
-    probes.append(safe(lambda: probe_executable("siril", "siril-cli")))
+    probes.append(safe(probe_siril))
     probes.append(safe(lambda: probe_pixinsight(str(settings.get("pi_binary", "")))))
     probes.append(safe(lambda: probe_python_package("saspro", "setiastro.saspro")))
     probes.append(safe(lambda: probe_python_package("imagemm", "setiastro.saspro.mfdeconv")))
