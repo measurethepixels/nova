@@ -12,6 +12,18 @@ from datetime import datetime, timezone
 log = logging.getLogger(__name__)
 
 
+def decide_response_plan(review_id: int, hx_request: bool) -> tuple[int, dict[str, str]]:
+    """Status code + headers for a review-decide response, kept independent of
+    the web framework so it's testable without importing FastAPI. htmx clients
+    keep the existing 200 + HX-Redirect; a native form POST (unpkg.com blocked,
+    the clean-machine Codespace trial's actual failure mode) needs a real
+    redirect or it gets a blank response and never navigates anywhere."""
+    target = f"/review/{review_id}"
+    if hx_request:
+        return 200, {"HX-Redirect": target}
+    return 303, {"Location": target}
+
+
 def _fmt_expires(expires_at: str) -> str:
     try:
         exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
@@ -134,7 +146,8 @@ def render_disagree_confirm(review_id: int, user_label: str, claude_label: str,
     {claude_reasoning or "No reasoning provided."}
   </div>
   <div style="display:flex;flex-wrap:wrap;gap:.75rem;margin-top:.25rem">
-    <form hx-post="/review/{review_id}/decide-final" hx-swap="none">
+    <form method="post" action="/review/{review_id}/decide-final"
+          hx-post="/review/{review_id}/decide-final" hx-swap="none">
       <input type="hidden" name="winner_label"   value="{user_label}">
       <input type="hidden" name="user_reasoning" value="{user_reasoning}">
       <button type="submit"
@@ -143,7 +156,8 @@ def render_disagree_confirm(review_id: int, user_label: str, claude_label: str,
         Keep my choice ({user_label})
       </button>
     </form>
-    <form hx-post="/review/{review_id}/decide-final" hx-swap="none">
+    <form method="post" action="/review/{review_id}/decide-final"
+          hx-post="/review/{review_id}/decide-final" hx-swap="none">
       <input type="hidden" name="winner_label"   value="{claude_label}">
       <input type="hidden" name="user_reasoning" value="{user_reasoning}">
       <button type="submit"
@@ -208,7 +222,8 @@ def _render_pending(r: dict, review_id: int, target: str, step: str, variants: l
   {img_html}
   {_metrics_table(met)}
   <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;margin-top:.5rem">
-    <input type="radio" name="winner_label" value="{label}" required>
+    <input type="radio" name="winner_label" value="{label}" required
+           form="review-decision-form">
     <span style="font-weight:600">Select {label}</span>
   </label>
 </div>""")
@@ -237,7 +252,9 @@ def _render_pending(r: dict, review_id: int, target: str, step: str, variants: l
     </span>
   </div>
 
-  <form class="rv-form" style="margin-top:1.5rem;max-width:600px"
+  <form id="review-decision-form" class="rv-form"
+        method="post" action="/review/{review_id}/decide"
+        style="margin-top:1.5rem;max-width:600px"
         hx-post="/review/{review_id}/decide" hx-swap="outerHTML"
         hx-include="[name='winner_label']">
     <label>

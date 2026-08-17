@@ -1,11 +1,13 @@
 """Launch handbook content built against :mod:`handbook_contract`.
 
 Issue #285 lands the eight M66 process families in independently reviewable
-batches.  This module contains the calibration-gates, background/color, and
-restoration (deconvolution, denoise, star correction) batches.  Stretch is
-the remaining, deliberately separate final batch.  Content is process-first,
-not a replacement for a run-specific recipe.  Tool paths deliberately
-distinguish documented, tested, source-confirmed, and unverified claims.
+batches.  This module now contains all eight: calibration-gates,
+background/color, restoration (deconvolution, denoise, star correction), and
+stretch -- the deliberately separate final batch, since it is the most
+contested and mathematically varied family (six real engines, one
+M66-validated). Content is process-first, not a replacement for a
+run-specific recipe.  Tool paths deliberately distinguish documented,
+tested, source-confirmed, and unverified claims.
 """
 
 from __future__ import annotations
@@ -65,8 +67,16 @@ SIRIL_COSMETIC_144 = EvidenceReference(
 
 NOVA_BACKGROUND_SOURCE = EvidenceReference(
     reference_id="nova-background-source",
-    title="NOVA background-extraction implementations and ontology",
-    locator="nas_server/seti_astro.py:931; nas_server/processing_ontology.json:354",
+    title="NOVA background-extraction implementations (GraXpert, ADBE, native PixInsight DBE/GradientCorrection) and ontology",
+    locator=(
+        "nas_server/seti_astro.py:934 (GraXpert background_extract), "
+        "nas_server/seti_astro.py:457 (ADBE); "
+        "nas_server/pixinsight.py:188-190 (dbe/dbe_correction/gradient_correction params); "
+        "nas_server/pi_postprocess.js:361-395 (DynamicBackgroundExtraction and "
+        "GradientCorrection PJSR calls); "
+        "nas_server/processing_ontology.json:354 (experiment_variants: graxpert_sub, "
+        "graxpert_div, pi_gc, adbe_default, adbe_cubic, adbe_poly_only, none)"
+    ),
     provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
 )
 
@@ -138,6 +148,44 @@ NOVA_STAR_CORRECTION_SOURCE = EvidenceReference(
     reference_id="nova-star-correction-source",
     title="NOVA BlurXTerminator correct-only star-shape implementation and ontology",
     locator="nas_server/seti_astro.py:2623; nas_server/processing_ontology.json:915",
+    provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
+)
+
+SIRIL_NATIVE_STRETCH_MANUAL = EvidenceReference(
+    reference_id="siril-native-stretch-manual",
+    title="Project-authored Siril native-stretch guidance (SIRIL_MANUAL['stretch'])",
+    locator="nas_server/recipe_page.py:116",
+    provenance=ProvenanceLabel.REASONED_TRANSLATION,
+)
+
+JEFF_SIRIL_VERALUX_NOTE = EvidenceReference(
+    reference_id="jeff-siril-veralux-note",
+    title="Jeff: Siril has a separately installed Veralux Python script (2026-08-15)",
+    locator="Jeff, direct confirmation, 2026-08-15 conversation",
+    provenance=ProvenanceLabel.HENRY_VALIDATED,
+)
+
+NOVA_STRETCH_SOURCE = EvidenceReference(
+    reference_id="nova-stretch-source",
+    title=(
+        "NOVA stretch engines: stat_stretch/ghs_stretch (real SASpro calls), "
+        "stf_stretch/veralux_stretch/smart_stretch (NOVA-original, no external tool), "
+        "PixInsight MultiscaleAdaptiveStretch, and ontology variants"
+    ),
+    locator=(
+        "nas_server/seti_astro.py:273 (stf_stretch, pure NumPy, no setiastro import), "
+        "nas_server/seti_astro.py:376 (stat_stretch, calls "
+        "setiastro.saspro.imageops.stretch), "
+        "nas_server/seti_astro.py:421 (ghs_stretch, calls setiastro.saspro.ghs_preset), "
+        "nas_server/seti_astro.py:1136 (veralux_stretch, pure NumPy, NOVA-original, no "
+        "setiastro import), nas_server/seti_astro.py:1319 (smart_stretch, adaptive "
+        "orchestration over the above); nas_server/pixinsight.py:223 (mas flag); "
+        "nas_server/pi_postprocess.js:813-833 (MultiscaleAdaptiveStretch PJSR call, "
+        "no parameter override in M66's run); nas_server/tool_params.py:250-274 "
+        "(compute_ghs: only alpha and pivot are data-driven, beta/gamma/lp/hp stay at "
+        "function defaults); nas_server/processing_ontology.json:956 (13 "
+        "experiment_variants across 6 engines)"
+    ),
     provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
 )
 
@@ -527,7 +575,7 @@ COSMETIC_CORRECTION = HandbookArticle(
 BACKGROUND_EXTRACTION = HandbookArticle(
     article_id="background-extraction",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=2,
     process_family=ProcessFamily.BACKGROUND_EXTRACTION,
     purpose=(
         "Model and remove unwanted large-scale background variation while preserving "
@@ -547,6 +595,9 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         "A flatter background metric does not prove that faint galaxy halo or nebulosity survived.",
         "Subtraction is appropriate for additive gradients; division is reserved for genuinely multiplicative effects.",
         "Background neutralization is a later channel-balance decision, not another name for spatial gradient removal.",
+        "Smoothing scales are not comparable across engines: GraXpert's smoothing runs 0.0 (aggressive) to 1.0 "
+        "(gentle); PixInsight's native DynamicBackgroundExtraction smoothing is a different, larger-range control "
+        "(NOVA's own DBE call uses 5.0). Copying a GraXpert number into DBE's field is not a translation.",
     ),
     required_input_state=(
         "Linear, unstretched data with registration borders and low-coverage edges cropped away.",
@@ -554,9 +605,11 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         "Before-operation corner/region statistics and the intended correction mode recorded.",
     ),
     nova_action=(
-        "NOVA selects a bounded background-extraction variant from its ontology. The "
-        "broadband and globular paths commonly use GraXpert subtraction; SASpro ADBE and "
-        "no-correction remain explicit alternatives rather than assumed equivalents."
+        "NOVA's ontology exposes seven selectable background-extraction variants; M66's recorded run used "
+        "GraXpert AI subtraction (smoothing 0.50). The other six are real, code-confirmed alternatives NOVA "
+        "can select but did not use for M66: GraXpert division (vignetting), PixInsight's native "
+        "GradientCorrection, and three SASpro ADBE presets (default, cubic, polynomial-only). A 'none' baseline "
+        "is also selectable. Do not present the M66-selected path as the only one NOVA runs."
     ),
     nova_evidence_ids=("nova-background-source", "nova-m66-run-1.24.7"),
     use_when=(
@@ -572,6 +625,11 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         "The evidence artifact is the model as well as the corrected image: a plausible-looking result can still be overfit.",
         "Large nebulae and galaxy halos are the adversarial case because real signal can resemble a smooth background trend.",
         "M66 validates one GraXpert subtraction configuration, not a universal smoothing value or model choice.",
+        "The project's own history is a warning here: an earlier version of this guidance pointed at PixInsight "
+        "DynamicBackgroundExtraction/GradientCorrection as the reference path before Jeff's hands-on M66 "
+        "verification established GraXpert as what NOVA actually runs. DBE and GradientCorrection are real, "
+        "code-confirmed NOVA alternatives, not fabricated -- they were simply never M66's selected path, and an "
+        "earlier draft implied they were without checking.",
     ),
     tool_guidance=(
         ToolGuidance(
@@ -584,15 +642,15 @@ BACKGROUND_EXTRACTION = HandbookArticle(
                 "Save or inspect the modeled background and compare representative sky statistics before accepting.",
             ),
             controls_and_starting_ranges=(
-                ("broadband default candidate", "GraXpert AI subtraction; ontology-selected, not unconditional"),
-                ("M66 validated smoothing", "0.50 with background model 1.0.1"),
-                ("alternatives", "SASpro ADBE, GraXpert division, or no correction"),
+                ("M66 recorded path", "graxpert_sub -- GraXpert AI subtraction, smoothing 0.50, model 1.0.1"),
+                ("other selectable variants", "graxpert_div, pi_gc (PixInsight GradientCorrection), adbe_default, adbe_cubic, adbe_poly_only, none"),
             ),
             expected_result="The large-scale sky trend decreases while target structure is absent from the background model.",
             failure_modes=(
                 "The model reproduces the galaxy halo, nebula, or dense stellar structure.",
                 "Uncropped borders bias the fit.",
                 "A division correction is used to hide missing or incorrect flats.",
+                "Presenting the M66-recorded variant as NOVA's only background-extraction behavior.",
             ),
             recovery=(
                 "Revert to the unchanged linear input, correct the crop or calibration, and rerun with a simpler or better-protected model.",
@@ -605,16 +663,16 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         ToolGuidance(
             tool_id="pixinsight",
             tool_version="M66 validation environment; exact version not recorded",
-            host="PixInsight with GraXpert process",
+            host="GraXpert AI (Subtraction) via PixInsight",
             instructions=(
                 "Use the verified GraXpert route on the cropped linear image.",
-                "Choose subtraction for the demonstrated additive gradient and inspect the generated model before accepting.",
+                "Choose Subtraction for an additive gradient (light pollution, moonlight) and inspect the generated model before accepting.",
                 "Record the installed GraXpert process/model version, smoothing, correction mode, and before/after statistics.",
             ),
             controls_and_starting_ranges=(
                 ("M66 correction", "Subtraction"),
-                ("M66 smoothing", "0.50"),
-                ("generic range", "none established; tune from the image and model"),
+                ("M66 smoothing", "0.50 (GraXpert's own 0.0-1.0 scale)"),
+                ("generic range", "none established beyond M66; tune from the image and model"),
             ),
             expected_result="The M66-style additive gradient is reduced without the target appearing in the model.",
             failure_modes=(
@@ -628,18 +686,100 @@ BACKGROUND_EXTRACTION = HandbookArticle(
             source_ids=("m66-manual-verification",),
         ),
         ToolGuidance(
-            tool_id="siril",
-            tool_version="1.4.4",
-            host="Siril native Background Extraction or GraXpert Python integration",
+            tool_id="pixinsight",
+            tool_version="not independently confirmed in this repo",
+            host="GraXpert AI (Division) via PixInsight",
             instructions=(
-                "Crop invalid borders and work on the linear image.",
-                "For the M66-reproduced route, open Scripts > Python Scripts > Processing > GraXpert AI and use subtraction.",
-                "For a native route, start with RBF smoothing 0.50, remove samples on real signal, and inspect the model; use a low polynomial degree only for a simple trend.",
+                "Use only when a residual center-to-edge brightness pattern is genuinely multiplicative "
+                "(vignetting), not an additive light-pollution slope.",
+                "Same route as the Subtraction variant, with Division selected instead.",
+                "Prefer fixing the flat-field calibration first; Division here is a correction, not a substitute for a missing or wrong master flat.",
+            ),
+            controls_and_starting_ranges=(("correction", "Division; smoothing 0.5 is NOVA's code default, not M66-recorded"),),
+            expected_result="A multiplicative vignetting pattern flattens without a smooth subtraction-style residual.",
+            failure_modes=("Using Division to mask a missing or incorrect master flat instead of fixing calibration.",),
+            recovery=("Revert and re-derive/apply a correct master flat before repeating.",),
+            mask_support="Same as the Subtraction variant; not independently characterized.",
+            equivalence=EquivalenceClass.EXACT_REPLAY,
+            provenance=(ProvenanceLabel.NOVA_SOURCE_CONFIRMED,),
+            source_ids=("nova-background-source",),
+        ),
+        ToolGuidance(
+            tool_id="pixinsight",
+            tool_version="not independently confirmed in this repo",
+            host="Native DynamicBackgroundExtraction (DBE)",
+            instructions=(
+                "A real, selectable NOVA alternative to GraXpert, not the M66-recorded path -- run it directly "
+                "in PixInsight on the linear image if you specifically want this route.",
+                "Set the correction mode (Subtraction or Division) to match the gradient type.",
+                "Compare against a GraXpert result on the same image before treating DBE as equivalent.",
             ),
             controls_and_starting_ranges=(
-                ("native RBF starting smoothing", "0.50 vendor starting point; adjust from the model"),
-                ("polynomial", "low degree for a simple trend; degree 4 is a maximum, not a default"),
-                ("M66 GraXpert", "model 1.0.1, smoothing 0.50, subtraction"),
+                ("smoothing", "5.0 (NOVA's code default) -- DBE's own scale, not comparable to GraXpert's 0.0-1.0"),
+                ("useRollingPenaltyTerm", "enabled"),
+                ("correction", "subtraction or division, matching the gradient type"),
+            ),
+            expected_result="A modeled background comparable in intent to GraXpert's, produced by PixInsight's own classical algorithm rather than GraXpert's AI model.",
+            failure_modes=("Assuming DBE and GraXpert produce the same model because both are called 'background extraction'.",),
+            recovery=("Undo and fall back to the M66-verified GraXpert route.",),
+            mask_support="DBE supports manual sample-point placement in PixInsight's UI; not exercised through NOVA's automated call.",
+            equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
+            provenance=(ProvenanceLabel.NOVA_SOURCE_CONFIRMED,),
+            source_ids=("nova-background-source",),
+        ),
+        ToolGuidance(
+            tool_id="pixinsight",
+            tool_version="not independently confirmed in this repo",
+            host="Native GradientCorrection",
+            instructions=(
+                "A real, selectable NOVA alternative to GraXpert, not the M66-recorded path.",
+                "Run PixInsight's GradientCorrection process on the linear image with its own default settings -- "
+                "NOVA's call exposes no tunable parameters for this process.",
+                "Compare against a GraXpert result on the same image before treating GradientCorrection as equivalent.",
+            ),
+            controls_and_starting_ranges=(("parameters", "none exposed by NOVA; PixInsight's own process defaults apply"),),
+            expected_result="A modeled/corrected background using PixInsight's modern classical gradient-removal process.",
+            failure_modes=("Assuming this and GraXpert are interchangeable because both target the same symptom.",),
+            recovery=("Undo and fall back to the M66-verified GraXpert route.",),
+            mask_support="Not exposed through NOVA's automated call.",
+            equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
+            provenance=(ProvenanceLabel.NOVA_SOURCE_CONFIRMED,),
+            source_ids=("nova-background-source",),
+        ),
+        ToolGuidance(
+            tool_id="siril",
+            tool_version="Siril interface v2.1.0, GraXpert model 1.0.1, verified in Siril 1.4.4",
+            host="GraXpert AI via Siril's Python integration",
+            instructions=(
+                "Open Scripts > Python Scripts > Processing > GraXpert AI on the cropped linear image.",
+                "Use Subtraction for the demonstrated additive gradient; leave Keep Background off.",
+                "Record the GraXpert interface/model version shown, since it is not bundled with stock Siril.",
+            ),
+            controls_and_starting_ranges=(
+                ("M66 verified", "Background Extraction operation, model 1.0.1, smoothing 0.50, Subtraction, Keep Background off, batch size 4, GPU acceleration enabled when available"),
+            ),
+            expected_result="Matches the PixInsight/NOVA GraXpert result closely; same engine, different host.",
+            failure_modes=("Treating this as a stock Siril feature -- it is a separate Python integration.",),
+            recovery=("Undo and re-run with adjusted smoothing, or fall back to native Background Extraction.",),
+            mask_support="Model-driven, same as the PixInsight GraXpert route; not independently characterized beyond that.",
+            equivalence=EquivalenceClass.SAME_ENGINE_ADAPTED_HOST,
+            provenance=(ProvenanceLabel.TOOL_TESTED, ProvenanceLabel.HENRY_VALIDATED),
+            source_ids=("m66-manual-verification",),
+        ),
+        ToolGuidance(
+            tool_id="siril",
+            tool_version="1.4.4",
+            host="Native Background Extraction (RBF/polynomial)",
+            instructions=(
+                "Open Image Processing > Background Extraction on the linear image.",
+                "Set samples per line to about 20 and raise Tolerance so samples land off nebulosity and stars.",
+                "Use RBF for busy, irregular gradients; use a low-degree polynomial (degree 4 is a ceiling, not a starting point) only for a simple, smooth trend.",
+                "Choose Subtraction for additive gradients; inspect the generated model before accepting.",
+            ),
+            controls_and_starting_ranges=(
+                ("RBF smoothing", "0.50 vendor starting point; adjust from the model"),
+                ("polynomial degree", "low degree for a simple trend; 4 is a documented maximum, not a default"),
+                ("correction", "Subtraction for light pollution; Division reserved for genuine vignetting"),
             ),
             expected_result="Representative sky regions converge and the background model contains no target imprint.",
             failure_modes=(
@@ -648,28 +788,80 @@ BACKGROUND_EXTRACTION = HandbookArticle(
                 "Division is used for vignetting that should have been corrected by a master flat.",
             ),
             recovery=("Restore the original image, revise samples/model complexity, or repair calibration before retrying.",),
-            mask_support="Native sample placement can exclude target regions manually; GraXpert protection is model-driven.",
+            mask_support="Manual sample placement can exclude target regions.",
             equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
-            provenance=(ProvenanceLabel.VENDOR_DOCUMENTED, ProvenanceLabel.TOOL_TESTED, ProvenanceLabel.HENRY_VALIDATED),
-            source_ids=("siril-background-1.4.4", "siril-graxpert-1.4.4", "m66-manual-verification"),
+            provenance=(ProvenanceLabel.VENDOR_DOCUMENTED,),
+            source_ids=("siril-background-1.4.4",),
         ),
         ToolGuidance(
             tool_id="saspro",
             tool_version="1.18.0 source-inspected; ADBE execution tested on a synthetic linear array",
-            host="Seti Astro Suite Pro ADBE",
+            host="ADBE default (polynomial degree 2 + RBF)",
             instructions=(
-                "Run ADBE on the cropped linear image and choose model complexity from the observed gradient.",
+                "Run ADBE on the cropped linear image with the default preset.",
                 "Inspect the background model and compare representative sky regions and target structure.",
-                "Record polynomial/RBF settings because this is a functional alternative, not a replay of GraXpert AI.",
+                "Record which preset was used because this is a functional alternative, not a replay of GraXpert AI.",
             ),
-            controls_and_starting_ranges=(("model", "polynomial plus optional RBF; choose complexity from the image and saved model"),),
-            expected_result="The spatial gradient decreases without subtracting extended target signal.",
+            controls_and_starting_ranges=(
+                ("degree", "2 (quadratic) -- typical for ordinary SeeStar gradients"),
+                ("num_samples", "100 auto-placed background sample points"),
+                ("use_rbf", "true -- RBF refinement after the polynomial stage"),
+                ("rbf_smooth", "0.1 (0.01 very tight to 1.0 very smooth)"),
+            ),
+            expected_result="The spatial gradient decreases without subtracting extended target signal. Fastest of the three ADBE presets.",
             failure_modes=("Assuming ADBE and GraXpert produce equivalent models because both flatten backgrounds.",),
-            recovery=("Revert to the original linear input and reduce model flexibility or use the verified GraXpert path.",),
+            recovery=("Revert to the original linear input and try adbe_poly_only for a gentler pass, or use the verified GraXpert path.",),
             mask_support="Tool-specific protection was not independently characterized; rely on model and difference inspection.",
             equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
             provenance=(ProvenanceLabel.ARTIFACT_CONFIRMED, ProvenanceLabel.TOOL_TESTED),
             source_ids=("saspro-source-1.18.0", "saspro-synthetic-2026-08-14"),
+        ),
+        ToolGuidance(
+            tool_id="saspro",
+            tool_version="1.18.0 source-inspected",
+            host="ADBE cubic (polynomial degree 3 + RBF)",
+            instructions=(
+                "Use in place of the default preset only when the gradient is visibly more complex than a "
+                "simple quadratic trend -- a busier or multi-directional gradient.",
+                "Inspect the background model for overfitting; a higher-degree polynomial can start absorbing real structure.",
+                "Compare against the default preset's model on the same image before preferring this one.",
+            ),
+            controls_and_starting_ranges=(
+                ("degree", "3 (cubic) -- more flexible for complex gradients"),
+                ("num_samples", "120"),
+                ("use_rbf", "true"),
+                ("rbf_smooth", "0.15"),
+            ),
+            expected_result="A more flexible background model that still excludes target structure; more prone to overfitting than the default preset.",
+            failure_modes=("The higher-degree polynomial fits real extended structure as if it were background.",),
+            recovery=("Revert to the linear input and use the default or poly-only preset instead.",),
+            mask_support="Not independently characterized.",
+            equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
+            provenance=(ProvenanceLabel.ARTIFACT_CONFIRMED,),
+            source_ids=("saspro-source-1.18.0",),
+        ),
+        ToolGuidance(
+            tool_id="saspro",
+            tool_version="1.18.0 source-inspected",
+            host="ADBE polynomial-only (degree 2, no RBF)",
+            instructions=(
+                "Use for a faster, gentler pass when the gradient is simple and RBF refinement risks pulling in "
+                "faint extended signal.",
+                "Inspect the background model the same way as the other presets.",
+            ),
+            controls_and_starting_ranges=(
+                ("degree", "2"),
+                ("num_samples", "100"),
+                ("use_rbf", "false -- no RBF refinement stage"),
+                ("rbf_smooth", "0.1 (unused with RBF disabled)"),
+            ),
+            expected_result="A gentler, faster correction than the RBF-enabled presets; less able to follow irregular gradients.",
+            failure_modes=("Using this preset on a genuinely irregular gradient that needs RBF's local flexibility.",),
+            recovery=("Revert and switch to the default or cubic preset for a more flexible model.",),
+            mask_support="Not independently characterized.",
+            equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
+            provenance=(ProvenanceLabel.ARTIFACT_CONFIRMED,),
+            source_ids=("saspro-source-1.18.0",),
         ),
     ),
     measurements=(
@@ -1224,7 +1416,7 @@ STAR_CORRECTION = HandbookArticle(
         "Elongation is from tracking/guiding error, not denoise -- Correct Only will not fix trailing stars.",
     ),
     scientific_and_aesthetic_notes=(
-        "Henry's own manual verification renamed this step from 'Star Sharpen' to 'Star Correction "
+        "Jeff's own manual verification renamed this step from 'Star Sharpen' to 'Star Correction "
         "-- BlurXTerminator Correct Only' precisely because the old name implied sharpening that "
         "does not happen here; the taxonomy's family name reflects that correction.",
         "Do not equate BlurXTerminator Correct Only with Cosmic Clarity stellar-only sharpening -- "
@@ -1335,6 +1527,319 @@ STAR_CORRECTION = HandbookArticle(
 )
 
 
+STRETCH = HandbookArticle(
+    article_id="stretch",
+    schema_version=SCHEMA_VERSION,
+    revision=1,
+    process_family=ProcessFamily.STRETCH,
+    purpose=(
+        "Convert linear data -- where almost all real signal sits near zero and is "
+        "invisible on a normal display -- into a non-linear image a human can actually "
+        "see, without crushing the sky, clipping stars, or hiding the shape of the "
+        "stretch curve's own tradeoffs."
+    ),
+    observable_symptoms=(
+        "The linear image displays as almost entirely black except star cores; faint "
+        "structure is present in the data but not visible without a tone curve.",
+        "A naive linear stretch either leaves the image too dark to judge or blows out "
+        "the brightest cores before faint structure becomes visible.",
+    ),
+    intended_output=(
+        "A non-linear image with a dark, low sky background, visible faint structure "
+        "(galaxy arms, dust lanes, nebulosity), and star cores that are not hard-clipped."
+    ),
+    limits=(
+        "This is the single most contested, aesthetically-loaded step in the whole "
+        "pipeline -- 'correct' output depends on target type, sky darkness, and taste, "
+        "not just physics. Treat any single stretch as a judgment call, not a ground truth.",
+        "M66's recorded run validates exactly one engine (PixInsight MultiscaleAdaptiveStretch). "
+        "NOVA has six real, code-confirmed stretch engines total; the other five are real "
+        "alternatives it can select for other targets, not M66-validated.",
+        "Different engines are mathematically unrelated -- statistical (percentile-based), "
+        "generalized hyperbolic, arcsinh, and multiscale-adaptive curves. A similar-sounding "
+        "parameter value on two engines (e.g. a 'target' near 0.08-0.15) does not imply a "
+        "similar result; only the engine and its own documented math define the curve.",
+        "stf_stretch, veralux_stretch, and the adaptive selector smart_stretch are NOVA-original "
+        "code with no `setiastro` import and no PixInsight or SASpro GUI equivalent. veralux_stretch "
+        "independently reimplements a real, separately installed Siril Python script named Veralux -- "
+        "prefer that real script (Siril tab) as the reference path; Siril's native Asinh Stretch "
+        "remains a fallback approximation when the actual script isn't installed. stf_stretch and "
+        "smart_stretch still have no manual path in any tool.",
+        "Irreversible: clipped highlights and crushed shadows from an aggressive stretch "
+        "cannot be recovered from the output alone; the input's actual dynamic range sets "
+        "the ceiling on what any engine can safely show.",
+    ),
+    required_input_state=(
+        "Linear, unstretched data, after deconvolution and denoise (and star correction, "
+        "on workflows that run it) -- late in the pipeline, immediately before "
+        "background-neutralize/color-boost operate on the now-visible tonal range.",
+    ),
+    nova_action=(
+        "NOVA's ontology exposes six real stretch engines behind 13 selectable parameter "
+        "presets: PixInsight MultiscaleAdaptiveStretch (pi_mas -- M66's recorded path), "
+        "SASpro Statistical Stretch (stat_default/stat_bright/stat_globular), SASpro GHS "
+        "Stretch (ghs_default/ghs_galaxy), and three NOVA-original engines with no external "
+        "tool behind them: stf_stretch (a from-scratch reimplementation of the STF tone-curve "
+        "concept, presets stf_galaxy/stf_nebula), veralux_stretch (an original arcsinh-based "
+        "design with auto-detected symmetry point, presets veralux_default/colorful/globular), "
+        "and smart_stretch, which profiles the image's dynamic range and star fraction and "
+        "adaptively selects among STF/veralux/GHS/stat rather than running one fixed engine."
+    ),
+    nova_evidence_ids=("nova-stretch-source", "nova-m66-run-1.24.7"),
+    use_when=(
+        "Always, once linear processing (calibration, background, color, deconvolution, "
+        "denoise) is complete -- this is the step that makes the image viewable at all.",
+    ),
+    skip_when=(
+        "The input is already non-linear (re-stretching a stretched image compounds tone "
+        "curves and is a distinct, deliberate operation, not this step).",
+    ),
+    scientific_and_aesthetic_notes=(
+        "Jeff's own stated preference is galaxies darker and higher-contrast than a "
+        "generic 'bright and colorful' default -- a stretch that looks technically correct "
+        "can still be the wrong aesthetic call for a given target.",
+        "smart_stretch's adaptive engine selection is itself a real NOVA design decision, not "
+        "a documentation gap: for some targets the 'right' engine genuinely depends on "
+        "measured dynamic range and star density, not a fixed per-target-type default.",
+        "The historical MAS parameters recorded from M66 are the module's own installed "
+        "defaults (version 1.1.1.0), not values NOVA computed or tuned for this image -- the "
+        "workflow created the process and ran it with zero overrides.",
+    ),
+    tool_guidance=(
+        ToolGuidance(
+            tool_id="nova",
+            tool_version="workflow 1.23.0 (M66 run); ontology current",
+            host="NOVA Python pipeline",
+            instructions=(
+                "Confirm which of the six engines the active workflow selects before assuming "
+                "MAS (M66's engine) is the general default -- it is one of six, not the only one.",
+                "For stf_stretch or smart_stretch, do not look for a manual reproduction path "
+                "in PixInsight/Siril/SASpro; none exists for these NOVA-original engines. Judge "
+                "the output on its own measurements instead.",
+                "For veralux_stretch, prefer the real Veralux Siril script (see the Siril tab) -- "
+                "the same named algorithm, independently reimplemented -- over the native Asinh "
+                "Stretch fallback if the actual script is installed.",
+                "For stat_stretch/ghs_stretch/mas, the tool-specific tabs below give the real "
+                "manual reproduction path.",
+            ),
+            controls_and_starting_ranges=(
+                ("M66 recorded engine", "pi_mas -- PixInsight MultiscaleAdaptiveStretch, module defaults, no override"),
+                ("other selectable engines", "stat_stretch, ghs_stretch, stf_stretch, veralux_stretch, smart_stretch"),
+                ("NOVA-original, no manual equivalent anywhere", "stf_stretch, smart_stretch"),
+                ("NOVA-original, real Siril script counterpart", "veralux_stretch -- Siril's own Veralux script, algorithmically equivalent; native Asinh Stretch is only the fallback"),
+            ),
+            expected_result="A non-linear image with sky near-black, visible faint structure, and unclipped star cores.",
+            failure_modes=(
+                "Presenting M66's MAS result as NOVA's one and only stretch behavior.",
+                "Assuming stf_stretch or smart_stretch has a PixInsight/Siril/SASpro equivalent.",
+                "Reaching for Siril's native Asinh Stretch fallback when the real Veralux script is actually installed and available.",
+                "Presenting NOVA's veralux_stretch and the Siril Veralux script as byte-identical just because they share a name and algorithm -- independent implementations, algorithmically equivalent, not exact replay.",
+            ),
+            recovery=("Revert to the linear input and select a different engine/preset for the target's actual dynamic range.",),
+            mask_support="Engine-specific; MAS has an internal lightness mask on its color-saturation stage (see the PixInsight tab).",
+            equivalence=EquivalenceClass.EXACT_REPLAY,
+            provenance=(ProvenanceLabel.NOVA_SOURCE_CONFIRMED, ProvenanceLabel.NOVA_EXECUTION_RECORD),
+            source_ids=("nova-stretch-source", "nova-m66-run-1.24.7"),
+        ),
+        ToolGuidance(
+            tool_id="pixinsight",
+            tool_version="MultiscaleAdaptiveStretch module 1.1.1.0",
+            host="PixInsight MultiscaleAdaptiveStretch (MAS)",
+            instructions=(
+                "Create a MultiscaleAdaptiveStretch instance and run it on the full linear "
+                "starless image -- not a partial preview; Contrast Recovery does not permit "
+                "partial-preview execution.",
+                "M66's run applied every module default with zero parameter overrides; only "
+                "override noiseThreshold/clippingFraction if you have a specific reason to.",
+                "Inspect the whole-image statistics after; they describe the whole array, not "
+                "a claim that the empty-sky region specifically landed at the target background.",
+            ),
+            controls_and_starting_ranges=(
+                ("Target Background", "0.150 (module default)"),
+                ("Aggressiveness", "0.70 (module default)"),
+                ("Dynamic range compression", "0.40 (module default)"),
+                ("Background Reference", "disabled (module default)"),
+                ("Contrast Recovery", "enabled, scale separation 1024px, intensity 1.00 (module defaults)"),
+                ("Color Saturation", "enabled, Amount 0.75, Boost 0.50, Lightness mask enabled (module defaults)"),
+            ),
+            expected_result="Full-array median ~0.085, p99 ~0.473, max ~0.936 on M66's linear starless input -- deterministic (byte-identical output across repeated runs on the same input).",
+            failure_modes=(
+                "Substituting manually-tuned values (e.g. Target Background 0.095, Aggressiveness 0.80) and calling the result an exact NOVA reproduction -- those are Jeff's own experimental settings, not what the pipeline ran.",
+                "Running Contrast Recovery on a partial preview, which the module does not support.",
+            ),
+            recovery=("Reset to module defaults and re-run on the full starless image.",),
+            mask_support="MAS's own internal Lightness mask restricts its color-saturation stage by luminance; this is not an externally-applied PixInsight mask.",
+            equivalence=EquivalenceClass.EXACT_REPLAY,
+            provenance=(ProvenanceLabel.TOOL_TESTED, ProvenanceLabel.HENRY_VALIDATED, ProvenanceLabel.NOVA_EXECUTION_RECORD),
+            source_ids=("m66-manual-verification", "nova-stretch-source"),
+        ),
+        ToolGuidance(
+            tool_id="siril",
+            tool_version="Seti Astro Statistical Stretch integration v3.1.2, verified in Siril 1.4.4",
+            host="Seti Astro Statistical Stretch via Siril's Python integration",
+            instructions=(
+                "Open the licensed Seti Astro Statistical Stretch script on the linear image.",
+                "Set the target median and black-point sigma, enable Linked Stretch and Normalize.",
+                "Apply the curves-boost pass at the recorded strength; check the reported clip percentage before accepting.",
+            ),
+            controls_and_starting_ranges=(
+                ("M66 verified", "Target median 0.15; Black point sigma 5.00; No black clipping, Linked Stretch, Normalize all enabled; HDR Highlight Compress disabled; Stretch luminance only disabled; Apply curves boost enabled at strength 0.50"),
+                ("M66 result", "preview clip report 1 of 1,352,337 pixels (0.0001%)"),
+            ),
+            expected_result="A statistically-targeted stretch with the sky near the target median and negligible hard clipping.",
+            failure_modes=("Treating this as a stock Siril feature -- it is a separately licensed external integration, not bundled with Siril.",),
+            recovery=("Undo and re-run with a lower target median or higher black-point sigma if the sky lifts too far.",),
+            mask_support="Not demonstrated; operates on the full image.",
+            equivalence=EquivalenceClass.SAME_ENGINE_ADAPTED_HOST,
+            provenance=(ProvenanceLabel.TOOL_TESTED, ProvenanceLabel.HENRY_VALIDATED),
+            source_ids=("m66-manual-verification",),
+        ),
+        ToolGuidance(
+            tool_id="siril",
+            tool_version="separately installed Python script; exact version not independently confirmed in this repo",
+            host="Veralux via Siril's Python integration",
+            instructions=(
+                "Open the Veralux script from Siril's Python scripts on the linear image -- a separately "
+                "installed script, not a stock Siril feature, the same pattern as the Seti Astro "
+                "Statistical Stretch integration above.",
+                "This is the real, named script NOVA's veralux_stretch independently reimplements in "
+                "Python -- prefer this over the native Asinh Stretch fallback below when it's installed, "
+                "since it shares the actual algorithm rather than only the general arcsinh math.",
+                "Record the exact menu path, script version, and every setting used; none of that is "
+                "independently confirmed in this repository yet.",
+            ),
+            controls_and_starting_ranges=(
+                ("availability", "Jeff-confirmed installed and available; exact menu path, version, and default parameters not yet independently verified in this repo"),
+            ),
+            expected_result="An arcsinh-based stretch from the same named script family NOVA's veralux_stretch reimplements, closer to NOVA's engine than the native Asinh Stretch fallback.",
+            failure_modes=(
+                "Treating this as a stock Siril feature rather than a separately installed script.",
+                "Assuming NOVA's independently-coded veralux_stretch reproduces this script byte-for-byte just because they share a name and algorithm family -- same-named algorithm, independent implementations.",
+            ),
+            recovery=("Fall back to native Asinh Stretch (below) if the script isn't installed.",),
+            mask_support="Not independently confirmed in this repo.",
+            equivalence=EquivalenceClass.ALGORITHMICALLY_EQUIVALENT,
+            provenance=(ProvenanceLabel.HENRY_VALIDATED,),
+            source_ids=("jeff-siril-veralux-note",),
+        ),
+        ToolGuidance(
+            tool_id="siril",
+            tool_version="1.4.4",
+            host="Native Generalized Hyperbolic Stretch / Histogram Transformation",
+            instructions=(
+                "Use as a no-extra-cost native alternative when the Seti Astro integration isn't installed.",
+                "For GHS: set the Symmetry point just above the background, raise D (stretch intensity) and b (local intensity) to lift signal without blowing the core.",
+                "Autostretch (the eyeball icon) is a fast preview, not a final result.",
+            ),
+            controls_and_starting_ranges=(("GHS starting point", "Symmetry point near background level; no fixed D/b range established"),),
+            expected_result="A workable stretch using Siril's own native tools; not a reproduction of any specific NOVA engine's exact curve.",
+            failure_modes=("Presenting a native GHS/HT result as equivalent to NOVA's MAS, Statistical Stretch, or any NOVA-original engine.",),
+            recovery=("Undo and adjust the symmetry point or stretch intensity.",),
+            mask_support="Not demonstrated.",
+            equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
+            provenance=(ProvenanceLabel.REASONED_TRANSLATION,),
+            source_ids=("siril-native-stretch-manual",),
+        ),
+        ToolGuidance(
+            tool_id="siril",
+            tool_version="1.4.4",
+            host="Native Asinh Stretch (fallback if the Veralux script isn't installed)",
+            instructions=(
+                "Use only as a no-extra-cost fallback when the actual Veralux script (above) isn't "
+                "installed -- both are arcsinh-based, but this is Siril's own separate native tool, a "
+                "conceptual approximation rather than the same algorithm.",
+                "Open Image Processing > Asinh Stretch on the linear image; its two controls are stretch "
+                "factor and black point.",
+                "Sample the empty sky first and set the black point from that measurement, mirroring "
+                "Veralux's own auto-detected symmetry point, before raising the stretch factor.",
+                "Increase the stretch factor gradually and check star cores and color saturation at each step; Siril's default RGB blend clipping mode does its own luminance-based color blending during the stretch, but it has no adjustable equivalent to Veralux's color_grip parameter or its shadow-convergence damping.",
+            ),
+            controls_and_starting_ranges=(
+                ("black point", "set from a measured empty-sky sample, not left at a default; no fixed value established"),
+                ("stretch factor", "no fixed value established; raise gradually and inspect"),
+                ("not reproduced here", "Veralux's adjustable color_grip parameter and shadow-convergence damping have no Asinh Stretch equivalent; Siril's own default RGB blend clipping mode blends luminance and color differently and isn't a substitute"),
+            ),
+            expected_result="A dark-sky, arcsinh-shaped stretch broadly similar in character to Veralux, without matching its exact curve, color handling, or automatic background detection.",
+            failure_modes=(
+                "Leaving the black point at Siril's default instead of sampling the actual sky level.",
+                "Presenting this result as a reproduction of Veralux rather than an approximation of the same general math.",
+            ),
+            recovery=("Undo and resample the black point, or reduce the stretch factor if color saturates unevenly.",),
+            mask_support="Not demonstrated.",
+            equivalence=EquivalenceClass.CONCEPTUAL_SUBSTITUTE,
+            provenance=(ProvenanceLabel.REASONED_TRANSLATION,),
+            source_ids=("siril-native-stretch-manual",),
+        ),
+        ToolGuidance(
+            tool_id="saspro",
+            tool_version="1.18.0 source-inspected",
+            host="Statistical Stretch",
+            instructions=(
+                "Run Statistical Stretch on the linear image with Linked channels enabled.",
+                "Choose a preset by target: default for an ordinary galaxy/broadband target, brighter for a dim target or very dark sky, globular for a dense star cluster.",
+                "This is the same underlying algorithm Siril's licensed Seti Astro integration exposes -- both trace to the same statistical-stretch design, hosted differently.",
+            ),
+            controls_and_starting_ranges=(
+                ("stat_default", "target_median 0.08, linked, blackpoint_sigma 4.0, curves_boost 0.05 -- sky should land ~0.06-0.08"),
+                ("stat_bright", "target_median 0.13, linked, blackpoint_sigma 4.0, curves_boost 0.05 -- dim targets or very dark skies"),
+                ("stat_globular", "target_median 0.11, linked, blackpoint_sigma 5.0, curves_boost 0.05 -- Jeff-confirmed good on C 80 (8.2/10 vs a pipeline stf_nebula run's 6.2/10); lowered from 0.15 after a globular over-stretched with core clipping"),
+            ),
+            expected_result="Sky lands near the chosen target median with linked-channel color preserved and a mild curves-boost S-curve applied.",
+            failure_modes=("Using the galaxy/broadband preset on a dense globular, which needs the extra shadow headroom the globular preset provides.",),
+            recovery=("Revert to the linear input and choose the preset matching the actual target density.",),
+            mask_support="Not applicable; full-image linked stretch.",
+            equivalence=EquivalenceClass.SAME_ENGINE_ADAPTED_HOST,
+            provenance=(ProvenanceLabel.ARTIFACT_CONFIRMED, ProvenanceLabel.NOVA_SOURCE_CONFIRMED),
+            source_ids=("saspro-source-1.18.0", "nova-stretch-source"),
+        ),
+        ToolGuidance(
+            tool_id="saspro",
+            tool_version="1.18.0 source-inspected",
+            host="GHS Stretch",
+            instructions=(
+                "Run GHS Stretch on the linear image with the pivot set near the sky background, not a generic 0.25.",
+                "In this pipeline's automatic parameter selection, only alpha (stretch strength) and pivot are "
+                "data-driven from the image's dynamic range; beta, gamma, lp, and hp stay at their function "
+                "defaults regardless of target -- do not assume every GHS control is being tuned per-image.",
+                "Choose the galaxy preset for a stronger core-to-arm range; the default preset otherwise.",
+            ),
+            controls_and_starting_ranges=(
+                ("ghs_default", "alpha 5.0, beta 0.0, gamma 3.0, pivot 0.02, channel K"),
+                ("ghs_galaxy", "alpha 8.0, beta -0.2, gamma 4.0, pivot 0.02, channel K -- stronger core-to-arm range"),
+                ("pipeline auto-selection", "alpha and pivot only; beta/gamma/lp/hp are not varied by this pipeline's own parameter logic"),
+            ),
+            expected_result="A hyperbolic-curve stretch with the pivot anchored near the sky level.",
+            failure_modes=("Setting the pivot well above the sky background, which is a documented way to lift real signal into false brightness rather than stretch from the true floor.",),
+            recovery=("Revert and re-anchor the pivot to a measured background level.",),
+            mask_support="Not applicable; full-image operation.",
+            equivalence=EquivalenceClass.SAME_ENGINE_ADAPTED_HOST,
+            provenance=(ProvenanceLabel.ARTIFACT_CONFIRMED, ProvenanceLabel.NOVA_SOURCE_CONFIRMED),
+            source_ids=("saspro-source-1.18.0", "nova-stretch-source"),
+        ),
+    ),
+    measurements=(
+        "Representative empty-sky median/percentile before and after, against the engine's own target.",
+        "High-percentile (p99/p99.9) and maximum values, to check core headroom rather than assuming a correct median implies no clipping.",
+        "Low- and high-clipped pixel fraction, explicitly measured rather than inferred from a clean-looking preview.",
+        "Faint extended structure (galaxy arms, dust lanes, nebulosity) visibility check.",
+    ),
+    acceptance_criteria=(
+        "Sky background lands near the engine's own stated target, measured in a representative region, not assumed from the whole-image median.",
+        "Star cores and highlights retain headroom; hard clipping is explicitly measured, not just visually judged absent.",
+        "Faint extended structure is visible without being flattened into noise.",
+        "The specific engine, preset, and version used are recorded -- not just 'stretch applied'.",
+    ),
+    sources=(
+        M66_VERIFICATION,
+        NOVA_STRETCH_SOURCE,
+        NOVA_M66_RUN_1247,
+        SIRIL_NATIVE_STRETCH_MANUAL,
+        JEFF_SIRIL_VERALUX_NOTE,
+        SASPRO_SOURCE_118,
+    ),
+)
+
+
 HANDBOOK_ARTICLES: tuple[HandbookArticle, ...] = (
     PEDESTAL_REMOVAL,
     COSMETIC_CORRECTION,
@@ -1343,6 +1848,7 @@ HANDBOOK_ARTICLES: tuple[HandbookArticle, ...] = (
     DECONVOLUTION,
     DENOISE,
     STAR_CORRECTION,
+    STRETCH,
 )
 
 # Compatibility name retained for the first-batch exporter and downstream imports.
