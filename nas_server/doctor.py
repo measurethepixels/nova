@@ -123,9 +123,11 @@ def probe_astap() -> dict[str, Any]:
     """Use the installed VM path first, then the normal PATH fallback."""
     configured = "/opt/astap/astap_cli"
     candidate = Path(configured)
-    resolved = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which("astap")
+    resolved = (str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK)
+                else shutil.which("astap_cli") or shutil.which("astap"))
     if resolved is None:
-        return _result("astap", False, "not found: /opt/astap/astap_cli or astap on PATH")
+        return _result("astap", False,
+                        "not found: /opt/astap/astap_cli or astap_cli/astap on PATH")
     version = _version(resolved)
     return _result("astap", True, f"found at {resolved}" + (f" ({version})" if version else ""), path=resolved, version=version)
 

@@ -2128,7 +2128,7 @@ def review_variant_image(review_id: int, label: str):
 async def review_decide(review_id: int, request: Request):
     from nas_server.database import get_manual_review, decide_manual_review
     from nas_server import review_events
-    from fastapi.responses import RedirectResponse
+    from nas_server.review_web import decide_response_plan
 
     form = await request.form()
     winner_label = (form.get("winner_label") or "").strip()
@@ -2163,11 +2163,9 @@ async def review_decide(review_id: int, request: Request):
 
     decide_manual_review(review_id, winner_label, user_reasoning, final_variant, agreed)
     review_events.signal(review_id)
-    from fastapi.responses import Response
-    return Response(
-        status_code=200,
-        headers={"HX-Redirect": f"/review/{review_id}"},
-    )
+    from fastapi import Response
+    status_code, headers = decide_response_plan(review_id, request.headers.get("HX-Request") == "true")
+    return Response(status_code=status_code, headers=headers)
 
 
 @app.post("/review/{review_id}/decide-final", response_class=HTMLResponse)
@@ -2175,7 +2173,8 @@ async def review_decide_final(review_id: int, request: Request):
     """Finalise a decision after the disagreement confirmation panel."""
     from nas_server.database import get_manual_review, decide_manual_review
     from nas_server import review_events
-    from fastapi.responses import Response
+    from nas_server.review_web import decide_response_plan
+    from fastapi import Response
 
     form = await request.form()
     winner_label   = (form.get("winner_label") or "").strip()
@@ -2200,10 +2199,8 @@ async def review_decide_final(review_id: int, request: Request):
     agreed = (winner_label == claude_label)
     decide_manual_review(review_id, winner_label, user_reasoning, final_variant, agreed)
     review_events.signal(review_id)
-    return Response(
-        status_code=200,
-        headers={"HX-Redirect": f"/review/{review_id}"},
-    )
+    status_code, headers = decide_response_plan(review_id, request.headers.get("HX-Request") == "true")
+    return Response(status_code=status_code, headers=headers)
 
 
 @app.post("/review/{review_id}/manual-edit")

@@ -45,7 +45,7 @@ class ProvenanceLabel(StrEnum):
     PRIMARY_RESEARCH_SUPPORTED = "Primary-research-supported"
     REASONED_TRANSLATION = "Reasoned translation"
     TOOL_TESTED = "Tool-tested"
-    HENRY_VALIDATED = "Henry validated"
+    HENRY_VALIDATED = "Jeff validated"
     RESULT_COMPARED = "Result-compared"
     VISUAL_JUDGMENT = "Visual judgment"
     UNKNOWN_UNVERIFIED = "Unknown/unverified"

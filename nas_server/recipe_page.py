@@ -31,6 +31,8 @@ from nas_server.workflow_docs import (
     COMPARISON_SLIDER_JS,
     PI_MANUAL,
     STEP_DOCS,
+    TAB_CSS,
+    TAB_JS,
     comparison_slider,
 )
 
@@ -371,11 +373,13 @@ def recipe_comparison_sources(run_dir: str | Path) -> dict[str, tuple[Path, Path
     for applied in data.get("steps_applied", []):
         step, _ = _parse_applied(applied)
         record = records.get(step, {})
-        names = (record.get("preview_before"), record.get("preview_after"))
-        if not all(names):
-            names = _LEGACY_COMPARISON_FILES.get(step, (None, None))
-        before = _resolve_preview(run_dir, names[0])
-        after = _resolve_preview(run_dir, names[1])
+        fallback_before, fallback_after = _LEGACY_COMPARISON_FILES.get(step, (None, None))
+        # Fall back per side, not as an all-or-nothing pair: a run that recorded
+        # one real side (e.g. preview_after for whichever stretch variant it
+        # actually applied) must keep that real reference, not have it silently
+        # replaced by a legacy name for a different, unselected candidate.
+        before = _resolve_preview(run_dir, record.get("preview_before")) or _resolve_preview(run_dir, fallback_before)
+        after = _resolve_preview(run_dir, record.get("preview_after")) or _resolve_preview(run_dir, fallback_after)
         if before and after:
             pairs[step] = (before, after)
     return pairs
@@ -561,24 +565,7 @@ RECIPE_CSS = """
 .step-comparison h4{margin:0 0 .45rem;font-size:.7rem;letter-spacing:.06em;text-transform:uppercase}
 .comparison-missing{margin:1rem 0 1.2rem;border:1px solid rgba(128,128,128,.25);
   padding:.75rem .85rem;font-size:.85rem;opacity:.8}
-.tools .ttabs{display:flex;gap:4px;margin-bottom:8px}
-.ttab{background:rgba(128,128,128,.12);border:1px solid rgba(128,128,128,.3);
-  color:inherit;padding:5px 12px;border-radius:7px 7px 0 0;cursor:pointer;font-size:.85rem}
-.ttab.active{background:rgba(88,166,255,.18);border-color:rgba(88,166,255,.5);color:#58a6ff}
-.tpane{display:none;font-size:.9rem;line-height:1.5;background:rgba(0,0,0,.15);
-  padding:12px 14px;border-radius:0 8px 8px 8px}
-.tpane.active{display:block}
-.tpane ol{margin:.3rem 0 .3rem 1.1rem}.tpane li{margin:.25rem 0}
-.tpane code{background:rgba(128,128,128,.2);padding:1px 5px;border-radius:4px}
 .prose .sub{opacity:.8}
-""" + COMPARISON_SLIDER_CSS
+""" + TAB_CSS + COMPARISON_SLIDER_CSS
 
-RECIPE_JS = """
-document.querySelectorAll('.ttab').forEach(b=>b.addEventListener('click',()=>{
-  const card=b.closest('.tools');
-  card.querySelectorAll('.ttab').forEach(x=>x.classList.remove('active'));
-  card.querySelectorAll('.tpane').forEach(x=>x.classList.remove('active'));
-  b.classList.add('active');
-  document.getElementById(b.dataset.t).classList.add('active');
-}));
-""" + COMPARISON_SLIDER_JS
+RECIPE_JS = TAB_JS + COMPARISON_SLIDER_JS

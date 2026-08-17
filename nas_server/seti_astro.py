@@ -4470,11 +4470,12 @@ def astap_solve(fits_path: str | Path, fov_deg: float = 1.3,
     non-discriminating 39/120 (any orientation) to 119/120 identity vs 4-5 flipped.
     Star DB: /opt/astap D20 (installed 2026-07-02). Solve time ~0.2 s with header hints.
     """
+    import shutil
     import subprocess
     t0 = time.time()
     exe = "/opt/astap/astap_cli"
     if not Path(exe).exists():
-        exe = "astap"
+        exe = shutil.which("astap_cli") or shutil.which("astap") or "astap_cli"
     try:
         # No usable position hint in the header (manual/external master, or a pre-EQ
         # location-spoofed capture whose RA/DEC are FAKE) -> full BLIND solve. This is
@@ -4498,9 +4499,13 @@ def astap_solve(fits_path: str | Path, fov_deg: float = 1.3,
                 fov_deg = round(min(max((_h0.get("NAXIS2") or 1920) * _sc, 0.4), 8.0), 2)
         except Exception:
             pass
+        args = [exe, "-f", str(fits_path), "-r", str(int(search_deg)),
+                "-fov", str(fov_deg), "-update"]
+        star_db = str(_bin_settings.get("astap_star_db_path") or "").strip()
+        if star_db:
+            args.extend(["-d", str(Path(star_db).expanduser())])
         r = subprocess.run(
-            [exe, "-f", str(fits_path), "-r", str(int(search_deg)),
-             "-fov", str(fov_deg), "-update"],
+            args,
             capture_output=True, text=True, timeout=timeout)
         out = (r.stdout or "") + (r.stderr or "")
         from astropy.io import fits as _f

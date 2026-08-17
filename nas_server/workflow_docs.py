@@ -49,6 +49,35 @@ COMPARISON_SLIDER_CSS = """
 .ba-cap { font-size: .76rem; color: var(--text2); margin-top: .4rem; font-style: italic; }
 """
 
+# Per-tool tab switcher, shared by the recipe page and the Handbook article
+# page so a page with several tool paths (or, on the Handbook, several
+# variants per tool) doesn't force a long unbroken scroll through every tool
+# at once. Markup contract: a `.tools` wrapper containing a `.ttabs` bar of
+# `.ttab[data-t=<id>]` buttons and one or more `.tpane[id=<id>]` panes;
+# exactly one tab/pane pair should start with the `active` class. A page may
+# have more than one `.tools` group; each is switched independently.
+TAB_JS = """
+document.querySelectorAll('.ttab').forEach(b=>b.addEventListener('click',()=>{
+  const scope=b.closest('.tools');
+  scope.querySelectorAll('.ttab').forEach(x=>x.classList.remove('active'));
+  scope.querySelectorAll('.tpane').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  document.getElementById(b.dataset.t).classList.add('active');
+}));
+"""
+
+TAB_CSS = """
+.tools .ttabs{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
+.ttab{background:rgba(128,128,128,.12);border:1px solid rgba(128,128,128,.3);
+  color:inherit;padding:5px 12px;border-radius:7px 7px 0 0;cursor:pointer;font-size:.85rem}
+.ttab.active{background:rgba(88,166,255,.18);border-color:rgba(88,166,255,.5);color:#58a6ff}
+.tpane{display:none;font-size:.9rem;line-height:1.5;background:rgba(0,0,0,.15);
+  padding:12px 14px;border-radius:0 8px 8px 8px}
+.tpane.active{display:block}
+.tpane ol{margin:.3rem 0 .3rem 1.1rem}.tpane li{margin:.25rem 0}
+.tpane code{background:rgba(128,128,128,.2);padding:1px 5px;border-radius:4px}
+"""
+
 _ONTOLOGY_PATH = Path(__file__).parent / "processing_ontology.json"
 
 
