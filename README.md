@@ -6,6 +6,10 @@ processes, grades, and plans astrophotography captures on its own — every step
 measured from pixel statistics, guarded against artifacts, and versioned like the
 software it is.
 
+**New here? Start with the origin story (6:39):**
+
+[![I Built an AI Astrophotographer — It Started With a Seestar S50](https://img.youtube.com/vi/L1ebBG7bCkw/maxresdefault.jpg)](https://youtu.be/L1ebBG7bCkw)
+
 > [!IMPORTANT]
 > **Preliminary public preview.** NOVA is under active development, and the public
 > replication package is still being formalized. The production project is real,
@@ -28,6 +32,9 @@ then, treat this as source-preview documentation rather than a validated quickst
 
 Free-tool core: Siril + ASTAP + GraXpert + Seti Astro Suite Pro (pip). Optional
 paid tier: PixInsight + RC-Astro plugins. See the capability matrix in REPLICATE.md.
+Every one of those tools is a separate, independently licensed project doing
+the actual pixel-level work — see [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md) for
+real credit and license details.
 
 Support boundary: shared as-is alongside the channel; issues/PRs welcome, responses
 not guaranteed — hobby project, fixed time budget.
