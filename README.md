@@ -39,4 +39,9 @@ real credit and license details.
 Support boundary: shared as-is alongside the channel; issues/PRs welcome, responses
 not guaranteed — hobby project, fixed time budget.
 
+**License:** NOVA source code is licensed under the [MIT License](LICENSE). Website
+content, videos, graphics, astrophotography, and other original materials are
+© 2026 Jeff Henry unless otherwise noted. Measure the Pixels™ is a brand used by
+Jeff Henry.
+
 *Measure the pixels. Make the call.*
