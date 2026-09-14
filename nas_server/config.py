@@ -21,7 +21,12 @@ SECRET_FIELDS = frozenset(
         "anthropic_api_key",
         "telegram_token",
         "telegram_chat_id",
+        "telegram_api_id",
+        "telegram_api_hash",
         "youtube_api_key",
+        "runpod_api_key",
+        "runpod_s3_access_key_id",
+        "runpod_s3_secret_access_key",
     }
 )
 DEPRECATED_FIELDS = frozenset({"siril_path"})
@@ -37,8 +42,12 @@ PATH_FIELDS = frozenset(
         "nina_capture_path",
         "pi_binary",
         "pixinsight_cache_dir",
+        "relay_dir",
         "seestar_incoming_path",
         "seestar_library_path",
+        "telegram_archive_session_path",
+        "telegram_archive_dir",
+        "telegram_archive_db_path",
     }
 )
 
@@ -82,6 +91,7 @@ class SettingsModel:
     vm_url: str = ""
     worker_name: str = "laptop"
     worker_port: int = 8001
+    worker_auth_token: str = ""
     remote_workers: list[dict[str, Any]] = field(default_factory=list)
     nina_vm_ip: str = "127.0.0.1"
     nina_api_port: int = 1888
@@ -90,12 +100,22 @@ class SettingsModel:
     anthropic_api_key: str = ""
     telegram_token: str = ""
     telegram_chat_id: str = ""
+    telegram_api_id: int = 0
+    telegram_api_hash: str = ""
+    telegram_archive_session_path: str = ""
+    telegram_archive_dir: str = "/mnt/nas_data/telegram"
+    telegram_archive_db_path: str = field(
+        default_factory=lambda: str(
+            Path.home() / "seestar_database" / "telegram_archive.sqlite"
+        )
+    )
     youtube_api_key: str = ""
     youtube_channel_id: str = ""
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5-coder:7b"
     ollama_vision_model: str = ""
     relay_watcher_enabled: bool = False
+    relay_dir: str = ""
     codex_relay_dispatcher_enabled: bool = False
     claude_relay_dispatcher_enabled: bool = False
     auto_assess: bool = True
@@ -107,11 +127,43 @@ class SettingsModel:
     auto_process_enabled: bool = False
     auto_process_workflow: str = "seestar_broadband"
     manual_review_enabled: bool = False
+    experiment_operational_fallback: dict[str, Any] | None = None
+    target_priors_enabled: bool = False
+    background_neutralize_race_enabled: bool = False
     canonical_framing_auto: bool = True
     exclude_alignment_outliers: bool = True
     pi_register_mem_budget_gb: float = 32.0
     pi_ii_buffer_budget_mb: int = 16384
     pi_ii_stack_size_mb: int = 1024
+    rcastro_gpu_enabled: bool = True
+    experiment_gpu_parallel_enabled: bool = False
+    # Legacy shared cap retained for settings-file compatibility; dual-pool
+    # dispatch uses the engine-specific ceilings below.
+    experiment_gpu_max_concurrency: int = 2
+    experiment_gpu_max_concurrency_rcastro: int = 3
+    experiment_gpu_max_concurrency_ml_tools: int = 7
+    ml_tools_gpu_enabled: bool = False
+    rcastro_bin: str = "rc-astro"
+    runpod_api_key: str = ""
+    runpod_cpu_pod_image: str = ""
+    runpod_cpu_registry_auth_id: str = ""
+    runpod_cpu_pod_port: int = 8002
+    runpod_cpu_pod_vcpu_count: int = 0
+    runpod_cpu_dispatch_enabled: bool = False
+    runpod_cpu_availability_first: bool = True
+    runpod_cpu_pod_tier: str = ""
+    runpod_cpu_pod_hourly_rate_usd: float = 0.0
+    runpod_cpu_dispatch_estimate_usd: float = 0.0
+    runpod_rcastro_gpu_fallback_estimate_usd: float = 0.0
+    runpod_rcastro_gpu_rate_usd_per_second: float = 0.0
+    runpod_cpu_expected_image_version: str = ""
+    runpod_reconciliation_state_path: str = ""
+    runpod_s3_access_key_id: str = ""
+    runpod_s3_secret_access_key: str = ""
+    runpod_rcastro_endpoint_id: str = ""
+    runpod_ml_tools_endpoint_id: str = ""
+    runpod_rcastro_volume_id: str = ""
+    runpod_rcastro_region: str = ""
 
     def to_mapping(self) -> dict[str, Any]:
         value = asdict(self)
@@ -232,7 +284,14 @@ _BOOLEAN_FIELDS = frozenset(
         "cosmic_clarity_enabled",
         "cosmic_clarity_gpu",
         "exclude_alignment_outliers",
+        "experiment_gpu_parallel_enabled",
         "manual_review_enabled",
+        "target_priors_enabled",
+        "background_neutralize_race_enabled",
+        "ml_tools_gpu_enabled",
+        "rcastro_gpu_enabled",
+        "runpod_cpu_dispatch_enabled",
+        "runpod_cpu_availability_first",
         "relay_watcher_enabled",
         "stretch_auto_optimize",
         "stretch_vision_tiebreak",
@@ -240,18 +299,28 @@ _BOOLEAN_FIELDS = frozenset(
 )
 _INTEGER_RANGES = {
     "api_port": (1, 65535),
+    "experiment_gpu_max_concurrency_rcastro": (1, 16),
+    "experiment_gpu_max_concurrency_ml_tools": (1, 16),
+    "experiment_gpu_max_concurrency": (1, 16),
     "nina_api_port": (1, 65535),
     "observer_elevation_m": (-500, 10000),
     "pi_ii_buffer_budget_mb": (1, None),
     "pi_ii_stack_size_mb": (1, None),
     "stability_wait_seconds": (0, None),
     "worker_port": (1, 65535),
+    "runpod_cpu_pod_port": (1, 65535),
+    "runpod_cpu_pod_vcpu_count": (0, 128),
+    "telegram_api_id": (0, None),
 }
 _FLOAT_RANGES = {
     "observer_lat": (-90.0, 90.0),
     "observer_lon": (-180.0, 180.0),
     "pi_register_mem_budget_gb": (0.01, None),
     "subframe_claude_threshold": (0.0, 1.0),
+    "runpod_cpu_pod_hourly_rate_usd": (0.0, None),
+    "runpod_cpu_dispatch_estimate_usd": (0.0, None),
+    "runpod_rcastro_gpu_fallback_estimate_usd": (0.0, None),
+    "runpod_rcastro_gpu_rate_usd_per_second": (0.0, None),
 }
 
 
@@ -268,6 +337,10 @@ def _validate_field(key: str, value: Any) -> Any:
         return _require_horizon(key, value)
     if key == "remote_workers":
         return _require_remote_workers(key, value)
+    if key == "experiment_operational_fallback":
+        if value is not None and not isinstance(value, dict):
+            raise _type_error(key, "an object or null", value)
+        return value
     if key in PATH_FIELDS:
         return _require_path(key, value)
     return _require_string(key, value)

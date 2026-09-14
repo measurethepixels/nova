@@ -8,11 +8,14 @@ This module provides helpers used by auto_process.py and the web UI.
 
 from __future__ import annotations
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 _FOLIO_DIR = Path(__file__).parent / "target_folios"
+_ONTOLOGY_PATH = Path(__file__).parent / "processing_ontology.json"
+log = logging.getLogger(__name__)
 
 # Cross-catalog identities the Messier/Caldwell tables don't cover. Each set is
 # ONE physical object's synonym group, so its names share a single folio. This is
@@ -40,15 +43,13 @@ def _same_object_names(target: str) -> set[str]:
     synonyms. Pure name logic — no field-mate associations."""
     names = {target}
     tn = _norm_name(target)
-    try:
-        from nas_server import database as _db
-        for k, v in {**_db._MESSIER_NGC, **_db._CALDWELL_NGC}.items():
-            if _norm_name(k) == tn:
-                names.add(v)
-            if _norm_name(v) == tn:
-                names.add(k)
-    except Exception:
-        pass
+    from nas_server.catalog_aliases import _CALDWELL_NGC, _MESSIER_NGC
+
+    for k, v in {**_MESSIER_NGC, **_CALDWELL_NGC}.items():
+        if _norm_name(k) == tn:
+            names.add(v)
+        if _norm_name(v) == tn:
+            names.add(k)
     for grp in _SAME_OBJECT_GROUPS:
         if any(_norm_name(g) == tn for g in grp):
             names |= grp
@@ -73,6 +74,55 @@ def _canonical_rank(name: str) -> tuple:
     else:
         pref = 5
     return (pref, name)
+
+
+def canonicalize_target_names(names) -> dict[str, str]:
+    """Given a collection of raw target-name strings actually seen somewhere
+    (DB rows, a plan, a night's captures), return {raw_name: canonical_name}
+    grouping every name that denotes the SAME physical object -- pure
+    spelling/whitespace variants (M31 vs M 31) via `_norm_name()`, and
+    catalog cross-references (C 19 vs IC 5146) via `_same_object_names()`.
+    A name absent from `names` is never considered, so this only merges
+    within the given universe -- callers must pass the full set of names
+    they want cross-referenced against each other (e.g. a plan's target
+    names AND that night's captured target names TOGETHER, not separately,
+    or a planned "C 19" will never link up with a captured "IC 5146").
+
+    Names sharing a normalized form are always grouped (cheap, no catalog
+    lookup needed). Catalog-alias linking is one extra hop: two groups
+    merge if any name in one group's alias set matches any name in the
+    other. `names` is expected to be small (the real target universe is a
+    few hundred at most), so the O(n^2) group-merge pass is not a concern.
+    """
+    ordered = list(dict.fromkeys(names))
+    norm_to_names: dict[str, set[str]] = {}
+    for n in ordered:
+        norm_to_names.setdefault(_norm_name(n), set()).add(n)
+
+    groups: list[set[str]] = [set(g) for g in norm_to_names.values()]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                alias_norms = {
+                    _norm_name(alias)
+                    for member in groups[i]
+                    for alias in _same_object_names(member)
+                }
+                if any(_norm_name(member) in alias_norms for member in groups[j]):
+                    groups[i] |= groups.pop(j)
+                    merged = True
+                    break
+            if merged:
+                break
+
+    mapping: dict[str, str] = {}
+    for group in groups:
+        canonical = sorted(group, key=_canonical_rank)[0]
+        for name in group:
+            mapping[name] = canonical
+    return mapping
 
 
 def _disk_index() -> dict[str, list[Path]]:
@@ -101,9 +151,24 @@ def load_folio(target: str) -> dict | None:
     if path is None or not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        folio = json.loads(path.read_text())
     except Exception:
         return None
+    folio_type = folio.get("type") or folio.get("object_type")
+    if folio_type:
+        try:
+            object_types = json.loads(_ONTOLOGY_PATH.read_text())["object_types"]
+            if folio_type not in object_types:
+                log.warning(
+                    "Folio %s declares object type %r outside the processing ontology",
+                    path.name,
+                    folio_type,
+                )
+        except Exception as exc:
+            # Folio loading must never fail closed because the coverage check itself
+            # is unavailable; ontology loading has its own pipeline-level guard.
+            log.debug("Could not validate folio type against ontology: %s", exc)
+    return folio
 
 
 def save_folio(target: str, data: dict) -> Path:

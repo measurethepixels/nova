@@ -15,13 +15,15 @@ pipeline version that produced them.
 `versions`), mirror it here, and record which critiques drove the change. Code reads the
 latest version automatically — no other edit needed.
 
-## Pinned engine versions (updated 2026-06-11)
+## Pinned engine versions (updated 2026-08-31)
 
 | Engine | Version | Role |
 |--------|---------|------|
 | PixInsight Core | **1.9.3** Lockhart | plate solve, SPCC, StarXT/NoiseXT, register/drizzle, curves |
 | Siril | **1.4.3** (native `siril-cli`) | calibrate, register, `seqplatesolve`, stack |
-| SetiAstro Suite Pro | **1.18.0** (`setiastrosuitepro`, venv) | Image MM deconv stack, stat/GHS stretch, ADBE |
+| SetiAstro Suite Pro | **1.21.0** (`setiastrosuitepro`, venv; 37 refreshed model files) | Image MM deconv stack, stat/GHS stretch, ADBE, Cosmic Clarity |
+| RC-Astro local CLI | **2.6.6** / BlurXTerminator **ML5** | local BXT/NXT/SXT execution |
+| RC-Astro RunPod | **pre-2.6.6 live endpoint** | 2.6.6 image built but not validated or cut over |
 | GraXpert | **3.0.2** Umbriel | AI background/gradient extraction |
 | ASTAP | **CLI + D20 star DB** (`/opt/astap`, installed 2026-07-02) | astropy-consistent plate solve at ingest; blind solve for hint-less/pre-EQ-spoofed headers; also unblocks SASpro's own solver |
 
@@ -51,7 +53,44 @@ silently change a headless process, property default, or behaviour with no error
 Updating an engine is **not** a semver bump on its own (these are environment state); bump
 only if pipeline *code* changes in response to the new engine.
 
+**2026-08-31 provenance exception:** at Henry's direction, workflow 1.26.0 creates a
+run-version boundary for the promoted local BXT ML5 and SASpro 1.21.0 model stack even
+though pipeline code did not change. This is warranted because model changes can alter
+output pixels and critiques need to distinguish runs made before and after the promotion.
+It does not claim that the RC-Astro RunPod 2.6.6 image is live.
+
 ---
+
+## 1.26.0 — 2026-08-31 (minor)
+
+**Record the promoted local BXT ML5 and SASpro 1.21.0 model stack in run provenance.**
+
+The VM now runs RC-Astro CLI 2.6.6 with BlurXTerminator ML5 and Seti Astro Suite Pro
+1.21.0 with 37 refreshed model files, including the main, walking-noise, and
+aberration-correction V2 bundles. Henry requested a workflow-version boundary so runs
+from this model stack are distinguishable from earlier outputs. The processing steps and
+scoring model are unchanged, so comparisons remain valid and this is a minor bump.
+
+This promotion is local only. The separately built RC-Astro 2.6.6 RunPod image has not
+been validated against the live network volume or cut over on the endpoint; remote
+execution therefore remains outside the 1.26.0 engine claim.
+
+## 1.25.0 — 2026-08-29 (minor)
+
+**Use a second, conservative NXT pass for standard post-stretch noise reduction.**
+
+The existing pre-stretch linear NXT pass remains unchanged. Workflows that already
+contain `noise_reduction` now call `denoise_nxt` again after stretch at strength
+0.65 and two iterations. That wrapper uses RunPod RC-Astro first when enabled and
+the local RC-Astro CLI otherwise; it never silently substitutes Cosmic Clarity.
+
+Cosmic Clarity, Prism, and alternate NXT strengths remain explicit Experiment Mode
+choices. `seestar_galaxy` still omits the nonlinear step. The change follows the
+2026-08-29 M31 broadband benchmark, where local full Cosmic Clarity spent about
+27.4 minutes producing a candidate the objective gate ultimately rejected. Henry
+explicitly selected the two-NXT architecture. The step and scoring model are
+unchanged, but the production engine and parameters change output, so this is a
+minor bump.
 
 ## 1.24.8 — 2026-08-08 (patch)
 

@@ -27,6 +27,7 @@ _restart_pending: bool = False
 _parked_for_review: set[str] = set()  # targets blocked indefinitely waiting for manual review
 _park_lock = threading.Lock()
 _current_job_target: str | None = None   # target the queue worker is currently waiting on
+_current_job_type: str | None = None  # stack/process discriminator for same-type dedup
 _current_job_fingerprint: tuple | None = None  # stack fingerprint of that job (None for process jobs)
 _current_park_event: threading.Event | None = None  # per-job event for that wait
 _remote_inflight: dict[str, dict] = {}   # target → {worker_url, worker_name, remote_id}
@@ -182,7 +183,7 @@ def _db_clear():
 #
 # Three registries matter for "is this job already spoken for": the pending
 # _queue, the job the worker just claimed (_current_job_target/
-# _current_job_fingerprint — published atomically with the pop in
+# _current_job_type/_current_job_fingerprint — published atomically with the pop in
 # _pop_next(), see its docstring), and the already-registered-active job in
 # a DIFFERENT module's own locked state (stacker._active_stacks,
 # auto_process._active). The first two are checked together under
@@ -220,7 +221,7 @@ def _conflict_locked(job_type: str, target: str, fingerprint: tuple | None) -> s
     job already occupies this target, else None.
 
     Checks, in order: the pending queue; the job _pop_next() just claimed
-    (via _current_job_target/_current_job_fingerprint, published atomically
+    (via _current_job_target/_current_job_type/_current_job_fingerprint, published atomically
     with the pop — nested _park_lock inside the same _queue_lock section, so
     the window between a pop and the worker's own stacker/_active
     registration can't admit a duplicate, see PR #39 review round 1 finding
@@ -240,7 +241,7 @@ def _conflict_locked(job_type: str, target: str, fingerprint: tuple | None) -> s
             continue
         return "queued"
     with _park_lock:
-        if _current_job_target == target and (
+        if _current_job_type == job_type and _current_job_target == target and (
             job_type != "stack" or fingerprint is None or _current_job_fingerprint == fingerprint
         ):
             return "running"
@@ -434,19 +435,20 @@ def clear_queue() -> int:
 
 
 def _pop_next() -> tuple[dict | None, threading.Event | None]:
-    """Pop the next queue item and atomically publish it as the current job
+    """Pop the next queue item and atomically publish its target/type/config
     (nested _park_lock inside the same _queue_lock critical section that
     removes it from _queue). Without this, there's a window after the item
     leaves _queue but before _current_job_target is set where a concurrent
     add_stack_job()/add_job() sees neither a queued nor a running conflict
     and accepts an identical duplicate (see PR #39 review, finding 1)."""
-    global _current_job_target, _current_job_fingerprint, _current_park_event
+    global _current_job_target, _current_job_type, _current_job_fingerprint, _current_park_event
     park_ev = threading.Event()
     with _queue_lock:
         item = _queue.pop(0) if _queue else None
         if item is not None:
             with _park_lock:
                 _current_job_target = item["target"]
+                _current_job_type = item.get("job_type", "process")
                 _current_job_fingerprint = (
                     _stack_fingerprint(item) if item.get("job_type") == "stack" else None
                 )
@@ -502,11 +504,14 @@ def _resolve_workflow(target: str, workflow: str) -> str:
         obj_type = ((folio or {}).get("type") or (folio or {}).get("object_type")
                     or _object_type_from_db(target)
                     or _object_type_from_name(target))
-        if obj_type in ("globular_cluster", "open_cluster"):
+        if obj_type in ("globular_cluster", "open_cluster", "asterism", "double_star"):
             return "seestar_globular"
-        if obj_type == "galaxy":
+        if obj_type in ("galaxy", "galaxy_group", "interacting_galaxies"):
             return "seestar_galaxy"
-        if obj_type in ("emission_nebula", "reflection_nebula", "planetary_nebula"):
+        if obj_type in (
+            "emission_nebula", "reflection_nebula", "planetary_nebula",
+            "supernova_remnant", "nebula",
+        ):
             return "seestar_nebula"
         return "seestar_broadband"
     except Exception:
@@ -540,19 +545,31 @@ def _find_available_worker() -> dict | None:
 def _needs_crop_review_on_vm(item: dict) -> bool:
     """True if this job would open a manual crop review, which must run on the VM.
 
-    The review fires on a target's first process (no saved crop) or a forced
-    re-crop. Experiment and dry-run jobs skip the crop branch entirely in
-    auto_process, so they never review and can dispatch remotely.
+    Thin wrapper over the shared nas_server.target_crop.needs_crop_review()
+    -- the single source of truth every dispatch path (this loop, and
+    nas_server.worker_client.dispatch() itself as a lower-level backstop
+    for any caller that doesn't route through here) uses, so the guard
+    can't be silently bypassed by a caller that dispatches to a worker
+    directly (see issue #397). default_on_error=False here preserves this
+    call site's original fail-open behavior on the VM (a lookup failure
+    is far less likely here, and a false positive just means running
+    locally instead of remotely -- not the hang a false negative on a
+    remote worker would cause).
     """
+    # Cheap early exit before importing target_crop.py, which needs numpy
+    # just to load -- experiment_mode/dry_run jobs never review regardless
+    # of the DB, so this path must stay numpy-free (a pure-logic caller
+    # dispatching an experiment_mode job shouldn't need numpy installed).
+    # needs_crop_review() itself would reach the same conclusion, but only
+    # after paying that import cost.
     if item.get("experiment_mode") or item.get("dry_run"):
         return False
-    if (item.get("extra_params") or {}).get("re_crop"):
-        return True
-    try:
-        from nas_server.target_crop import get_target_crop
-        return get_target_crop(item.get("target", "")) is None
-    except Exception:
-        return False
+    from nas_server.target_crop import needs_crop_review
+    return needs_crop_review(
+        item.get("target", ""),
+        extra_params=item.get("extra_params"),
+        default_on_error=False,
+    )
 
 
 def _proactive_remote_dispatch(current_target: str | None = None) -> None:
@@ -799,6 +816,7 @@ def _dispatch_and_monitor_inner(item: dict, worker: dict) -> None:
             "extra_params": item.get("extra_params") or {},
         },
         callback_url=callback_url,
+        backend=worker_name,
     )
 
     if not remote_id:
@@ -857,7 +875,7 @@ def _dispatch_and_monitor_inner(item: dict, worker: dict) -> None:
                 _ap_set_status(target, phase="done")
             return
 
-        status = _wpoll(worker_url, remote_id)
+        status = _wpoll(worker_url, remote_id, backend=worker_name)
 
         if status is None:
             if offline_since is None:
@@ -1061,16 +1079,27 @@ def clear_stuck_inflight() -> dict:
     return {"cleared": cleared, "requeued": requeued}
 
 
+def _progress_interval_seconds(elapsed_min: int) -> int:
+    """Back off long-job pings while retaining the first-hour cadence."""
+    if elapsed_min < 60:
+        return 15 * 60
+    if elapsed_min < 120:
+        return 30 * 60
+    return 60 * 60
+
+
 def _progress_monitor(target: str, job_type: str, eta_min: int,
                        stop_event: threading.Event):
-    """Fire a Telegram ping every 15 min while a job runs. Skipped for short jobs."""
+    """Ping at 15 min initially, then 30/60 min for genuinely long jobs."""
     if eta_min <= 15:
         return
     from nas_server import telegram as _tg
-    interval = 15 * 60
     elapsed_min = 0
-    while not stop_event.wait(interval):
-        elapsed_min += 15
+    while True:
+        interval = _progress_interval_seconds(elapsed_min)
+        if stop_event.wait(interval):
+            break
+        elapsed_min += interval // 60
         try:
             if job_type == "autoprocess":
                 from nas_server.auto_process import get_autoprocess_status
@@ -1086,6 +1115,184 @@ def _progress_monitor(target: str, job_type: str, eta_min: int,
             )
         except Exception:
             pass
+
+
+def _try_runpod_queue_dispatch(item: dict, workflow: str, tg) -> bool:
+    """Attempt the default-off Candidate 6 route; persist every stop state.
+
+    Returns false only when the route is disabled.  Once enabled, true means
+    the item was handled or durably stopped and must not fall through to a
+    duplicate local run.
+    """
+    from nas_server.config import settings as _settings
+
+    if not _settings.get("runpod_cpu_dispatch_enabled", False):
+        return False
+    from datetime import datetime as _datetime, timezone as _timezone
+    from nas_server.runpod_dispatch import (
+        DispatchError as _RunPodDispatchError,
+        ReviewRequired as _RunPodReviewRequired,
+        RunPodDispatcher as _RunPodDispatcher,
+        config_from_settings as _runpod_config,
+    )
+    from nas_server.runpod_workspace import WorkspaceRef, create_workspace
+
+    target = item["target"]
+    workspace = None
+    run_started = False
+    remote_item = {
+        "id": str(item.get("_db_id", target)),
+        "target": target,
+        "workflow": workflow,
+        "source_file": item.get("source_file"),
+        "extra_params": item.get("extra_params") or {},
+        "experiment_mode": bool(item.get("experiment_mode")),
+    }
+    try:
+        dispatcher = _RunPodDispatcher(_runpod_config(_settings))
+        source_path = _resolve_runpod_source(item, _settings)
+        workspace = create_workspace()
+        input_ref = workspace.stage_input(source_path, name="stack")
+        remote_item.update({
+            "workspace_run_id": workspace.run_id,
+            "input_key": input_ref.key,
+        })
+        run_started = True
+        status = dispatcher.run(
+            work_key=f"queue:{remote_item['id']}",
+            job=remote_item,
+            session_start=_datetime.now(_timezone.utc),
+        )
+        _recover_runpod_outputs(
+            workspace,
+            status,
+            Path(_settings["seestar_library_path"]) / target / "_processed",
+            WorkspaceRef,
+        )
+        workspace.cleanup()
+        workspace = None
+        log.info(f"[queue] '{target}' completed on disposable RunPod CPU pod")
+    except _RunPodDispatchError as exc:
+        from nas_server.auto_process import _set_status as _ap_set_status
+
+        review_required = isinstance(exc, _RunPodReviewRequired)
+        if workspace is not None and not review_required:
+            workspace.cleanup()
+            workspace = None
+        _ap_set_status(
+            target,
+            phase="review_required" if review_required else "error",
+            error=str(exc),
+            review_required=review_required,
+            worker="runpod-cpu-pod",
+        )
+        log.error(f"[queue] RunPod CPU dispatch for '{target}' stopped: {exc}")
+        retained = (
+            f"\nWorkspace retained: <code>{workspace.run_id}</code>"
+            if workspace is not None else ""
+        )
+        tg.send(f"❌ <b>RunPod dispatch stopped</b>: <code>{target}</code>\n{exc}{retained}")
+    except Exception as exc:
+        # Once the dispatcher has returned, paid compute is confirmed gone,
+        # but a recovery failure must retain the only complete remote copy.
+        # Before it returns, an unexpected error is equally unsafe to clean.
+        from nas_server.auto_process import _set_status as _ap_set_status
+
+        if workspace is not None and not run_started:
+            workspace.cleanup()
+            workspace = None
+        workspace_id = workspace.run_id if workspace is not None else None
+        detail = f"RunPod workspace recovery failed: {exc}"
+        _ap_set_status(
+            target,
+            phase="review_required",
+            error=detail,
+            review_required=True,
+            worker="runpod-cpu-pod",
+        )
+        log.exception(f"[queue] {detail}")
+        retained = f"\nWorkspace retained: <code>{workspace_id}</code>" if workspace_id else ""
+        tg.send(f"❌ <b>RunPod recovery stopped</b>: <code>{target}</code>\n{detail}{retained}")
+    return True
+
+
+def _resolve_runpod_source(item: dict, settings: dict) -> Path:
+    """Resolve the same raw-stack source contract auto_process uses locally."""
+    from nas_server.database import get_processed_files, is_raw_stack
+    from nas_server.runpod_dispatch import DispatchError
+
+    target = item["target"]
+    proc_dir = Path(settings["seestar_library_path"]) / target / "_processed"
+    explicit = item.get("source_file")
+    if explicit:
+        rel = Path(str(explicit))
+        if rel.is_absolute() or len(rel.parts) != 1 or rel.name != str(explicit):
+            raise DispatchError("RunPod source_file must be a filename inside _processed")
+        source = proc_dir / rel.name
+        if not source.is_file():
+            raise DispatchError(f"RunPod source FITS not found: {source}")
+        matching_rows = [
+            row for row in get_processed_files(target)
+            if row.get("filename") == rel.name
+        ]
+        raw_source = (
+            any(is_raw_stack(rel.name, row.get("step")) for row in matching_rows)
+            if matching_rows else is_raw_stack(rel.name)
+        )
+        if not raw_source:
+            raise DispatchError(f"RunPod source_file is not a raw stack: {rel.name}")
+        return source
+
+    rows = get_processed_files(target)
+    for row in rows:
+        if not is_raw_stack(row.get("filename", ""), row.get("step")):
+            continue
+        candidates = [Path(str(row.get("file_path") or "")), proc_dir / row["filename"]]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+
+    candidates = sorted(
+        (path for path in proc_dir.glob("*.fit*") if is_raw_stack(path.name)),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ) if proc_dir.exists() else []
+    if candidates:
+        return candidates[0]
+    raise DispatchError(f"No raw stack found for RunPod dispatch: {target}")
+
+
+def _recover_runpod_outputs(workspace, status: dict, proc_dir: Path, workspace_ref_cls) -> list[Path]:
+    """Recover worker-published artifacts without trusting remote path names."""
+    import os
+    import uuid
+    from nas_server.runpod_dispatch import ReviewRequired
+
+    result = status.get("result") or {}
+    if status.get("error") or not result.get("ok", True):
+        raise ReviewRequired(status.get("error") or result.get("error") or "worker failed")
+    refs = result.get("output_workspace_refs")
+    if not isinstance(refs, dict) or not refs:
+        raise ReviewRequired("worker completed without published output references")
+
+    recovered = []
+    for remote_name, key in refs.items():
+        rel = Path(str(remote_name))
+        if rel.is_absolute() or ".." in rel.parts or rel == Path("."):
+            raise ReviewRequired(f"unsafe RunPod output path: {remote_name!r}")
+        if len(rel.parts) == 1 and rel.name.startswith("auto_final"):
+            destination = proc_dir / rel.name
+        else:
+            destination = proc_dir / "runs" / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.runpod-{uuid.uuid4().hex}")
+        try:
+            workspace.download(workspace_ref_cls(str(key)), temporary)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        recovered.append(destination)
+    return recovered
 
 
 def _run_job(item: dict) -> None:
@@ -1143,17 +1350,48 @@ def _run_job(item: dict) -> None:
             if post_workflow and result.get("processed_fit"):
                 from pathlib import Path as _Path
                 source_file = _Path(result["processed_fit"]).name
-                follow = add_job(
-                    target, workflow=post_workflow,
-                    experiment_mode=bool(item.get("experiment_mode")),
-                    source_file=source_file,
-                )
-                if follow.get("duplicate"):
-                    log.warning(f"[queue] post-stack autoprocess '{target}' not queued — "
-                                f"duplicate ({follow['existing']['where']})")
+                try:
+                    follow = add_job(
+                        target,
+                        workflow=post_workflow,
+                        experiment_mode=bool(item.get("experiment_mode")),
+                        source_file=source_file,
+                    )
+                except Exception as follow_error:
+                    log.exception(
+                        f"[queue] POST-STACK FOLLOW-UP FAILED for '{target}': "
+                        f"stack succeeded but autoprocess was not queued"
+                    )
+                    tg.send(
+                        f"⚠️ <b>Post-stack processing not queued</b>: "
+                        f"<code>{target}</code>\n"
+                        f"Stack succeeded, but its {post_workflow} follow-up failed: "
+                        f"{follow_error}"
+                    )
                 else:
-                    log.info(f"[queue] auto-queued autoprocess '{target}' "
-                             f"({post_workflow}, src={source_file}) — position {follow['position']}")
+                    if follow.get("duplicate"):
+                        where = follow["existing"]["where"]
+                        if where == "running":
+                            log.error(
+                                f"[queue] POST-STACK FOLLOW-UP BLOCKED for '{target}': "
+                                "unexpected running conflict"
+                            )
+                            tg.send(
+                                f"⚠️ <b>Post-stack processing blocked</b>: "
+                                f"<code>{target}</code>\n"
+                                "Stack succeeded, but its follow-up encountered an "
+                                "unexpected running conflict. Operator review required."
+                            )
+                        else:
+                            log.info(
+                                f"[queue] post-stack autoprocess '{target}' already covered "
+                                f"by existing process work ({where})"
+                            )
+                    else:
+                        log.info(
+                            f"[queue] auto-queued autoprocess '{target}' "
+                            f"({post_workflow}, src={source_file}) — position {follow['position']}"
+                        )
         except Exception as e:
             stop_event.set()
             log.error(f"[queue] stack '{target}' failed: {e}")
@@ -1195,6 +1433,15 @@ def _run_job(item: dict) -> None:
                 log.info(f"[queue] '{target}' → {_remote_worker.get('name', _remote_worker['url'])} "
                          f"(remote dispatch, workflow={workflow})")
                 return  # _worker() loop continues immediately; monitor thread handles the rest
+
+            # Candidate 6 disposable CPU pods are deliberately the final
+            # remote option, after already-running workers.  The setting is
+            # false by default; enabling it and incurring spend remain a
+            # separate Henry-gated live operation.  Any attempted pod run is
+            # authoritative: an ambiguous remote acceptance must never fall
+            # through to a duplicate local execution.
+            if _try_runpod_queue_dispatch(item, workflow, tg):
+                return
 
         # ── Local execution ───────────────────────────────────────────────────
         log.info(f"[queue] starting '{target}' (workflow={workflow})")
@@ -1251,7 +1498,7 @@ def _run_job(item: dict) -> None:
 
 
 def _worker():
-    global _current_job_target, _current_job_fingerprint, _current_park_event
+    global _current_job_target, _current_job_type, _current_job_fingerprint, _current_park_event
     log.info("[queue] worker started")
     while True:
         # Only block on LOCAL active jobs. Remote-worker jobs run in their own
@@ -1325,6 +1572,7 @@ def _worker():
 
         with _park_lock:
             _current_job_target = None
+            _current_job_type = None
             _current_job_fingerprint = None
             _current_park_event = None
 

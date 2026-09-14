@@ -6,10 +6,6 @@ processes, grades, and plans astrophotography captures on its own — every step
 measured from pixel statistics, guarded against artifacts, and versioned like the
 software it is.
 
-**New here? Start with the origin story (6:39):**
-
-[![I Built an AI Astrophotographer — It Started With a Seestar S50](https://img.youtube.com/vi/L1ebBG7bCkw/maxresdefault.jpg)](https://youtu.be/L1ebBG7bCkw)
-
 > [!IMPORTANT]
 > **Preliminary public preview.** NOVA is under active development, and the public
 > replication package is still being formalized. The production project is real,

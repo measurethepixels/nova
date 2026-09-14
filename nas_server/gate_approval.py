@@ -28,7 +28,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -80,12 +82,24 @@ RESOLUTIONS = frozenset(
         "rejected_pr_merged_anyway",
         # reject + closed unmerged: the rejection was honoured. Satisfied.
         "rejected_pr_closed",
+        # a Henry-approved start gate ("Start issue #N for X") whose issue
+        # moved out of consumable state before the agent ever claimed it --
+        # e.g. reassigned to a different owner. consume_start_gate() fails
+        # closed forever once that happens (the issue will never become
+        # status:ready for that agent again), so like a terminal PR gate,
+        # it must be retired explicitly or list_actions() keeps re-offering
+        # it every cycle and the agent re-escalates the same non-problem.
+        "start_superseded_by_reassignment",
     }
 )
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(db_path, timeout=10)
+    connection = sqlite3.connect(
+        f"{db_path.resolve().as_uri()}?mode=rw",
+        uri=True,
+        timeout=10,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 10000")
     connection.executescript(_SCHEMA)
@@ -350,10 +364,36 @@ def _parse_callback_data(data: str) -> tuple[str, int] | None:
         return None
 
 
+def _post_gate_decision_to_github(
+    message: dict[str, Any], decision: str, created_at: str,
+) -> None:
+    """Post only consumer-recognized start/merge decisions; never guess targets."""
+    # Runtime import avoids a module cycle: message_reply_queue imports this module.
+    from scripts.message_reply_queue import _pr_and_head, _start_issue
+
+    refs_json = json.dumps(message["artifact_refs"])
+    issue_number = _start_issue(
+        message["question"], refs_json, message["recipient"])
+    action = "approved" if decision == "approve" else "rejected"
+    base = (f"Henry {action} via Telegram at {created_at} "
+            f"(Relay message #{message['id']})")
+    if issue_number is not None:
+        command = ["gh", "issue", "comment", str(issue_number), "--body", base]
+    else:
+        merge = _pr_and_head(message["question"], refs_json)
+        if merge is None:
+            return
+        pr_number, head = merge
+        head_label = "approved head" if decision == "approve" else "rejected head"
+        command = ["gh", "pr", "comment", str(pr_number), "--body",
+                   f"{base}; {head_label}: `{head}`"]
+    subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+
+
 def handle_relay_callback(
     callback: dict[str, Any],
     *,
-    relay_dir: Path = DEFAULT_RELAY_DIR,
+    relay_dir: str | os.PathLike[str] | None = None,
 ) -> str:
     """Registered via telegram.set_callback_handler(). Writes at most one
     gate_decisions row and returns the outcome text shown back in Telegram."""
@@ -363,7 +403,10 @@ def handle_relay_callback(
     action, message_id = parsed
     decision = "approve" if action == "relay_approve" else "reject"
 
-    db_path = Path(relay_dir) / "relay.sqlite3"
+    resolved_relay_dir = (
+        Path(relay_dir).expanduser() if relay_dir else DEFAULT_RELAY_DIR
+    )
+    db_path = resolved_relay_dir / "relay.sqlite3"
     outcome, message = decide(db_path, message_id, decision)
 
     if outcome == "not_found":
@@ -379,6 +422,16 @@ def handle_relay_callback(
         existing = get_decision(db_path, message_id)
         prior = existing["decision"] if existing else "unknown"
         return f"Already decided ({prior}) — not changed."
+
+    try:
+        recorded = get_decision(db_path, message_id)
+        _post_gate_decision_to_github(
+            message, decision, str(recorded["created_at"]))
+    except Exception:
+        log.exception(
+            "[gate-approval] decision #%s recorded but GitHub visibility post failed",
+            message_id,
+        )
 
     verb = "Approved" if decision == "approve" else "Rejected"
     return (

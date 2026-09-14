@@ -44,6 +44,61 @@ are).
 5. Optional services: Telegram bot (notifications), Anthropic API key (final
    aesthetic eval + planner prose), Ollama (local fallback).
 
+### 2a. Network storage mounts (Linux, SMB/CIFS)
+
+If captures or the library live on a NAS or another machine's SMB share rather
+than local disk, mount it via `/etc/fstab` rather than a manual `mount` — the
+service and watchers assume the path is already there at boot, and a mount
+that only exists because someone ran a command by hand will silently vanish
+after the next reboot.
+
+1. Store the SMB credentials outside `/etc/fstab` itself (fstab is
+   world-readable):
+   ```bash
+   sudo tee /etc/smbcredentials <<'EOF'
+   username=<smb-username>
+   password=<smb-password>
+   EOF
+   sudo chmod 600 /etc/smbcredentials
+   ```
+2. Add an `/etc/fstab` entry per share:
+   ```
+   //<host-or-ip>/<share-name> <mount-point> cifs credentials=/etc/smbcredentials,uid=<your-linux-uid>,gid=<your-linux-gid>,iocharset=utf8,_netdev,nofail 0 0
+   ```
+   - `_netdev` tells systemd this filesystem needs the network up first — without
+     it, boot can hang or the mount silently fails because it was attempted
+     before networking was ready.
+   - `nofail` means a share that's unreachable at boot (device powered off,
+     NAS still starting up) does **not** block the rest of the boot sequence.
+3. **For a share whose host is intermittently available** — a battery-powered
+   or sleep-capable capture device (e.g. a smart telescope) rather than an
+   always-on NAS — add on-demand automounting with a bounded connection
+   timeout, so a single failed attempt doesn't leave the mount point
+   permanently dead until the next manual `mount -a`:
+   ```
+   //<host-or-ip>/<share-name> <mount-point> cifs credentials=/etc/smbcredentials,uid=<your-linux-uid>,gid=<your-linux-gid>,iocharset=utf8,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=10 0 0
+   ```
+   `x-systemd.automount` defers the actual mount until something first
+   accesses the path, and re-arms itself after a failed attempt — so as long
+   as whatever polls that path (a watcher loop, a cron job) does so on a
+   reasonably short interval, each poll becomes a fresh mount attempt rather
+   than one permanently failed mount. `x-systemd.mount-timeout=10` bounds each
+   attempt to 10 seconds instead of the systemd default (90s), so a device
+   that's briefly offline doesn't stall whatever tried to access the path.
+   Tune the timeout to how quickly the source device actually comes back
+   online — 10s suits a device that reconnects fast; raise it if yours is
+   slower to come up.
+4. Apply and verify:
+   ```bash
+   sudo systemctl daemon-reload   # required after any fstab edit
+   sudo mount -a
+   findmnt <mount-point>                       # confirm it's mounted
+   systemctl status '<mount-point-escaped>.automount'   # only if using automount
+   ```
+   If the mount doesn't show up, check `journalctl -u '<mount-point-escaped>.mount'`
+   for the CIFS error (auth failure, host unreachable, share name typo) before
+   assuming the fstab syntax itself is wrong.
+
 ## 3. Capability matrix
 
 | Tool | Status | Enables | Without it |
@@ -113,9 +168,10 @@ deferred to the separate capability work.
 ## 5. Allowed vs forbidden adaptations
 
 **Allowed (expected):** paths and mounts; service manager (a systemd unit ships in
-`nas_server/deploy/` — translate to launchd/Task Scheduler/WSL as needed); engine
-substitutions via capability flags; single-machine layout (API + worker on one
-box); skipping optional integrations.
+`nas_server/deploy/` — translate to launchd/Task Scheduler/WSL as needed; Windows
+users should follow [WSL2_GUIDE.md](WSL2_GUIDE.md), the supported Windows path —
+native Windows is not supported); engine substitutions via capability flags;
+single-machine layout (API + worker on one box); skipping optional integrations.
 
 **Placeholders you MUST substitute:** exported files use `__REPO_ROOT__` (where you
 cloned this repo), `__VENV__` (the Python venv you create), `__DATA_DIR__` (where
@@ -178,6 +234,18 @@ machine:
 Until then, a passing smoke workflow proves only that the exported source and
 dependency contract are internally loadable; it does not prove an end-to-end
 astronomy result.
+
+## 8. Optional remote GPU execution
+
+See `docs/RUNPOD_GPU.md` for the current RunPod contract, referral disclosure,
+validated RC Astro evidence, lossless FITS transfer policy, and the boundaries
+between RC Astro, GraXpert, Cosmic Clarity/SASpro, and SyQon worker images.
+
+Remote GPU processing is optional. Do not require a RunPod account or an AI API
+key for the public local pipeline. The documented compression threshold is
+provisional until it is calibrated against the deployment's measured endpoint
+throughput; use `scripts/benchmark_fits_compression.py` to measure local codec
+cost without mistaking it for end-to-end network evidence.
 
 ## 8. Support boundary
 

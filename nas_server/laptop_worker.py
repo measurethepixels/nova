@@ -70,9 +70,26 @@ if _pi_bin:
 # Force xvfb for all PI calls on the laptop (WSL2 has no real GPU)
 os.environ["PI_FORCE_XVFB"] = "1"
 
+# This worker is always headless (no crop-review UI/blocking-event registry
+# exist here) -- see target_crop.crop_review_allowed_here(), the fail-fast
+# auto_process.py checks immediately before it would otherwise open a
+# phantom review with nowhere to run. Existing dispatch already keeps
+# review-needing targets on the VM (queue_manager.py's
+# _needs_crop_review_on_vm()), so this is defense in depth, not the
+# primary guard -- but it must hold even if that guard were ever bypassed.
+os.environ["SEESTAR_HEADLESS_WORKER"] = "1"
+
 # Bring the main config into view so auto_process imports work
-# (config.py reads settings.json — point it at the worker settings file)
-os.environ.setdefault("SEESTAR_SETTINGS", _SETTINGS_FILE)
+# (config.py reads settings.json — point it at the worker settings file).
+# Only when that file actually exists: unconditionally pointing
+# SEESTAR_SETTINGS at a path that doesn't exist yet (any test/dev context,
+# or a fresh laptop before settings_worker.json is provisioned) would
+# silently break every OTHER module's first `from nas_server.config import
+# settings` with an unrelated sys.exit(1), just from having imported this
+# module at all -- the same real, confirmed test-suite-wide risk found and
+# fixed in cpu_pod_worker.py's identical line.
+if Path(_SETTINGS_FILE).exists():
+    os.environ.setdefault("SEESTAR_SETTINGS", _SETTINGS_FILE)
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -383,6 +400,23 @@ def _run_with_local_copy(job: dict) -> dict:
     log.info(f"[worker] seestar_library_path → {local_lib}  (was {original_lib})")
 
     try:
+        # ------------------------------------------------------------------ #
+        # Step 2b — apply the crop snapshot dispatch() attached, if any        #
+        # ------------------------------------------------------------------ #
+        # The laptop's own local target_crops table (settings_worker.json's
+        # separate db_path) is otherwise empty or stale -- without this,
+        # auto_process() would independently re-decide "no saved crop" and
+        # open a phantom interactive review that has nowhere to run on the
+        # laptop, even though the VM already confirmed a saved crop exists
+        # before ever dispatching this job. REPLACE semantics (see
+        # upsert_target_crop_row()): this snapshot always wins over
+        # whatever (if anything) the laptop's local DB already had.
+        crop_snapshot = job.get("crop_snapshot")
+        if crop_snapshot:
+            from nas_server.target_crop import upsert_target_crop_row
+            upsert_target_crop_row(crop_snapshot)
+            log.info(f"[worker] applied crop snapshot for {target}")
+
         # ------------------------------------------------------------------ #
         # Step 3 — run auto_process entirely on local disk                   #
         # ------------------------------------------------------------------ #

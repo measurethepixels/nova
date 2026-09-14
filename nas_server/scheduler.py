@@ -183,14 +183,23 @@ def _generate_plan_chart(results: list, schedule: list, date_str: str) -> bytes 
 def _slot_hhmm_to_utc(plan_date: str, hhmm: str) -> str:
     """Convert a plan slot's local HH:MM to a UTC ISO string.
 
-    plan_date is the local date when nightly_plan() ran (18:00 AZ = 01:00 UTC next day).
-    Evening slots (hour >= 14) belong to the local day before plan_date; morning slots
-    (hour < 14) belong to the local day of plan_date. UTC = local + 7h (AZ = UTC-7).
+    plan_date is the local evening date the plan covers -- planner_runs.date,
+    the same value _morning_plan() saves it under (e.g. "2026-09-01" for a
+    plan created the morning of Sep 1, describing that night). Evening slots
+    (hour >= 14) belong to plan_date itself; morning slots (hour < 14) belong
+    to plan_date + 1 (after local midnight). UTC = local + 7h (AZ = UTC-7).
+
+    Previously subtracted a day from plan_date on the assumption it was "the
+    date nightly_plan() ran" rather than the plan's own date -- harmless
+    while _evaluate_last_night() was loading the wrong planner_runs row
+    anyway (see get_unevaluated_planner_run()'s fix), but load-bearing wrong
+    once row selection was corrected: every slot boundary came out 24 hours
+    early, which could misclassify real skips as "no signal" (real
+    ChatGPT-checker finding, PR #562, 2026-09-02).
     """
     from datetime import datetime, timedelta
     h, m = int(hhmm[:2]), int(hhmm[3:5])
-    plan_utc = datetime.strptime(plan_date, "%Y-%m-%d")
-    local_base = plan_utc - timedelta(days=1)   # local evening date
+    local_base = datetime.strptime(plan_date, "%Y-%m-%d")
     local_dt = local_base.replace(hour=h, minute=m)
     if h < 14:                                   # early-morning slot → next local day
         local_dt += timedelta(days=1)
@@ -199,15 +208,24 @@ def _slot_hhmm_to_utc(plan_date: str, hhmm: str) -> str:
 
 
 def _evaluate_last_night(date_str: str) -> str | None:
-    """Evaluate last plan vs actual captures; update learning. Returns a Telegram summary or None."""
+    """Evaluate the plan for the night that just ended (yesterday relative
+    to date_str) vs actual captures; update learning. Returns a Telegram
+    summary or None.
+
+    `date_str` is "today" (when this runs, 6pm) -- the plan being
+    evaluated is dated yesterday, since `_morning_plan()` creates each
+    day's plan that same morning for THAT night, which hasn't happened yet
+    by the time this runs at 6pm."""
     from nas_server.database import (
         get_unevaluated_planner_run, get_captures_for_date,
         get_capture_timestamps_for_night,
         update_target_learn, mark_planner_run_evaluated,
     )
+    from nas_server.folio_generator import canonicalize_target_names
     from datetime import datetime, timedelta
 
-    run = get_unevaluated_planner_run()
+    yesterday = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    run = get_unevaluated_planner_run(yesterday)
     if not run:
         return None
     plan_date, plan_slots = run
@@ -216,17 +234,39 @@ def _evaluate_last_night(date_str: str) -> str | None:
         return None
 
     next_date = (datetime.strptime(plan_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    captured_set = set(get_captures_for_date(plan_date)) | set(get_captures_for_date(next_date))
+    captured_set_raw = set(get_captures_for_date(plan_date)) | set(get_captures_for_date(next_date))
 
     # Per-target timestamp ranges for the night: {target: (first_utc, last_utc)}
-    ts = get_capture_timestamps_for_night(plan_date)
+    ts_raw = get_capture_timestamps_for_night(plan_date)
     for t, (f, l) in get_capture_timestamps_for_night(next_date).items():
-        if t in ts:
-            ts[t] = (min(ts[t][0], f), max(ts[t][1], l))
+        if t in ts_raw:
+            ts_raw[t] = (min(ts_raw[t][0], f), max(ts_raw[t][1], l))
         else:
-            ts[t] = (f, l)
+            ts_raw[t] = (f, l)
 
-    plan_set = {s["target"] for s in plan_slots}
+    plan_set_raw = {s["target"] for s in plan_slots}
+
+    # Canonicalize jointly across plan + captured names, not separately --
+    # a planned "C 19" only links up with a captured "IC 5146" (same real
+    # object, Caldwell vs NGC/IC designation) if both are in the same
+    # canonicalize_target_names() call. Without this, a plan/capture
+    # spelling or catalog-alias mismatch spuriously shows up as BOTH
+    # off-plan (the capture) AND skipped (the plan slot) for one real
+    # target, and skip-learning would even penalize a target the user
+    # actually imaged that same night under a different name.
+    name_map = canonicalize_target_names(
+        plan_set_raw | captured_set_raw | set(ts_raw.keys())
+    )
+    plan_set = {name_map.get(n, n) for n in plan_set_raw}
+    captured_set = {name_map.get(n, n) for n in captured_set_raw}
+    ts: dict[str, tuple[str, str]] = {}
+    for raw_name, (f, l) in ts_raw.items():
+        canon = name_map.get(raw_name, raw_name)
+        if canon in ts:
+            ts[canon] = (min(ts[canon][0], f), max(ts[canon][1], l))
+        else:
+            ts[canon] = (f, l)
+
     matched  = plan_set & captured_set
     off_plan = captured_set - plan_set
     skipped  = plan_set - captured_set
@@ -239,7 +279,9 @@ def _evaluate_last_night(date_str: str) -> str | None:
     # Evaluate each skipped slot with window-aware logic
     penalised = set()
     for i, slot in enumerate(plan_slots):
-        target = slot["target"]
+        # Canonicalize -- plan_slots stores the raw name the planner used at
+        # schedule time, which may not match name_map's canonical winner.
+        target = name_map.get(slot["target"], slot["target"])
         if target in captured_set:
             continue
 
@@ -274,7 +316,7 @@ def _evaluate_last_night(date_str: str) -> str | None:
         # Rule 2: Did the immediately preceding planned target overrun into this slot?
         # If so, the skip was forced by time, not preference.
         if i > 0:
-            prev_target = plan_slots[i - 1]["target"]
+            prev_target = name_map.get(plan_slots[i - 1]["target"], plan_slots[i - 1]["target"])
             if prev_target in ts:
                 _, prev_last_utc = ts[prev_target]
                 if prev_last_utc >= slot_start_utc:
@@ -505,9 +547,14 @@ def _morning_plan():
         msg = "\n".join(lines)
 
         chart_bytes = _generate_plan_chart(results, schedule, date_str)
-        if chart_bytes:
-            telegram.send_photo_bytes(chart_bytes, caption=msg)
-        else:
+        # send_photo_bytes() returns False (never raises) on a Telegram-side
+        # rejection (e.g. HTTP 400 on an oversized/malformed chart) -- that
+        # return value went unchecked here, so a failed photo silently
+        # dropped the whole message with no fallback (real incident,
+        # 2026-09-02: this exact path lost an entire evening's plan). Fall
+        # back to the plain-text message so Henry always gets the plan even
+        # when the chart image can't be delivered.
+        if not chart_bytes or not telegram.send_photo_bytes(chart_bytes, caption=msg):
             telegram.send(msg)
         log.info(f"[morning_plan] sent {len(schedule)} slots, clear={is_clear}")
     except Exception as e:
@@ -519,6 +566,17 @@ def nightly_plan():
     from datetime import datetime
     from nas_server.planner import compute_plan, compute_schedule, get_narrative
     from nas_server import telegram
+    from nas_server.database import record_nightly_observing_decision
+
+    def record_decision(decision, reason, summary, scheduled_targets=None):
+        try:
+            record_nightly_observing_decision(
+                date_str, decision, reason, summary, scheduled_targets
+            )
+        except Exception as exc:
+            # Recording is additive evidence; a database problem must not change
+            # the established go/no-go behavior or suppress its Telegram notice.
+            log.warning("[nightly_plan] could not record decision: %s", exc)
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -535,6 +593,7 @@ def nightly_plan():
         is_clear, wx_summary = _get_weather(lat, lon)
         if not is_clear:
             log.info("[nightly_plan] cloudy — skipping Claude narrative")
+            record_decision("not_imaging", "weather", wx_summary)
             telegram.send(f"🌧 <b>Not imaging tonight ({date_str})</b>\n{wx_summary}")
             return
 
@@ -544,7 +603,12 @@ def nightly_plan():
         schedule = compute_schedule(results, horizon)
         if not schedule:
             log.info("[nightly_plan] no schedule — skipping narrative")
+            record_decision("not_imaging", "no_schedule", wx_summary)
             return
+
+        record_decision(
+            "imaging", "weather", wx_summary, [slot["target"] for slot in schedule]
+        )
 
         scheduled_set = {s["target"] for s in schedule}
         for r in results:
@@ -557,8 +621,17 @@ def nightly_plan():
         if narrative:
             caption += f"\n\n{narrative}"
 
-        if chart_bytes:
-            telegram.send_photo_bytes(chart_bytes, caption=caption)
+        # See the matching comment in _morning_plan(): send_photo_bytes()
+        # returns False (never raises) on a Telegram-side rejection, and
+        # that return value went unchecked here -- a failed photo silently
+        # dropped the whole evening plan with no fallback (real incident,
+        # 2026-09-02, Henry got no plan message at all that night). Fall
+        # back to plain text (sendMessage's 4096-char limit vs. sendPhoto's
+        # 1024-char caption limit also makes the fallback more likely to
+        # succeed on its own if the narrative is what pushed the caption
+        # over Telegram's photo-caption limit).
+        if chart_bytes and telegram.send_photo_bytes(chart_bytes, caption=caption):
+            pass
         elif caption:
             telegram.send(caption)
         log.info(f"[nightly_plan] sent narrative for {len(schedule)} slots")

@@ -1,16 +1,18 @@
 {
-  "current": "1.24.8",
+  "current": "1.26.0",
   "semver_policy": {
     "major": "scoring model or step add/remove; scores no longer comparable across versions (resets the critique baseline)",
     "minor": "param/threshold/gate tuning that changes output but keeps comparability",
     "patch": "bug fix not expected to change good-run output"
   },
   "tool_versions": {
-    "detected": "2026-06-11",
-    "note": "Pinned engine dependencies of the pipeline. A minor engine update can silently change a headless process/default (PI DrizzleIntegration no-op; Siril 1.4.2 seqplatesolve crash), so treat these as part of the pipeline contract: update side-by-side, keep the old binary, and only promote after `python -m nas_server.canary check` passes against critiques/golden_baselines.json. These are environment state, not pipeline logic \u2014 updating them is NOT a semver bump (bump only when pipeline code changes in response). SASpro 1.15.0->1.18.0 promoted 2026-06-11: canary check passed with all three golden finals BIT-IDENTICAL (zero drift); no dependency churn (numpy/numba/scipy/astropy unchanged); abe_run gained backward-compatible correction_mode kwarg.",
+    "detected": "2026-08-31",
+    "note": "Pinned engine dependencies of the pipeline. A minor engine or model update can silently change a headless process/default, so treat these as part of the pipeline contract. Historically environment-only updates did not bump workflow semver. At Henry's direction on 2026-08-31, workflow 1.26.0 establishes an explicit provenance boundary for the promoted local BXT ML5 and SASpro 1.21.0 model stack so runs made before and after the model changes are distinguishable. The RC-Astro RunPod endpoint is not included until its 2.6.6 image is validated and cut over.",
     "pixinsight": "1.9.3 Lockhart",
     "siril": "1.4.3",
-    "setiastrosuitepro": "1.18.0",
+    "setiastrosuitepro": "1.21.0 (37 model files, updated 2026-08-31)",
+    "rcastro_local": "CLI 2.6.6 (BlurXTerminator ML5)",
+    "rcastro_runpod": "pre-2.6.6 live endpoint; 2.6.6 image built but not validated/cut over",
     "graxpert": "3.0.2 Umbriel"
   },
   "versions": [
@@ -1232,6 +1234,60 @@
           "from": "pref + 1",
           "to": "decision_rank",
           "reason": "never fall back to pref; pre-1.24.8 runs show no rank rather than a wrong one"
+        }
+      ]
+    },
+    {
+      "version": "1.25.0",
+      "date": "2026-08-29",
+      "bump": "minor",
+      "summary": "Replace the standard post-stretch Cosmic Clarity denoise with a second, conservative NoiseXTerminator pass for workflows that already include nonlinear noise reduction.",
+      "rationale": "The M31 large-file benchmark spent about 27.4 minutes generating a local Cosmic Clarity candidate that the objective gate rejected. Henry selected NXT for the post-stretch step and explicitly retained the existing pre-stretch NXT pass. The step sequence and scoring model are unchanged, but the default engine and parameters change output, so this is a minor bump.",
+      "critiques_evaluated": [
+        "20260829_074601_seestar_broadband"
+      ],
+      "changes": [
+        {
+          "file": "nas_server/processing_ontology.json",
+          "param": "noise_reduction.seti_astro_fn",
+          "from": "cc_denoise_inprocess",
+          "to": "denoise_nxt (strength 0.65, iterations 2)",
+          "reason": "Use the existing RunPod-first RC-Astro path and avoid the measured long local Cosmic Clarity candidate run in normal processing."
+        },
+        {
+          "file": "nas_server/processing_ontology.json",
+          "param": "noise_reduction NXT experiment function names",
+          "from": "nxt_denoise (nonexistent seti_astro function)",
+          "to": "denoise_nxt",
+          "reason": "Make explicit Experiment Mode NXT candidates executable."
+        }
+      ]
+    },
+    {
+      "version": "1.26.0",
+      "date": "2026-08-31",
+      "bump": "minor",
+      "summary": "Establish a new run-provenance boundary for the promoted local BlurXTerminator ML5 and Seti Astro Suite Pro 1.21.0 model stack.",
+      "rationale": "Henry requested that the pipeline version account for both model-stack updates. Although these are environment changes rather than pipeline-code changes, BXT ML5 and refreshed SASpro models can change output pixels while leaving workflow steps and scoring comparable, so this is a minor bump. SASpro 1.21.0 with its current model bundles and local RC-Astro CLI 2.6.6 with BXT ML5 are active on the VM. The RC-Astro RunPod 2.6.6 image remains unvalidated and the live endpoint has not been cut over, so remote execution is outside this promotion.",
+      "critiques_evaluated": [],
+      "changes": [
+        {
+          "component": "Seti Astro Suite Pro",
+          "from": "1.18.0 with prior model bundle",
+          "to": "1.21.0 with 37 refreshed model files",
+          "reason": "Record the active local SASpro engine/model provenance in newly produced runs."
+        },
+        {
+          "component": "BlurXTerminator local execution",
+          "from": "RC-Astro CLI 1.1.3 / pre-ML5 stack",
+          "to": "RC-Astro CLI 2.6.6 / BlurXTerminator ML5",
+          "reason": "Distinguish outputs produced by the promoted local ML5 model from earlier pipeline runs."
+        },
+        {
+          "component": "RC-Astro RunPod execution",
+          "from": "live endpoint on the existing pre-2.6.6 image",
+          "to": "unchanged; 2.6.6 image built but not validated or cut over",
+          "reason": "Do not overstate the local ML5 promotion as remote deployment evidence."
         }
       ]
     }

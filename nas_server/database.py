@@ -38,6 +38,16 @@ def get_conn():
 
 def init_database():
     with get_conn() as conn:
+        from nas_server.environment_health import migrate as migrate_environment
+        from nas_server.experiment_evidence import migrate as migrate_experiment_evidence
+        from nas_server.grading_evidence import migrate as migrate_grading_evidence
+        from nas_server.grading_corpus import migrate as migrate_grading_corpus
+        from nas_server.promotion_governance import migrate as migrate_promotion_governance
+        migrate_environment(conn)
+        migrate_experiment_evidence(conn)
+        migrate_grading_evidence(conn)
+        migrate_grading_corpus(conn)
+        migrate_promotion_governance(conn)
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS stacked_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,6 +166,7 @@ def init_database():
             scores_before TEXT,
             scores_after  TEXT,
             claude_reasoning TEXT,
+            analytically_failed INTEGER DEFAULT 0,
             elapsed_s    REAL,
             created_at   TEXT DEFAULT (datetime('now'))
         );
@@ -191,8 +202,27 @@ def init_database():
             output_path  TEXT,
             dry_run      INTEGER DEFAULT 0,
             api_diagnostics TEXT
+            ,workflow_version TEXT
+            ,object_type TEXT
+            ,classification_source TEXT
+            -- Ordinal policy weight, not a calibrated probability.
+            ,classification_strength REAL
+            ,experiment_run_id TEXT
+            ,run_dir TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_pr_target ON processing_runs(target);
+
+        CREATE TABLE IF NOT EXISTS nightly_observing_decisions (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            night_date        TEXT NOT NULL,
+            decision          TEXT NOT NULL,
+            reason            TEXT,
+            summary           TEXT,
+            scheduled_targets TEXT,
+            decided_at        TEXT DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nightly_decisions_date
+            ON nightly_observing_decisions(night_date);
 
         CREATE TABLE IF NOT EXISTS queue_jobs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -216,6 +246,21 @@ def init_database():
             extra_params    TEXT,
             created_at      TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS capture_queue_decisions (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            storage_target   TEXT NOT NULL,
+            canonical_target TEXT,
+            frame_count      INTEGER DEFAULT 0,
+            evidence         TEXT DEFAULT '{}',
+            decision         TEXT NOT NULL,
+            detail           TEXT,
+            created_at       TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_cqd_storage_created
+            ON capture_queue_decisions(storage_target, created_at);
+        CREATE INDEX IF NOT EXISTS idx_cqd_canonical_created
+            ON capture_queue_decisions(canonical_target, created_at);
 
         CREATE TABLE IF NOT EXISTS stacking_runs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,10 +456,140 @@ def init_database():
             created_at    TEXT DEFAULT (datetime('now')),
             updated_at    TEXT DEFAULT (datetime('now'))
         );
+
+        -- One row per dispatched remote operation (any backend: laptop,
+        -- runpod-cpu-pod, or ad hoc). Written by nas_server/worker_client.py's
+        -- dispatch()/poll() -- the shared choke point every dispatch path
+        -- already goes through, so this is automatic regardless of caller
+        -- (queue_manager.py's real loop, a benchmark script, a future
+        -- Candidate 4/6 router). status stays 'running' until poll() first
+        -- observes the job done; a row still 'running' IS the live "what's
+        -- in flight right now" view -- no separate registry needed.
+        CREATE TABLE IF NOT EXISTS telemetry_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id       TEXT,       -- the remote worker's own job id
+            target       TEXT,
+            backend      TEXT,       -- e.g. "laptop", "runpod-cpu-pod", or a raw URL
+            operation    TEXT DEFAULT 'auto_process',
+            status       TEXT DEFAULT 'running',   -- running | ok | error | timeout
+            started_at   TEXT DEFAULT (datetime('now')),
+            completed_at TEXT,
+            elapsed_s    REAL,
+            error        TEXT,
+            extra_json   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_telemetry_job_id ON telemetry_events(job_id);
+        CREATE INDEX IF NOT EXISTS idx_telemetry_status ON telemetry_events(status);
+        -- The real identity of a dispatched operation is (backend, job_id),
+        -- not job_id alone -- each worker's job_id namespace is independent,
+        -- so two different backends can genuinely report the same job_id.
+        -- This index makes that identity explicit and matches
+        -- record_telemetry_complete()'s WHERE clause.
+        CREATE INDEX IF NOT EXISTS idx_telemetry_backend_job_id
+            ON telemetry_events(backend, job_id, status);
+
+        -- Candidate 6 (issue #412) spend policy, decided 2026-08-24: real
+        -- money spent on RunPod compute, one row per completed unit of
+        -- work. Separate from telemetry_events (timing/status, no cost) --
+        -- this table exists purely for admission-control accounting
+        -- (nas_server/runpod_spend_policy.py). resource_type is tracked
+        -- per-row even though the enforced caps are one shared total,
+        -- because Henry's decision was "one shared budget, but record
+        -- cpu_cost/gpu_cost/storage_cost independently" for evidence.
+        CREATE TABLE IF NOT EXISTS runpod_spend_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id        TEXT,
+            backend       TEXT,
+            resource_type TEXT NOT NULL,   -- cpu | gpu | storage
+            target        TEXT,
+            operation     TEXT,
+            cost_usd      REAL NOT NULL,
+            recorded_at   TEXT DEFAULT (datetime('now')),
+            event_key     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_runpod_spend_recorded_at
+            ON runpod_spend_events(recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_runpod_spend_resource_type
+            ON runpod_spend_events(resource_type);
+        CREATE INDEX IF NOT EXISTS idx_runpod_spend_operation_backend
+            ON runpod_spend_events(operation, backend);
+
+        -- Observational telemetry for real GPU-tool calls. This is kept
+        -- deliberately separate from runpod_spend_events because that table
+        -- is authoritative input to Candidate 6's hard admission caps.
+        CREATE TABLE IF NOT EXISTS gpu_tool_calls (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool        TEXT NOT NULL,
+            backend     TEXT NOT NULL,
+            target      TEXT,
+            ok          INTEGER NOT NULL,
+            elapsed_s   REAL NOT NULL,
+            cost_usd    REAL NOT NULL DEFAULT 0.0,
+            error       TEXT,
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_gpu_tool_calls_tool_backend
+            ON gpu_tool_calls(tool, backend);
+        CREATE INDEX IF NOT EXISTS idx_gpu_tool_calls_created_at
+            ON gpu_tool_calls(created_at);
+
+        -- Consecutive-failure tracking for the "exactly one automatic
+        -- retry" policy. Keyed on a caller-supplied `work_key` (NOT a pod
+        -- backend URL -- a retry spins up a brand-new pod with a new URL,
+        -- so the URL can't identify "the same logical unit of work
+        -- failing twice"). The eventual queue integration decides what a
+        -- work_key is (e.g. a queued job id); this table doesn't assume.
+        CREATE TABLE IF NOT EXISTS runpod_retry_state (
+            work_key       TEXT PRIMARY KEY,
+            failure_count  INTEGER NOT NULL DEFAULT 0,
+            last_failed_at TEXT,
+            last_reason    TEXT,
+            blocked        INTEGER NOT NULL DEFAULT 0
+        );
+
+        -- Candidate 6 (issue #412) pod lifecycle state machine
+        -- (nas_server/runpod_pod_lifecycle.py). `id` is the internal PK
+        -- because a work_key is claimed BEFORE RunPod hands back a real
+        -- pod_id (duplicate-launch prevention has to work during the
+        -- provisioning gap, not just once a pod_id exists) -- pod_id is
+        -- filled in once known, nullable and non-unique-constrained on
+        -- purpose (a failed provision attempt never got one; a real
+        -- collision would be a RunPod-side bug, not something this
+        -- schema should crash on).
+        CREATE TABLE IF NOT EXISTS runpod_pod_lifecycle (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            work_key        TEXT NOT NULL,
+            pod_id          TEXT,
+            state           TEXT NOT NULL,
+            created_at      TEXT DEFAULT (datetime('now')),
+            ready_deadline  TEXT,
+            ready_at        TEXT,
+            last_seen_at    TEXT,
+            current_job_id  TEXT,
+            terminated_at   TEXT,
+            failure_reason  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pod_lifecycle_work_key
+            ON runpod_pod_lifecycle(work_key);
+        CREATE INDEX IF NOT EXISTS idx_pod_lifecycle_state
+            ON runpod_pod_lifecycle(state);
+        -- Atomic duplicate-launch prevention (ChatGPT catch, PR #417): the
+        -- application-level check-then-insert in provision() is a real
+        -- TOCTOU race between two concurrent callers -- this partial
+        -- UNIQUE index makes "no active row for this work_key" + "insert
+        -- one" a single atomic DB operation instead, closing the race
+        -- entirely rather than narrowing it. 'terminated' is hardcoded
+        -- (not read from Python) because a SQLite index WHERE clause can't
+        -- reference an external constant -- it must stay in sync BY HAND
+        -- with runpod_pod_lifecycle.py's TERMINATED value if that ever
+        -- changes; a test asserts this coupling holds.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pod_lifecycle_one_active_per_work_key
+            ON runpod_pod_lifecycle(work_key) WHERE state != 'terminated';
         """)
 
         # Idempotent schema migrations
         for col_def in [
+            "ALTER TABLE runpod_spend_events ADD COLUMN event_key TEXT",
             "ALTER TABLE light_files ADD COLUMN scored_at TEXT",
             "ALTER TABLE light_files ADD COLUMN fwhm REAL",
             "ALTER TABLE light_files ADD COLUMN eccentricity REAL",
@@ -464,11 +639,24 @@ def init_database():
             "ALTER TABLE light_files ADD COLUMN solved_at TEXT",
             "ALTER TABLE stacking_runs ADD COLUMN eq_only INTEGER DEFAULT 0",
             "ALTER TABLE processing_runs ADD COLUMN api_diagnostics TEXT",
+            "ALTER TABLE processing_runs ADD COLUMN workflow_version TEXT",
+            "ALTER TABLE processing_runs ADD COLUMN object_type TEXT",
+            "ALTER TABLE processing_runs ADD COLUMN classification_source TEXT",
+            # Ordinal policy weight, not a calibrated probability.
+            "ALTER TABLE processing_runs ADD COLUMN classification_strength REAL",
+            "ALTER TABLE processing_runs ADD COLUMN experiment_run_id TEXT",
+            "ALTER TABLE processing_runs ADD COLUMN run_dir TEXT",
+            "ALTER TABLE experiment_results ADD COLUMN analytically_failed INTEGER DEFAULT 0",
         ]:
             try:
                 conn.execute(col_def)
             except Exception:
                 pass  # column already exists
+
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_runpod_spend_event_key "
+            "ON runpod_spend_events(event_key) WHERE event_key IS NOT NULL"
+        )
 
         # Partial unique index for dedup_key (only among unresolved rows)
         try:
@@ -637,6 +825,330 @@ def set_worker_job(name: str, job_id: str | None) -> None:
             UPDATE remote_workers SET current_job_id = ?, last_seen = datetime('now')
             WHERE name = ?
         """, (job_id, name))
+
+
+def record_telemetry_start(job_id: str, target: str, backend: str,
+                           operation: str = "auto_process",
+                           extra: dict | None = None) -> int:
+    """Log the start of a dispatched remote operation. Called from
+    nas_server/worker_client.py's dispatch() -- the shared choke point
+    every dispatch path goes through -- so this happens automatically
+    regardless of caller. Returns the new row's id."""
+    import json as _json
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO telemetry_events (job_id, target, backend, operation, extra_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (job_id, target, backend, operation, _json.dumps(extra) if extra else None),
+        )
+    return cur.lastrowid
+
+
+def record_telemetry_complete(job_id: str, backend: str, status: str, *,
+                              elapsed_s: float | None = None,
+                              error: str | None = None, extra: dict | None = None) -> bool:
+    """Mark a dispatched operation's outcome. Called from worker_client.py's
+    poll() the first time it observes a job done -- idempotent by design
+    (only updates a row still 'running'), since poll() is called
+    repeatedly over a job's lifetime and must not overwrite an outcome
+    already recorded.
+
+    `backend` is REQUIRED, not just job_id, and matched in the WHERE
+    clause -- job_id alone is not globally unique across backends (each
+    worker echoes back whatever "id" its own caller supplied; a laptop
+    dispatch and a CPU-pod dispatch can genuinely share the same job_id).
+    Without the backend filter, completing one worker's job could
+    silently mark a DIFFERENT worker's still-running job with the same
+    job_id as done too. Returns whether a row was actually updated (False
+    if no matching 'running' (job_id, backend) row exists)."""
+    import json as _json
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE telemetry_events SET status = ?, completed_at = datetime('now'), "
+            "elapsed_s = ?, error = ?, "
+            "extra_json = COALESCE(?, extra_json) "
+            "WHERE job_id = ? AND backend = ? AND status = 'running'",
+            (status, elapsed_s, error, _json.dumps(extra) if extra else None, job_id, backend),
+        )
+    return cur.rowcount > 0
+
+
+def get_inflight_telemetry() -> list[dict]:
+    """Operations currently dispatched and not yet observed done -- the
+    live "what's running right now" view, including dispatches that never
+    went through queue_manager.py (e.g. a direct benchmark-script call)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM telemetry_events WHERE status = 'running' ORDER BY id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_recent_telemetry(limit: int = 50) -> list[dict]:
+    """Most recent dispatched operations, any status, newest first."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM telemetry_events ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_runpod_spend(*, job_id: str | None, backend: str | None, resource_type: str,
+                        target: str | None, operation: str | None, cost_usd: float,
+                        event_key: str | None = None) -> int:
+    """Log one completed unit of real RunPod spend (Candidate 6, issue #412).
+    Called after a job's actual billed cost is known -- this is accounting,
+    not an estimate. Returns the new row's id.
+
+    Rejects a non-finite or negative cost_usd outright (raises ValueError)
+    rather than persisting it. This isn't optional hygiene: every reader of
+    this table -- runpod_spend_since(), and through it
+    runpod_spend_policy.check_admission()'s hard caps -- trusts whatever is
+    stored here as the ground truth for "how much has actually been spent."
+    A single bad row (a billing-API glitch, an upstream bug, anything)
+    would silently poison every future admission decision the same way an
+    unvalidated ESTIMATE could (see check_admission()'s own equivalent
+    guard, added after Codex's review of PR #415) -- the write side needs
+    the identical protection as the read side, not just one of the two."""
+    import math as _math
+    if not _math.isfinite(cost_usd) or cost_usd < 0:
+        raise ValueError(f"cost_usd must be a finite, non-negative number, got {cost_usd!r}")
+    if event_key is not None and not event_key.strip():
+        raise ValueError("event_key must be non-empty when supplied")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO runpod_spend_events "
+            "(job_id, backend, resource_type, target, operation, cost_usd, event_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(event_key) WHERE event_key IS NOT NULL DO NOTHING",
+            (job_id, backend, resource_type, target, operation, cost_usd, event_key),
+        )
+        if cur.rowcount:
+            return cur.lastrowid
+        row = conn.execute(
+            "SELECT id, job_id, backend, resource_type, target, operation, cost_usd "
+            "FROM runpod_spend_events WHERE event_key = ?", (event_key,),
+        ).fetchone()
+        expected = (job_id, backend, resource_type, target, operation, float(cost_usd))
+        actual = tuple(row[key] for key in (
+            "job_id", "backend", "resource_type", "target", "operation", "cost_usd"
+        ))
+        if actual != expected:
+            raise ValueError(f"event_key {event_key!r} already records different spend data")
+        return int(row["id"])
+
+
+def runpod_spend_since(cutoff_iso: str) -> dict[str, float]:
+    """Total spend since `cutoff_iso` (an ISO-8601 UTC string), broken down
+    by resource_type plus a total -- the shape admission control checks
+    against. Missing resource types default to 0.0, not absent keys."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT resource_type, COALESCE(SUM(cost_usd), 0) AS total "
+            "FROM runpod_spend_events WHERE recorded_at >= ? GROUP BY resource_type",
+            (cutoff_iso,),
+        ).fetchall()
+    totals = {"cpu_cost": 0.0, "gpu_cost": 0.0, "storage_cost": 0.0}
+    for row in rows:
+        key = f"{row['resource_type']}_cost"
+        totals[key] = totals.get(key, 0.0) + float(row["total"])
+    totals["total_cost"] = sum(totals.values())
+    return totals
+
+
+def record_gpu_tool_call(*, tool: str, backend: str, ok: bool, elapsed_s: float,
+                         cost_usd: float = 0.0, target: str | None = None,
+                         error: str | None = None) -> int:
+    """Record one final GPU-tool outcome as observational telemetry."""
+    import math as _math
+    if not _math.isfinite(elapsed_s) or elapsed_s < 0:
+        raise ValueError(
+            f"elapsed_s must be a finite, non-negative number, got {elapsed_s!r}"
+        )
+    if not _math.isfinite(cost_usd) or cost_usd < 0:
+        raise ValueError(
+            f"cost_usd must be a finite, non-negative number, got {cost_usd!r}"
+        )
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO gpu_tool_calls "
+            "(tool, backend, target, ok, elapsed_s, cost_usd, error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (tool, backend, target, int(bool(ok)), elapsed_s, cost_usd, error),
+        )
+    return int(cur.lastrowid)
+
+
+def gpu_tool_call_summary(since_iso: str, tool: str | None = None) -> list[dict]:
+    """Aggregate real tool-call telemetry by tool and final backend."""
+    where = "created_at >= ?"
+    params: list[str] = [since_iso]
+    if tool is not None:
+        where += " AND tool = ?"
+        params.append(tool)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT tool, backend, COUNT(*) AS count, "
+            "SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failures, "
+            "COALESCE(SUM(elapsed_s), 0) AS total_elapsed_s, "
+            "COALESCE(AVG(elapsed_s), 0) AS avg_elapsed_s, "
+            "COALESCE(SUM(cost_usd), 0) AS total_cost_usd "
+            f"FROM gpu_tool_calls WHERE {where} "
+            "GROUP BY tool, backend ORDER BY tool, backend",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def runpod_spend_history(*, operation: str | None = None, backend: str | None = None,
+                         limit: int = 20) -> list[float]:
+    """Recent real costs for a given operation/backend, newest first --
+    the raw data cost estimation is built from. Filters are optional;
+    passing neither returns overall recent history."""
+    clauses = []
+    params: list[str] = []
+    if operation is not None:
+        clauses.append("operation = ?")
+        params.append(operation)
+    if backend is not None:
+        clauses.append("backend = ?")
+        params.append(backend)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT cost_usd FROM runpod_spend_events {where} "
+            f"ORDER BY id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+    return [float(r["cost_usd"]) for r in rows]
+
+
+def get_runpod_retry_state(work_key: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM runpod_retry_state WHERE work_key = ?", (work_key,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_runpod_pod_failure(work_key: str, reason: str) -> dict:
+    """Increment the failure count for `work_key`, blocking it once it
+    reaches 2 (Henry's decided policy: exactly one automatic retry, a
+    second consecutive failure is evidence, not bad luck). Returns the
+    updated retry-state row."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO runpod_retry_state (work_key, failure_count, last_failed_at, last_reason, blocked) "
+            "VALUES (?, 1, datetime('now'), ?, 0) "
+            "ON CONFLICT(work_key) DO UPDATE SET "
+            "failure_count = failure_count + 1, "
+            "last_failed_at = datetime('now'), "
+            "last_reason = excluded.last_reason, "
+            "blocked = CASE WHEN failure_count + 1 >= 2 THEN 1 ELSE 0 END",
+            (work_key, reason),
+        )
+        row = conn.execute(
+            "SELECT * FROM runpod_retry_state WHERE work_key = ?", (work_key,)
+        ).fetchone()
+    return dict(row)
+
+
+def clear_runpod_retry_state(work_key: str) -> None:
+    """Reset a work_key's failure tracking, e.g. after it eventually
+    succeeds -- an old failure must not permanently punish a later,
+    unrelated attempt at the same logical work."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM runpod_retry_state WHERE work_key = ?", (work_key,))
+
+
+def insert_pod_lifecycle_row(*, work_key: str, state: str, ready_deadline: str | None) -> int:
+    """Raw insert -- nas_server.runpod_pod_lifecycle owns the actual state
+    machine; this is the storage primitive only. Returns the new row's
+    internal id (NOT a RunPod pod_id -- that's filled in later via
+    mark_pod_id(), once known).
+
+    Can raise sqlite3.IntegrityError: the schema's partial UNIQUE index
+    (one active, i.e. not-yet-terminated, row per work_key) is the actual
+    atomic enforcement of duplicate-launch prevention -- this function
+    does not catch it, runpod_pod_lifecycle.provision() does, translating
+    it into its own LifecycleError."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO runpod_pod_lifecycle (work_key, state, ready_deadline, last_seen_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (work_key, state, ready_deadline),
+        )
+    return cur.lastrowid
+
+
+def get_pod_lifecycle_row(record_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM runpod_pod_lifecycle WHERE id = ?", (record_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_active_pod_lifecycle_rows(work_key: str, *, terminal_states: tuple[str, ...]) -> list[dict]:
+    """Non-terminal rows for `work_key` -- the duplicate-launch-prevention
+    check queries this before provisioning a new pod."""
+    placeholders = ",".join("?" * len(terminal_states))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM runpod_pod_lifecycle WHERE work_key = ? "
+            f"AND state NOT IN ({placeholders}) ORDER BY id",
+            (work_key, *terminal_states),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_active_pod_lifecycle_rows(*, terminal_states: tuple[str, ...]) -> list[dict]:
+    """All lifecycle rows not in the supplied confirmed-gone states."""
+    placeholders = ",".join("?" * len(terminal_states))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM runpod_pod_lifecycle "
+            f"WHERE state NOT IN ({placeholders}) ORDER BY id",
+            terminal_states,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_recent_pod_lifecycle_rows(*, limit: int = 50) -> list[dict]:
+    """Recent Candidate 6 lifecycle evidence, newest first.
+
+    The status surface uses this existing table as-is; this query adds no
+    tracking, inferred history, or lifecycle behavior.
+    """
+    if limit <= 0:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM runpod_pod_lifecycle ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_pod_lifecycle_row(record_id: int, **fields) -> None:
+    """Generic column-by-column update for the lifecycle row -- the state
+    machine module decides which fields change on each transition; this is
+    just the write primitive. Only accepts real column names."""
+    valid_columns = {
+        "pod_id", "state", "ready_at", "last_seen_at",
+        "current_job_id", "terminated_at", "failure_reason",
+    }
+    unknown = set(fields) - valid_columns
+    if unknown:
+        raise ValueError(f"not a runpod_pod_lifecycle column: {unknown}")
+    if not fields:
+        return
+    set_clause = ", ".join(f"{col} = ?" for col in fields)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE runpod_pod_lifecycle SET {set_clause} WHERE id = ?",
+            (*fields.values(), record_id),
+        )
 
 
 def get_online_workers(stale_s: int = 90) -> list[dict]:
@@ -974,11 +1486,11 @@ def get_frames_for_stack(target: str, bottom_pct: float = 0.10,
       5. Skip frames where sky_level > session_median_sky × sky_level_factor (cloud veil).
          Session-relative so moon/LP variation between nights doesn't cause false rejects.
          Only applied when sky_level is measured. sky_level_factor=0 disables.
-      6. From the remainder that have measurements, drop the bottom bottom_pct
-         by composite score (fwhm × (1 + ecc)).
+      6. From the remainder that have measurements, drop the worst bottom_pct:
+         the highest composite scores (fwhm × (1 + ecc), lower is better).
       7. Unscored frames (scored_at IS NULL) are included — no basis to reject.
     """
-    import numpy as np
+    from statistics import median
 
     with get_conn() as conn:
         # Collect canonical target + any associated targets (confirmed via /associations page)
@@ -1020,7 +1532,7 @@ def get_frames_for_stack(target: str, bottom_pct: float = 0.10,
     if sky_level_factor > 0:
         sky_levels = [f["sky_level"] for f in passing if f.get("sky_level") is not None]
         if sky_levels:
-            median_sky = float(np.median(sky_levels))
+            median_sky = float(median(sky_levels))
             sky_cutoff = median_sky * sky_level_factor
             passing = [f for f in passing
                        if f.get("sky_level") is None or f["sky_level"] <= sky_cutoff]
@@ -1028,9 +1540,13 @@ def get_frames_for_stack(target: str, bottom_pct: float = 0.10,
     # Relative threshold: bottom bottom_pct by composite score
     scored = [f for f in passing if f.get("fwhm") is not None]
     if scored and bottom_pct > 0:
-        n_reject = max(0, int(len(scored) * bottom_pct))
-        sorted_scored = sorted(scored, key=lambda f: f["fwhm"] * (1.0 + (f.get("eccentricity") or 0)))
-        reject_paths = {f["file_path"] for f in sorted_scored[:n_reject]}
+        from nas_server.frame_quality import worst_percentile_keys
+        reject_paths = worst_percentile_keys(
+            scored,
+            bottom_pct,
+            score=lambda f: f["fwhm"] * (1.0 + (f.get("eccentricity") or 0)),
+            identity=lambda f: f["file_path"],
+        )
         passing = [f for f in passing if f["file_path"] not in reject_paths]
 
     return [f["file_path"] for f in passing]
@@ -1089,6 +1605,48 @@ def get_targets() -> list[dict]:
             ORDER BY t.target
         """).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_capture_target_relationship(storage_target: str,
+                                    candidate_target: str) -> dict:
+    """Return only DB evidence relevant to a capture identity relationship."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT target, mosaic, mosaic_association
+               FROM targets WHERE target IN (?, ?)""",
+            (storage_target, candidate_target),
+        ).fetchall()
+    return {row["target"]: dict(row) for row in rows}
+
+
+def record_capture_queue_decision(*, storage_target: str,
+                                  canonical_target: str | None,
+                                  frame_count: int, evidence: dict,
+                                  decision: str, detail: str = "") -> int:
+    """Persist the organizer's capture→queue outcome for later reconciliation."""
+    import json as _json
+
+    with get_conn() as conn:
+        cursor = conn.execute(
+            """INSERT INTO capture_queue_decisions
+               (storage_target, canonical_target, frame_count, evidence,
+                decision, detail) VALUES (?, ?, ?, ?, ?, ?)""",
+            (storage_target, canonical_target, frame_count,
+             _json.dumps(evidence, sort_keys=True), decision, detail),
+        )
+    return int(cursor.lastrowid)
+
+
+def get_capture_queue_decisions(target: str, limit: int = 20) -> list[dict]:
+    """Read recent decisions by either canonical or storage identity."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM capture_queue_decisions
+               WHERE storage_target=? OR canonical_target=?
+               ORDER BY id DESC LIMIT ?""",
+            (target, target, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # --- Processed files ---
@@ -1388,6 +1946,7 @@ def get_global_story_stats() -> dict:
                 COUNT(DISTINCT target) AS total_targets,
                 COUNT(*) AS total_subs,
                 COALESCE(SUM(exposure_time), 0) AS total_seconds,
+                COUNT(DISTINCT DATE(date)) AS total_sessions,
                 MIN(date) AS first_date,
                 MAX(date) AS last_date
             FROM light_files WHERE exclude = 0
@@ -1402,6 +1961,82 @@ def get_global_story_stats() -> dict:
         return d
 
 
+def get_activity_range(start: str, end: str) -> dict[str, int]:
+    """Per-day light-sub counts over [start, end) (ISO date strings), for the
+    home page's GitHub-style nights-observed heatmap. Lighter than
+    get_calendar_events: no per-target/processing/devlog breakdown, just a
+    day -> count map. Date-range rather than calendar-year so the caller can
+    anchor a trailing window to actual activity instead of wall-clock time."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT DATE(date) AS day, COUNT(*) AS cnt
+               FROM light_files
+               WHERE exclude = 0 AND date >= ? AND date < ?
+               GROUP BY day""",
+            (start, end),
+        ).fetchall()
+        return {r["day"]: r["cnt"] for r in rows}
+
+
+def record_nightly_observing_decision(
+    night_date: str,
+    decision: str,
+    reason: str | None = None,
+    summary: str | None = None,
+    scheduled_targets: list[str] | None = None,
+) -> int:
+    """Upsert the scheduler's real go/no-go decision for one local night."""
+    import json as _json
+
+    if decision not in {"imaging", "not_imaging"}:
+        raise ValueError("decision must be 'imaging' or 'not_imaging'")
+    targets_json = (
+        _json.dumps(scheduled_targets) if scheduled_targets is not None else None
+    )
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO nightly_observing_decisions
+                   (night_date, decision, reason, summary, scheduled_targets)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(night_date) DO UPDATE SET
+                   decision=excluded.decision,
+                   reason=excluded.reason,
+                   summary=excluded.summary,
+                   scheduled_targets=excluded.scheduled_targets,
+                   decided_at=datetime('now')""",
+            (night_date, decision, reason, summary, targets_json),
+        )
+        row = conn.execute(
+            "SELECT id FROM nightly_observing_decisions WHERE night_date = ?",
+            (night_date,),
+        ).fetchone()
+        return int(row["id"])
+
+
+def get_nightly_decisions_range(start: str, end: str) -> dict[str, dict]:
+    """Recorded nightly decisions over inclusive ISO-date bounds."""
+    import json as _json
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT night_date, decision, reason, summary,
+                      scheduled_targets, decided_at
+               FROM nightly_observing_decisions
+               WHERE night_date >= ? AND night_date <= ?
+               ORDER BY night_date""",
+            (start, end),
+        ).fetchall()
+    decisions = {}
+    for row in rows:
+        item = dict(row)
+        raw_targets = item.get("scheduled_targets")
+        item["scheduled_targets"] = (
+            _json.loads(raw_targets) if raw_targets is not None else None
+        )
+        decisions[item.pop("night_date")] = item
+    return decisions
+
+
 # --- Experiment results ---
 
 def record_experiment_variant(target: str, object_type: str, step: str,
@@ -1411,7 +2046,8 @@ def record_experiment_variant(target: str, object_type: str, step: str,
                                experiment_run_id: str = None,
                                all_scores_json: str = None,
                                runner_up_score: float = None,
-                               winning_margin: float = None) -> int:
+                               winning_margin: float = None,
+                               analytically_failed: bool = False) -> int:
     import json as _json
     overall = scores.get("overall") if isinstance(scores, dict) else None
     with get_conn() as conn:
@@ -1420,14 +2056,14 @@ def record_experiment_variant(target: str, object_type: str, step: str,
                 (target, object_type, step, variant_id, params, scores,
                  overall_score, winner, claude_reasoning,
                  metrics_json, experiment_run_id, all_scores_json,
-                 runner_up_score, winning_margin)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 runner_up_score, winning_margin, analytically_failed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (target, object_type, step, variant_id,
               _json.dumps(params) if params else None,
               _json.dumps(scores) if scores else None,
               overall, 1 if winner else 0, reasoning,
               metrics_json, experiment_run_id, all_scores_json,
-              runner_up_score, winning_margin))
+              runner_up_score, winning_margin, 1 if analytically_failed else 0))
         return cur.lastrowid
 
 
@@ -1509,6 +2145,104 @@ def get_experiment_priors(step: str, object_type: str = None, limit: int = 100) 
     }
 
 
+def get_experiment_evidence_for_target(
+    target: str, step: str, object_type: str | None = None, limit: int = 100
+) -> dict:
+    """Return clean-cutover evidence from canonical run/attempt identities."""
+    import json as _json
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT r.experiment_run_id,r.created_at,d.descriptor_json,
+                      a.comparison_status,a.assessment_status,
+                      cd.declared_variant_id,cd.definition_json,t.treatment_json,
+                      ea.parsed_result_json
+               FROM experiment_runs r
+               JOIN evidence_compatibility_descriptors d USING(experiment_run_id)
+               JOIN experiment_run_roster rr USING(experiment_run_id)
+               JOIN candidate_definitions cd USING(candidate_definition_id)
+               LEFT JOIN candidate_attempts a ON a.candidate_attempt_id=(
+                   SELECT a2.candidate_attempt_id FROM candidate_attempts a2
+                   WHERE a2.experiment_run_id=r.experiment_run_id
+                     AND a2.candidate_definition_id=rr.candidate_definition_id
+                   ORDER BY a2.attempt_ordinal DESC LIMIT 1)
+               LEFT JOIN effective_treatments t USING(effective_treatment_id)
+               LEFT JOIN comparison_presentations p ON p.presentation_id=(
+                   SELECT p2.presentation_id FROM comparison_presentations p2
+                   WHERE p2.experiment_run_id=r.experiment_run_id
+                   ORDER BY p2.created_at DESC LIMIT 1)
+               LEFT JOIN evaluator_attempts ea ON ea.evaluator_attempt_id=(
+                   SELECT e2.evaluator_attempt_id FROM evaluator_attempts e2
+                   WHERE e2.presentation_id=p.presentation_id AND e2.status='succeeded'
+                   ORDER BY e2.attempt_ordinal DESC LIMIT 1)
+               WHERE r.experiment_run_id IN (
+                   SELECT limited.experiment_run_id
+                   FROM experiment_runs limited
+                   JOIN evidence_compatibility_descriptors limited_d
+                     USING(experiment_run_id)
+                   WHERE json_extract(limited_d.descriptor_json,'$.target')=?
+                     AND limited.process_family=?
+                   ORDER BY limited.created_at DESC LIMIT ?)
+               ORDER BY r.created_at DESC,rr.declared_ordinal ASC""",
+            (target, step, limit),
+        ).fetchall()
+
+    # Group 6 owns the distinction between a comparative result and an
+    # operational continuation. A selected artifact alone is never sufficient
+    # evidence for an automated prior.
+    from nas_server.experiment_outcomes import derive_run_outcome
+    denominator_eligible = {
+        row["experiment_run_id"] for row in rows
+        if derive_run_outcome(row["experiment_run_id"], persist=False)["denominator_eligible"]
+    }
+    rows = [row for row in rows if row["experiment_run_id"] in denominator_eligible]
+
+    if not rows:
+        return {"tier": "none", "experiments": []}
+
+    grouped: dict[str, dict] = {}
+    for row_value in rows:
+        row = dict(row_value)
+        run_id = row["experiment_run_id"]
+        experiment = grouped.setdefault(run_id, {
+            "experiment_run_id": run_id,
+            "created_at": row.get("created_at"),
+            "classification_strength": 1.0,
+            "variants": [], "winner": None, "rejected": [],
+        })
+        try:
+            treatment = _json.loads(row.get("treatment_json") or "{}")
+            definition = _json.loads(row.get("definition_json") or "{}")
+            params = treatment.get("resolved_params")
+            if not isinstance(params, dict):
+                params = definition.get("params") or {}
+        except (TypeError, ValueError):
+            params = {}
+        try:
+            parsed = _json.loads(row.get("parsed_result_json") or "{}")
+        except (TypeError, ValueError):
+            parsed = {}
+        scores = parsed.get("scores") if isinstance(parsed, dict) else {}
+        variant = {
+            "variant_id": row["declared_variant_id"], "params": params,
+            "overall_score": (scores or {}).get(row["declared_variant_id"]),
+        }
+        experiment["variants"].append(variant)
+        if (row.get("comparison_status") == "selected"
+                and row.get("assessment_status") != "rejected"):
+            experiment["winner"] = {
+                key: variant[key] for key in ("variant_id", "params", "overall_score")
+            }
+        if (row.get("assessment_status") == "rejected"
+                or row.get("comparison_status") != "selected"):
+            experiment["rejected"].append({
+                "variant_id": row["declared_variant_id"], "params": params,
+                "reason": ("analytically_failed"
+                           if row.get("assessment_status") == "rejected" else "lost"),
+            })
+    return {"tier": "same_target", "experiments": list(grouped.values())}
+
+
 def get_all_experiment_steps() -> list[str]:
     with get_conn() as conn:
         rows = conn.execute(
@@ -1530,6 +2264,12 @@ def save_processing_run(
     output_path: str | None,
     dry_run: bool = False,
     api_diagnostics: dict | None = None,
+    workflow_version: str | None = None,
+    object_type: str | None = None,
+    classification_source: str | None = None,
+    classification_strength: float | None = None,
+    experiment_run_id: str | None = None,
+    run_dir: str | None = None,
 ) -> int:
     """Save a completed auto-process run and return its ID."""
     import json as _json
@@ -1538,8 +2278,10 @@ def save_processing_run(
             """INSERT INTO processing_runs
                (target, workflow, started_at, elapsed_s, steps_json,
                 initial_scores, final_scores, critical_eval, output_path, dry_run,
-                api_diagnostics)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                api_diagnostics, workflow_version, object_type,
+                classification_source, classification_strength,
+                experiment_run_id, run_dir)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 target, workflow, started_at, elapsed_s,
                 _json.dumps(steps),
@@ -1549,6 +2291,8 @@ def save_processing_run(
                 output_path,
                 1 if dry_run else 0,
                 _json.dumps(api_diagnostics) if api_diagnostics else None,
+                workflow_version, object_type, classification_source,
+                classification_strength, experiment_run_id, run_dir,
             ),
         )
         return cur.lastrowid
@@ -2010,67 +2754,8 @@ def get_target_detail(target: str) -> dict | None:
     return t
 
 
-# Messier → NGC/IC canonical mapping (bidirectional)
-_MESSIER_NGC: dict[str, str] = {
-    "M 1": "NGC 1952", "M 2": "NGC 7089", "M 3": "NGC 5272", "M 4": "NGC 6121",
-    "M 5": "NGC 5904", "M 6": "NGC 6405", "M 7": "NGC 6475", "M 8": "NGC 6523",
-    "M 9": "NGC 6333", "M 10": "NGC 6254", "M 11": "NGC 6705", "M 12": "NGC 6218",
-    "M 13": "NGC 6205", "M 14": "NGC 6402", "M 15": "NGC 7078", "M 16": "NGC 6611",
-    "M 17": "NGC 6618", "M 18": "NGC 6613", "M 19": "NGC 6273", "M 20": "NGC 6514",
-    "M 21": "NGC 6531", "M 22": "NGC 6656", "M 23": "NGC 6494", "M 24": "NGC 6603",
-    "M 25": "IC 4725", "M 26": "NGC 6694", "M 27": "NGC 6853", "M 28": "NGC 6626",
-    "M 29": "NGC 6913", "M 30": "NGC 7099", "M 31": "NGC 224", "M 32": "NGC 221",
-    "M 33": "NGC 598", "M 34": "NGC 1039", "M 35": "NGC 2168", "M 36": "NGC 1960",
-    "M 37": "NGC 2099", "M 38": "NGC 1912", "M 39": "NGC 7092", "M 41": "NGC 2287",
-    "M 42": "NGC 1976", "M 43": "NGC 1982", "M 44": "NGC 2632", "M 45": "Mel 22",
-    "M 46": "NGC 2437", "M 47": "NGC 2422", "M 48": "NGC 2548", "M 49": "NGC 4472",
-    "M 50": "NGC 2323", "M 51": "NGC 5194", "M 52": "NGC 7654", "M 53": "NGC 5024",
-    "M 54": "NGC 6715", "M 55": "NGC 6809", "M 56": "NGC 6779", "M 57": "NGC 6720",
-    "M 58": "NGC 4579", "M 59": "NGC 4621", "M 60": "NGC 4649", "M 61": "NGC 4303",
-    "M 62": "NGC 6266", "M 63": "NGC 5055", "M 64": "NGC 4826", "M 65": "NGC 3623",
-    "M 66": "NGC 3627", "M 67": "NGC 2682", "M 68": "NGC 4590", "M 69": "NGC 6637",
-    "M 70": "NGC 6681", "M 71": "NGC 6838", "M 72": "NGC 6981", "M 74": "NGC 628",
-    "M 75": "NGC 6864", "M 76": "NGC 650", "M 77": "NGC 1068", "M 78": "NGC 2068",
-    "M 79": "NGC 1904", "M 80": "NGC 6093", "M 81": "NGC 3031", "M 82": "NGC 3034",
-    "M 83": "NGC 5236", "M 84": "NGC 4374", "M 85": "NGC 4382", "M 86": "NGC 4406",
-    "M 87": "NGC 4486", "M 88": "NGC 4501", "M 89": "NGC 4552", "M 90": "NGC 4569",
-    "M 91": "NGC 4548", "M 92": "NGC 6341", "M 93": "NGC 2447", "M 94": "NGC 4736",
-    "M 95": "NGC 3351", "M 96": "NGC 3368", "M 97": "NGC 3587", "M 98": "NGC 4192",
-    "M 99": "NGC 4254", "M 100": "NGC 4321", "M 101": "NGC 5457", "M 102": "NGC 5866",
-    "M 103": "NGC 581", "M 104": "NGC 4594", "M 105": "NGC 3379", "M 106": "NGC 4258",
-    "M 107": "NGC 6171", "M 108": "NGC 3556", "M 109": "NGC 3992", "M 110": "NGC 205",
-}
+from nas_server.catalog_aliases import _CALDWELL_NGC, _MESSIER_NGC
 
-# Caldwell → NGC/IC mapping (from caldwell_associations.py)
-_CALDWELL_NGC: dict[str, str] = {
-    "C 1": "NGC 188", "C 2": "NGC 40", "C 3": "NGC 4236", "C 4": "NGC 7023",
-    "C 5": "IC 342", "C 6": "NGC 6543", "C 7": "NGC 2403", "C 8": "NGC 559",
-    "C 9": "Sh 2-155", "C 10": "NGC 663", "C 11": "NGC 7635", "C 12": "NGC 6946",
-    "C 13": "NGC 457", "C 14": "NGC 869", "C 15": "NGC 6826", "C 16": "NGC 7243",
-    "C 17": "NGC 147", "C 18": "NGC 185", "C 19": "IC 5146", "C 20": "NGC 7000",
-    "C 21": "NGC 4449", "C 22": "NGC 7662", "C 23": "NGC 891", "C 24": "NGC 1275",
-    "C 25": "NGC 2419", "C 26": "NGC 4244", "C 27": "NGC 6888", "C 28": "NGC 752",
-    "C 29": "NGC 5005", "C 30": "NGC 7331", "C 31": "IC 405", "C 32": "NGC 4631",
-    "C 33": "NGC 6992", "C 34": "NGC 6960", "C 35": "NGC 4889", "C 36": "NGC 4559",
-    "C 37": "NGC 6885", "C 38": "NGC 4565", "C 39": "NGC 2392", "C 40": "NGC 3626",
-    "C 41": "NGC 7006", "C 42": "NGC 7009", "C 43": "NGC 7814", "C 44": "NGC 7479",
-    "C 45": "NGC 5248", "C 46": "NGC 2261", "C 47": "NGC 6934", "C 48": "NGC 2775",
-    "C 49": "NGC 2237", "C 50": "NGC 2244", "C 51": "NGC 5195", "C 52": "NGC 4697",
-    "C 53": "NGC 3115", "C 54": "NGC 2506", "C 56": "NGC 246", "C 57": "NGC 6822",
-    "C 58": "NGC 2360", "C 59": "NGC 3242", "C 60": "NGC 4039", "C 61": "NGC 4038",
-    "C 62": "NGC 247", "C 63": "NGC 7293", "C 64": "NGC 2362", "C 65": "NGC 253",
-    "C 66": "NGC 5694", "C 67": "NGC 1097", "C 68": "NGC 6729", "C 69": "NGC 6302",
-    "C 70": "NGC 300", "C 71": "NGC 2477", "C 72": "NGC 55", "C 73": "NGC 1851",
-    "C 74": "NGC 3132", "C 75": "NGC 6124", "C 76": "NGC 6231", "C 77": "NGC 5128",
-    "C 78": "NGC 6541", "C 79": "NGC 3201", "C 80": "NGC 5139", "C 81": "NGC 6352",
-    "C 82": "NGC 6193", "C 83": "NGC 4945", "C 84": "NGC 5286", "C 85": "IC 2391",
-    "C 86": "NGC 6397", "C 88": "NGC 5823", "C 89": "NGC 6067", "C 90": "NGC 2867",
-    "C 91": "NGC 3532", "C 92": "NGC 3372", "C 93": "NGC 6752", "C 94": "NGC 4755",
-    "C 95": "NGC 6025", "C 96": "NGC 2516", "C 97": "NGC 3766", "C 98": "NGC 4609",
-    "C 100": "NGC 3699", "C 101": "NGC 6744", "C 102": "NGC 3504", "C 103": "NGC 2070",
-    "C 104": "NGC 104", "C 105": "NGC 4833", "C 107": "NGC 6101", "C 108": "NGC 4372",
-    "C 109": "NGC 3195",
-}
 
 
 def _build_alias_index() -> dict[str, str]:
@@ -2740,7 +3425,7 @@ def get_targets_for_planner() -> list[dict]:
                GROUP BY t.target
                ORDER BY t.target"""
         ).fetchall()
-    targets = [
+    raw_targets = [
         {
             "target": r[0], "ra": r[1], "dec": r[2],
             "priority": r[3], "association": r[4] or "",
@@ -2752,6 +3437,45 @@ def get_targets_for_planner() -> list[dict]:
         for r in rows
         if not _is_named_star(r[0])
     ]
+
+    # Collapse spelling/whitespace variants and catalog aliases (M31 vs M 31,
+    # C 19 vs IC 5146) that ended up as SEPARATE targets rows -- each with
+    # its own exact-string-joined light_files hours and last-obs date --
+    # into one merged entry, so the planner scores and schedules one real
+    # object instead of splitting its history across look-alike rows. See
+    # the M31/C19 scheduling-duplication investigation.
+    from nas_server.folio_generator import canonicalize_target_names
+    name_map = canonicalize_target_names([t["target"] for t in raw_targets])
+    groups: dict[str, list[dict]] = {}
+    for t in raw_targets:
+        groups.setdefault(name_map[t["target"]], []).append(t)
+
+    targets: list[dict] = []
+    for canonical, members in groups.items():
+        if len(members) == 1:
+            merged = dict(members[0])
+            merged["target"] = canonical
+            targets.append(merged)
+            continue
+        primary = next((m for m in members if m["target"] == canonical), members[0])
+        targets.append({
+            "target": canonical,
+            "ra": primary["ra"], "dec": primary["dec"],
+            "priority": max(m["priority"] for m in members),
+            "association": primary["association"] or next(
+                (m["association"] for m in members if m["association"]), ""
+            ),
+            # Real accumulated integration time -- sum, not max, since these
+            # rows are the SAME object's data split across name variants
+            # (unlike true field-mate association below, which is a
+            # different physical object and must never be double-counted).
+            "int_hours": sum(m["int_hours"] for m in members),
+            "transient": max(m["transient"] for m in members),
+            "target_type": primary["target_type"] or next(
+                (m["target_type"] for m in members if m["target_type"]), ""
+            ),
+            "days_since_last_obs": min(m["days_since_last_obs"] for m in members),
+        })
 
     # Association-aware integration: if M 81 has 30h and M 82 has 0.2h but they're
     # always co-imaged, M 82 effectively has 30h. Use group max for scoring/scheduling.
@@ -2839,13 +3563,30 @@ def get_latest_planner_run() -> tuple[str, list[dict]] | None:
     return row[0], _parse_plan_slots(_j.loads(row[1]))
 
 
-def get_unevaluated_planner_run() -> tuple[str, list[dict]] | None:
-    """Return the most recent plan that hasn't been evaluated yet."""
+def get_unevaluated_planner_run(date: str) -> tuple[str, list[dict]] | None:
+    """Return the plan for the given date if it exists and hasn't been
+    evaluated yet.
+
+    Previously this grabbed whichever row was most recently unevaluated
+    (``ORDER BY date DESC LIMIT 1``) regardless of which night it actually
+    covered. `_morning_plan()` creates a new row every morning for THAT
+    night (7:30am, covering tonight), and `nightly_plan()` runs the same
+    evening at 6pm -- before that plan's night has even started. Under the
+    old query, once yesterday's row got marked evaluated, 6pm's "evaluate
+    last night" would find today's own not-yet-executed plan as the "most
+    recent unevaluated" row and evaluate it against yesterday's real
+    captures -- comparing the wrong plan to the wrong night, every single
+    day, with no error or crash to reveal it (real incident, found
+    2026-09-02 auditing a confusing Telegram digest). Evaluation must
+    target the specific date it's meant to evaluate, not merely the
+    newest backlog entry.
+    """
     import json as _j
     _ensure_learn_tables()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT date, plan_json FROM planner_runs WHERE evaluated=0 ORDER BY date DESC LIMIT 1"
+            "SELECT date, plan_json FROM planner_runs WHERE date=? AND evaluated=0",
+            (date,),
         ).fetchone()
     if not row:
         return None

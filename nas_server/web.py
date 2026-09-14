@@ -7,11 +7,14 @@ Routes wired in main.py:
   GET /targets-view             → targets_page()
   GET /queue-view               → queue_page()
   GET /queue-view/rows          → queue_rows_partial()  (HTMX partial)
+  GET /telemetry                → telemetry_page()
+  GET /runpod-status             → runpod_status_page()
   GET /learning-view            → learning_page()
   GET /calendar                 → calendar_page()
   GET /calendar/{year}/{month}  → calendar_page(year, month)
 """
 import calendar as _cal
+import html as _html
 import json as _json
 import logging
 import urllib.parse as _uparse
@@ -779,7 +782,239 @@ def gallery_page() -> str:
 # Home page
 # ---------------------------------------------------------------------------
 
+def _activity_heatmap_html(end_date: "_dt.date", days: int = 365) -> str:
+    """Trailing-year observing grid, enriched asynchronously with weather.
+
+    Capture intensity is server-rendered and remains useful when historical
+    weather is unavailable. Empty nights receive cached Open-Meteo estimates
+    in the browser; the UI never claims those estimates prove why no capture
+    occurred.
+    """
+    import datetime as _dt
+
+    from nas_server.database import get_activity_range
+
+    start = end_date - _dt.timedelta(days=days - 1)
+    activity = get_activity_range(start.isoformat(),
+                                   (end_date + _dt.timedelta(days=1)).isoformat())
+    # Back up to the preceding Sunday so the grid's first column is a full week.
+    grid_start = start - _dt.timedelta(days=(start.weekday() + 1) % 7)
+    end = end_date
+    total_days = (end - grid_start).days + 1
+    weeks = (total_days + 6) // 7
+
+    max_cnt = max(activity.values(), default=0)
+    tiers = [0, 1, max(2, round(max_cnt * 0.34)), max(3, round(max_cnt * 0.67)), max_cnt or 1]
+    colors = ["#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"]
+
+    def tier_color(cnt: int) -> str:
+        if cnt <= 0:
+            return colors[0]
+        for i in range(len(tiers) - 1, 0, -1):
+            if cnt >= tiers[i]:
+                return colors[min(i, len(colors) - 1)]
+        return colors[1]
+
+    cols_html = []
+    day = grid_start
+    for _week in range(weeks):
+        cells = []
+        for _dow in range(7):
+            if start <= day <= end:
+                key = day.isoformat()
+                cnt = activity.get(key, 0)
+                observed = "true" if cnt > 0 else "false"
+                cells.append(
+                    f'<div class="night-cell" data-date="{key}" '
+                    f'data-observed="{observed}" data-capture-count="{cnt}" '
+                    f'role="img" aria-label="{key}: {cnt} sub(s) captured" '
+                    f'title="{key}: {cnt} sub(s) captured" '
+                    f'style="width:10px;height:10px;border-radius:2px;'
+                    f'background:{tier_color(cnt)}"></div>'
+                )
+            else:
+                cells.append('<div style="width:10px;height:10px"></div>')
+            day += _dt.timedelta(days=1)
+        cols_html.append(
+            '<div style="display:flex;flex-direction:column;gap:3px">'
+            + "".join(cells) + "</div>"
+        )
+
+    nights = sum(1 for v in activity.values() if v > 0)
+    legend = "".join(
+        f'<div style="width:10px;height:10px;border-radius:2px;background:{c}"></div>'
+        for c in colors
+    )
+    heatmap = f"""
+    <div style="margin-bottom:2rem">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;
+                  align-items:baseline;gap:.35rem 1rem;margin-bottom:.6rem">
+        <h2 style="font-size:1.1rem;margin:0">Nights observed — trailing 12 months</h2>
+        <span style="color:var(--text2);font-size:.82rem;font-variant-numeric:tabular-nums">
+          {nights} observed · <span id="recorded-decision-count">— recorded decisions</span>
+          · <span id="observable-night-count">— estimated clear</span>
+        </span>
+      </div>
+      <div style="overflow-x:auto;padding-bottom:.3rem">
+        <div style="display:flex;gap:3px">{''.join(cols_html)}</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:.85rem;
+                  margin-top:.6rem;color:var(--text2);font-size:.78rem">
+        <span style="display:flex;align-items:center;gap:.3rem">Fewer subs {legend} More subs</span>
+        <span style="display:flex;align-items:center;gap:.35rem">
+          <span style="width:10px;height:10px;border-radius:2px;background:#6e7681"></span>
+          Cloud estimate
+        </span>
+        <span style="display:flex;align-items:center;gap:.35rem">
+          <span style="width:10px;height:10px;border-radius:2px;background:#388bfd;
+                       box-shadow:inset 0 -2px 0 #79c0ff"></span>
+          Rain estimate
+        </span>
+        <span style="display:flex;align-items:center;gap:.35rem">
+          <span style="width:10px;height:10px;border-radius:2px;background:#161b22;
+                       outline:2px solid #d29922;outline-offset:1px"></span>
+          Recorded decision
+        </span>
+        <span id="weather-history-status">Loading conditions…</span>
+      </div>
+      <p style="margin:.45rem 0 0;color:var(--text2);font-size:.72rem">
+        Outlined nights use NOVA's recorded decision. Other unobserved nights use historical
+        weather estimates for context, not a recorded reason a session was missed.
+      </p>
+    </div>"""
+
+    weather_script = f"""
+    <script>
+    (function() {{
+      var status = document.getElementById('weather-history-status');
+      var recordedCount = document.getElementById('recorded-decision-count');
+      var observableCount = document.getElementById('observable-night-count');
+      fetch('/weather-history?start={start.isoformat()}&end={end.isoformat()}')
+        .then(function(response) {{
+          if (!response.ok) throw new Error('weather unavailable');
+          return response.json();
+        }})
+        .then(function(payload) {{
+          var decisions = payload.recorded_decisions || {{}};
+          var observableNights = Object.keys(payload.nights).filter(function(date) {{
+            if (decisions[date]) return false;
+            var weather = payload.nights[date];
+            return weather.condition === 'clear';
+          }}).length;
+          recordedCount.textContent = Object.keys(decisions).length + ' recorded decisions';
+          observableCount.textContent = observableNights + ' estimated clear';
+          document.querySelectorAll('.night-cell').forEach(function(cell) {{
+            var decision = decisions[cell.dataset.date];
+            if (decision) {{
+              cell.style.outline = '2px solid #d29922';
+              cell.style.outlineOffset = '1px';
+              cell.style.background = decision.decision === 'imaging' ? '#0e4429' : '#161b22';
+              var decisionText = decision.decision === 'imaging'
+                ? 'recorded decision: imaging planned'
+                : 'recorded decision: not imaging';
+              if (decision.reason) decisionText += ' (' + decision.reason.replace('_', ' ') + ')';
+              if (decision.summary) decisionText += '; ' + decision.summary;
+              var decisionLabel = cell.dataset.date + ': ' + decisionText;
+              cell.title = decisionLabel;
+              cell.setAttribute('aria-label', decisionLabel);
+              cell.dataset.decisionSource = 'recorded';
+              return;
+            }}
+            if (cell.dataset.observed !== 'false') return;
+            var weather = payload.nights[cell.dataset.date];
+            if (!weather) return;
+            var detail = '';
+            if (weather.condition === 'rain') {{
+              cell.style.background = '#388bfd';
+              cell.style.boxShadow = 'inset 0 -2px 0 #79c0ff';
+              detail = 'rain estimate ' + weather.precipitation_mm.toFixed(1) + ' mm';
+            }} else if (weather.condition === 'cloud') {{
+              cell.style.background = '#6e7681';
+              detail = 'cloud estimate ' + weather.cloud_pct + '%';
+            }} else {{
+              detail = 'estimated clear; no capture recorded';
+            }}
+            var label = cell.dataset.date + ': ' + detail;
+            cell.title = label;
+            cell.setAttribute('aria-label', label);
+          }});
+          status.textContent = payload.coverage_end
+            ? 'Open-Meteo estimate through ' + payload.coverage_end
+            : 'Historical weather not available yet';
+        }})
+        .catch(function() {{
+          status.textContent = 'Weather estimate unavailable';
+        }});
+    }})();
+    </script>"""
+    return heatmap + weather_script
+
+
+def _integration_by_target_html(limit: int = 10) -> str:
+    """Horizontal bar list of the top targets by integration hours, reusing
+    get_story_data() (already computes total_hours/session_count per target)."""
+    from nas_server.database import get_story_data
+
+    rows = sorted(
+        (r for r in get_story_data() if r.get("total_hours")),
+        key=lambda r: r["total_hours"], reverse=True,
+    )[:limit]
+    if not rows:
+        return ""
+    max_hours = max(r["total_hours"] for r in rows) or 1.0
+
+    bars = ""
+    for r in rows:
+        pct = max(2, round(100 * r["total_hours"] / max_hours))
+        target = r["target"]
+        bars += f"""
+        <div style="display:grid;grid-template-columns:120px 1fr 55px;
+                    align-items:center;gap:.7rem;margin-bottom:.5rem;font-size:.85rem">
+          <a href="/target/{_uparse.quote(target, safe='')}"
+             style="color:var(--text);overflow:hidden;text-overflow:ellipsis;
+                    white-space:nowrap">{target}</a>
+          <div style="background:var(--bg2);border-radius:4px;height:10px">
+            <div style="background:var(--accent);width:{pct}%;height:100%;
+                        border-radius:4px"></div>
+          </div>
+          <span style="color:var(--text2);text-align:right">{r['total_hours']:.1f}h</span>
+        </div>"""
+
+    return f"""
+    <div style="margin-bottom:2rem">
+      <h2 style="font-size:1.1rem;margin-bottom:.8rem">Integration by target</h2>
+      {bars}
+    </div>"""
+
+
+def _archive_size_card() -> tuple[str, str]:
+    """Read the cached archive size written by
+    scripts/compute_archive_size.py (run on a timer -- a live `du` over the
+    SMB-mounted library takes 25+ seconds, confirmed by timing it directly,
+    so it cannot run on every page load). Returns (value, color); value is
+    "—" if the cache is missing or the timer looks broken (>48h stale)
+    rather than silently showing a number that may no longer be accurate."""
+    import datetime as _dt
+    import json as _json
+    from pathlib import Path as _Path
+
+    cache_path = _Path.home() / "seestar_database" / "archive_size_cache.json"
+    try:
+        data = _json.loads(cache_path.read_text())
+        computed_at = _dt.datetime.strptime(data["computed_at"][:19], "%Y-%m-%dT%H:%M:%S")
+        age_h = (_dt.datetime.now() - computed_at).total_seconds() / 3600
+        if age_h > 48:
+            return "—", "#6e7681"
+        gb = data["bytes"] / 1e9
+        value = f"{gb / 1000:.2f} TB" if gb >= 1000 else f"{gb:.1f} GB"
+        return value, "#79c0ff"
+    except Exception:
+        return "—", "#6e7681"
+
+
 def home_page() -> str:
+    import datetime as _dt
+
     from nas_server.database import get_global_story_stats, get_processing_runs
     from nas_server.queue_manager import get_queue
     from nas_server.auto_process import get_all_autoprocess_statuses
@@ -792,12 +1027,16 @@ def home_page() -> str:
                  if s.get("phase") not in ("done", "error", None)]
     active_st = [s for s in get_all_stack_statuses() if s.get("running")]
 
+    archive_size_val, archive_size_color = _archive_size_card()
+
     # Stat cards
     cards_html = ""
     card_data = [
         ("Targets", stats.get("total_targets", 0), "#58a6ff"),
         ("Total subs", f"{stats.get('total_subs', 0):,}", "#3fb950"),
         ("Integration", f"{stats.get('total_hours', 0):.1f}h", "#e3b341"),
+        ("Sessions", stats.get("total_sessions", 0), "#f778ba"),
+        ("Archive size", archive_size_val, archive_size_color),
         ("Stacked", stats.get("total_stacked", 0), "#bc8cff"),
     ]
     for label, val, color in card_data:
@@ -841,6 +1080,11 @@ def home_page() -> str:
 
     first = stats.get("first_date", "")[:10]
     last = stats.get("last_date", "")[:10]
+    # End at today rather than the last capture. The quiet stretch is real
+    # information, and the weather layer explains its context without claiming
+    # that weather caused every missed night.
+    heatmap_html = _activity_heatmap_html(_dt.date.today())
+    targets_html = _integration_by_target_html()
 
     body = f"""
 <div style="max-width:1100px;margin:0 auto;padding:2rem 1.5rem">
@@ -852,6 +1096,9 @@ def home_page() -> str:
   <div style="display:flex;flex-wrap:wrap;gap:1rem;margin-bottom:2rem">
     {cards_html}
   </div>
+
+  {heatmap_html}
+  {targets_html}
 
   <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;
               padding:1rem 1.2rem;margin-bottom:2rem;font-size:.88rem;line-height:1.8">
@@ -1543,6 +1790,435 @@ function abortJob(tgtEnc) {{
   }
 """
     return _shell("Queue — SeeStar", body, css)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch telemetry -- every remote operation, any backend, any dispatch
+# path (queue-originated or a direct/ad-hoc call like a benchmark script),
+# written by nas_server.worker_client.dispatch()/poll(). See issue: Henry
+# noticed a direct CPU-pod benchmark dispatch showed nothing on /queue-view
+# (queue_page() only shows queue-originated jobs) -- this page reads the
+# same telemetry_events table dispatch()/poll() write automatically, so a
+# raw script dispatch shows up here without needing to touch the queue.
+# ---------------------------------------------------------------------------
+
+def telemetry_page() -> str:
+    import html as _html
+    from nas_server.database import get_inflight_telemetry, get_recent_telemetry
+
+    def _esc(v) -> str:
+        return _html.escape(str(v)) if v is not None else ""
+
+    def _elapsed_now(started_at: str) -> str:
+        try:
+            started = _datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=_tz.utc)
+            secs = (_datetime.now(_tz.utc) - started).total_seconds()
+            return f"{int(secs // 60)}m {int(secs % 60)}s"
+        except Exception:
+            return "?"
+
+    def _status_color(status: str) -> str:
+        return {"running": "#e3b341", "ok": "#3fb950", "error": "#f85149",
+               "timeout": "#f85149"}.get(status, "#6e7681")
+
+    inflight = get_inflight_telemetry()
+    recent = [r for r in get_recent_telemetry(limit=50) if r["status"] != "running"]
+
+    inflight_rows = "".join(f"""
+      <tr>
+        <td>{_esc(r['target'])}</td>
+        <td>{_esc(r['backend'])}</td>
+        <td>{_esc(r['operation'])}</td>
+        <td style="color:{_status_color('running')}">running — {_elapsed_now(r['started_at'])}</td>
+      </tr>""" for r in inflight) or (
+        '<tr><td colspan="4" style="color:var(--text2)">Nothing dispatched right now.</td></tr>')
+
+    recent_rows = "".join(f"""
+      <tr>
+        <td>{_esc(r['target'])}</td>
+        <td>{_esc(r['backend'])}</td>
+        <td>{_esc(r['operation'])}</td>
+        <td style="color:{_status_color(r['status'])}">{_esc(r['status'])}</td>
+        <td>{f"{r['elapsed_s']:.1f}s" if r['elapsed_s'] is not None else ''}</td>
+        <td>{_fmt_mst(r['completed_at'] or '')}</td>
+        <td style="color:#f85149;max-width:300px;overflow:hidden;text-overflow:ellipsis;
+                   white-space:nowrap" title="{_esc(r['error'] or '')}">
+          {_esc((r['error'] or '')[:60])}</td>
+      </tr>""" for r in recent) or (
+        '<tr><td colspan="7" style="color:var(--text2)">No completed operations recorded yet.</td></tr>')
+
+    body = f"""
+<div style="max-width:1100px;margin:0 auto;padding:1.5rem 1rem">
+  <h1 style="font-size:1.3rem;margin-bottom:.3rem">Dispatch Telemetry</h1>
+  <p style="color:var(--text2);font-size:.85rem;margin-bottom:1.5rem">
+    Every remote dispatch, any backend (laptop, RunPod CPU pod, etc.) and any
+    caller -- including a direct script, not just queue-originated jobs.
+  </p>
+
+  <h2 style="font-size:1rem;margin-bottom:.5rem">In flight</h2>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:2rem;font-size:.85rem">
+    <thead><tr style="text-align:left;border-bottom:1px solid var(--border)">
+      <th style="padding:.4rem">Target</th><th style="padding:.4rem">Backend</th>
+      <th style="padding:.4rem">Operation</th><th style="padding:.4rem">Status</th>
+    </tr></thead>
+    <tbody>{inflight_rows}</tbody>
+  </table>
+
+  <h2 style="font-size:1rem;margin-bottom:.5rem">Recent (last 50)</h2>
+  <table style="width:100%;border-collapse:collapse;font-size:.85rem">
+    <thead><tr style="text-align:left;border-bottom:1px solid var(--border)">
+      <th style="padding:.4rem">Target</th><th style="padding:.4rem">Backend</th>
+      <th style="padding:.4rem">Operation</th><th style="padding:.4rem">Status</th>
+      <th style="padding:.4rem">Elapsed</th><th style="padding:.4rem">Completed</th>
+      <th style="padding:.4rem">Error</th>
+    </tr></thead>
+    <tbody>{recent_rows}</tbody>
+  </table>
+</div>
+<script>
+  setTimeout(() => location.reload(), 15000);
+</script>"""
+    return _shell("Telemetry — SeeStar", body)
+
+
+# ---------------------------------------------------------------------------
+# Candidate 6 RunPod status -- observe-only lifecycle, reconciliation, and
+# spend evidence. No start/stop/retry/override controls belong on this page.
+# ---------------------------------------------------------------------------
+
+def runpod_status_page() -> str:
+    import html as _html
+    from nas_server.config import settings
+    from nas_server.database import (
+        get_all_active_pod_lifecycle_rows,
+        get_recent_pod_lifecycle_rows,
+        gpu_tool_call_summary,
+        runpod_spend_since,
+    )
+    from nas_server.runpod_dispatch import (
+        DispatchError,
+        config_from_settings,
+        reconciliation_backstop_ready,
+    )
+    from nas_server.runpod_pod_lifecycle import CONFIRMED_GONE_STATES
+    from nas_server.runpod_spend_policy import (
+        DAILY_CAP_USD,
+        DAILY_WINDOW,
+        MONTHLY_CAP_USD,
+        MONTHLY_WINDOW,
+    )
+
+    now = _datetime.now(_tz.utc)
+
+    def esc(value) -> str:
+        return _html.escape(str(value)) if value is not None else ""
+
+    def parse_time(value: str | None) -> _datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = _datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=parsed.tzinfo or _tz.utc).astimezone(_tz.utc)
+        except (TypeError, ValueError):
+            return None
+
+    def age(value: str | None) -> str:
+        parsed = parse_time(value)
+        if parsed is None:
+            return "unknown"
+        seconds = max(0, int((now - parsed).total_seconds()))
+        if seconds < 60:
+            return f"{seconds}s ago"
+        if seconds < 3600:
+            return f"{seconds // 60}m ago"
+        if seconds < 86400:
+            return f"{seconds // 3600}h ago"
+        return f"{seconds // 86400}d ago"
+
+    def money(value: float) -> str:
+        return f"${float(value):.4f}" if 0 < float(value) < 0.01 else f"${float(value):.2f}"
+
+    enabled = bool(settings.get("runpod_cpu_dispatch_enabled", False))
+    if not enabled:
+        dispatch_state = "DISABLED"
+        dispatch_tone = "quiet"
+        dispatch_detail = "Paid CPU dispatch is off. Local processing is unchanged."
+    else:
+        try:
+            config_from_settings(settings).validate()
+        except (DispatchError, ValueError, TypeError) as exc:
+            dispatch_state = "BLOCKED"
+            dispatch_tone = "bad"
+            dispatch_detail = str(exc)
+        else:
+            dispatch_state = "ENABLED"
+            dispatch_tone = "good"
+            dispatch_detail = "Admission and reconciliation prerequisites are ready."
+
+    reconcile_path = str(settings.get("runpod_reconciliation_state_path", "")).strip()
+    reconcile: dict = {}
+    if reconcile_path:
+        try:
+            value = _json.loads(Path(reconcile_path).read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                reconcile = value
+        except (OSError, ValueError, TypeError, _json.JSONDecodeError):
+            reconcile = {}
+    reconcile_fresh = reconciliation_backstop_ready(settings, now=now)
+    if reconcile.get("healthy") is True and reconcile_fresh:
+        reconcile_state, reconcile_tone = "HEALTHY", "good"
+        reconcile_detail = "Latest complete RunPod inventory succeeded."
+    elif reconcile.get("healthy") is True:
+        reconcile_state, reconcile_tone = "STALE", "bad"
+        reconcile_detail = "The latest healthy heartbeat is expired or has an invalid timestamp."
+    elif reconcile:
+        reconcile_state, reconcile_tone = "UNHEALTHY", "bad"
+        persisted_error = reconcile.get("error")
+        if isinstance(persisted_error, str) and persisted_error.strip():
+            reconcile_detail = f"Latest inventory check failed: {persisted_error.strip()}"
+        else:
+            reconcile_detail = "Latest inventory check failed; no error detail was recorded."
+    else:
+        reconcile_state, reconcile_tone = "NO DATA", "quiet"
+        reconcile_detail = "No readable reconciliation heartbeat is configured."
+
+    cutoff_24h = (now - DAILY_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_30d = (now - MONTHLY_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
+    spend_24h = runpod_spend_since(cutoff_24h)
+    spend_30d = runpod_spend_since(cutoff_30d)
+    gpu_calls = gpu_tool_call_summary(cutoff_30d)
+
+    def spend_block(label: str, totals: dict[str, float], cap: float) -> str:
+        total = float(totals.get("total_cost", 0.0))
+        percent = min(100.0, max(0.0, total / cap * 100.0)) if cap else 0.0
+        over = max(0.0, total - cap)
+        balance_label = "Over by" if over else "Remaining"
+        balance = over if over else max(0.0, cap - total)
+        meter_value = min(max(total, 0.0), cap)
+        return f"""
+        <section class="rp-budget{' rp-budget-over' if over else ''}" aria-label="{esc(label)} spend">
+          <div class="rp-budget-head">
+            <h2>{esc(label)}</h2>
+            <strong>{money(total)} <span>/ {money(cap)}</span></strong>
+          </div>
+          <div class="rp-meter" role="meter" aria-valuemin="0" aria-valuemax="{cap:.2f}"
+               aria-valuenow="{meter_value:.4f}" aria-label="{esc(label)} budget used">
+            <span style="width:{percent:.2f}%"></span>
+          </div>
+          <div class="rp-breakdown">
+            <span>CPU <b>{money(totals.get('cpu_cost', 0.0))}</b></span>
+            <span>GPU <b>{money(totals.get('gpu_cost', 0.0))}</b></span>
+            <span>Storage <b>{money(totals.get('storage_cost', 0.0))}</b></span>
+            <span>{balance_label} <b>{money(balance)}</b></span>
+          </div>
+        </section>"""
+
+    rows = get_recent_pod_lifecycle_rows(limit=100)
+    active = get_all_active_pod_lifecycle_rows(
+        terminal_states=CONFIRMED_GONE_STATES
+    )
+    failures = [row for row in rows if row.get("state") == "failed"][:10]
+    terminated = [row for row in rows if row.get("state") == "terminated"][:10]
+
+    def deadline_status(row: dict) -> str:
+        deadline = parse_time(row.get("ready_deadline"))
+        if deadline is None:
+            return "—"
+        if row.get("ready_at"):
+            return f"met · {esc(_fmt_mst(row['ready_at']))}"
+        if row.get("state") in ("provisioning", "starting") and now > deadline:
+            return f'<span class="rp-danger">past due · {esc(_fmt_mst(row["ready_deadline"]))}</span>'
+        return esc(_fmt_mst(row.get("ready_deadline") or ""))
+
+    active_rows = "".join(f"""
+      <tr>
+        <td><code>{int(row['id'])}</code></td>
+        <td><span class="rp-state rp-state-{esc(row.get('state'))}">{esc(row.get('state'))}</span></td>
+        <td><code>{esc(row.get('work_key'))}</code></td>
+        <td><code>{esc(row.get('pod_id') or 'pending')}</code></td>
+        <td><code>{esc(row.get('current_job_id') or '—')}</code></td>
+        <td>{deadline_status(row)}</td>
+        <td>{age(row.get('last_seen_at') or row.get('created_at'))}</td>
+      </tr>""" for row in active) or (
+        '<tr><td colspan="7" class="rp-empty">No active lifecycle records. No paid pod is known locally.</td></tr>'
+    )
+
+    failure_rows = "".join(f"""
+      <tr>
+        <td><code>{int(row['id'])}</code></td>
+        <td>{esc(_fmt_mst(row.get('last_seen_at') or row.get('created_at') or ''))}</td>
+        <td><code>{esc(row.get('work_key'))}</code></td>
+        <td><code>{esc(row.get('pod_id') or 'unknown')}</code></td>
+        <td><code>{esc(row.get('current_job_id') or '—')}</code></td>
+        <td class="rp-danger">{esc(row.get('failure_reason') or 'No reason recorded')}</td>
+      </tr>""" for row in failures) or (
+        '<tr><td colspan="6" class="rp-empty">No failed lifecycle records.</td></tr>'
+    )
+
+    terminated_rows = "".join(f"""
+      <tr>
+        <td><code>{int(row['id'])}</code></td>
+        <td>{esc(_fmt_mst(row.get('terminated_at') or ''))}</td>
+        <td><code>{esc(row.get('work_key'))}</code></td>
+        <td><code>{esc(row.get('pod_id') or 'unknown')}</code></td>
+        <td><code>{esc(row.get('current_job_id') or '—')}</code></td>
+        <td>{esc(row.get('failure_reason') or 'Completed and confirmed gone')}</td>
+      </tr>""" for row in terminated) or (
+        '<tr><td colspan="6" class="rp-empty">No confirmed terminations recorded yet.</td></tr>'
+    )
+
+    gpu_call_rows = "".join(f"""
+      <tr>
+        <td><code>{esc(row['tool'])}</code></td>
+        <td>{esc(row['backend'])}</td>
+        <td>{int(row['count'])}</td>
+        <td>{int(row['failures'])}</td>
+        <td>{float(row['total_elapsed_s']):.1f}s</td>
+        <td>{float(row['avg_elapsed_s']):.1f}s</td>
+        <td>{money(row['total_cost_usd'])}</td>
+      </tr>""" for row in gpu_calls) or (
+        '<tr><td colspan="7" class="rp-empty">No real GPU-tool calls recorded in the last 30 days.</td></tr>'
+    )
+
+    checked_at = reconcile.get("checked_at")
+    def inventory_value(name: str) -> str:
+        if not reconcile:
+            return "—"
+        try:
+            return str(int(reconcile.get(name, 0) or 0))
+        except (TypeError, ValueError):
+            return "—"
+
+    body = f"""
+<main class="rp-page">
+  <header class="rp-header">
+    <div>
+      <h1>RunPod control plane</h1>
+      <p>Observe Candidate 6 dispatch readiness, bounded spend, and proof that disposable compute terminated.</p>
+    </div>
+    <p class="rp-readonly">Observe only · snapshot at page load · no start, stop, retry, or override controls</p>
+  </header>
+
+  <div class="rp-status-grid">
+    <section class="rp-status rp-{dispatch_tone}">
+      <h2>Dispatch</h2><strong>{dispatch_state}</strong><p>{esc(dispatch_detail)}</p>
+    </section>
+    <section class="rp-status rp-{reconcile_tone}">
+      <h2>Reconciliation</h2><strong>{reconcile_state}</strong><p>{esc(reconcile_detail)}</p>
+    </section>
+    <dl class="rp-inventory">
+      <div><dt>Last inventory</dt><dd>{esc(age(checked_at))}</dd></div>
+      <div><dt>Managed remote</dt><dd>{inventory_value('managed_remote')}</dd></div>
+      <div><dt>Active local</dt><dd>{inventory_value('active_local')}</dd></div>
+      <div><dt>Matched</dt><dd>{inventory_value('matched')}</dd></div>
+    </dl>
+  </div>
+
+  <section class="rp-section">
+    <div class="rp-section-head"><h2>Shared RunPod budget</h2><p>Rolling windows from recorded CPU, GPU, and storage events.</p></div>
+    <div class="rp-budget-grid">
+      {spend_block('Last 24 hours', spend_24h, DAILY_CAP_USD)}
+      {spend_block('Last 30 days', spend_30d, MONTHLY_CAP_USD)}
+    </div>
+    <p class="rp-note">Session spend is intentionally omitted: Candidate 6 does not yet persist an authoritative session boundary.</p>
+  </section>
+
+  <section class="rp-section">
+    <div class="rp-section-head"><h2>Real GPU usage (all calls)</h2><p>Last 30 days · observational RC-Astro GPU/CPU outcomes, separate from Candidate 6 budget accounting.</p></div>
+    <div class="rp-table-wrap" tabindex="0" role="region" aria-label="Real GPU tool call summary"><table><thead><tr><th>Tool</th><th>Backend</th><th>Calls</th><th>Failures</th><th>Total time</th><th>Average time</th><th>Estimated cost</th></tr></thead><tbody>{gpu_call_rows}</tbody></table></div>
+  </section>
+
+  <section class="rp-section">
+    <div class="rp-section-head"><h2>Active lifecycle</h2><p>{len(active)} record{'s' if len(active) != 1 else ''} not confirmed terminated.</p></div>
+    <div class="rp-table-wrap" tabindex="0" role="region" aria-label="Active RunPod lifecycle records"><table><thead><tr><th>Lifecycle</th><th>State</th><th>Work key</th><th>Pod</th><th>Job</th><th>Ready deadline</th><th>Last signal</th></tr></thead><tbody>{active_rows}</tbody></table></div>
+  </section>
+
+  <section class="rp-section rp-split">
+    <div>
+      <div class="rp-section-head"><h2>Recent failures</h2><p>Latest failed lifecycle records.</p></div>
+      <div class="rp-table-wrap" tabindex="0" role="region" aria-label="Recent RunPod lifecycle failures"><table><thead><tr><th>Lifecycle</th><th>Observed</th><th>Work key</th><th>Pod</th><th>Job</th><th>Reason</th></tr></thead><tbody>{failure_rows}</tbody></table></div>
+    </div>
+    <div>
+      <div class="rp-section-head"><h2>Confirmed terminations</h2><p>Evidence that billed compute is gone.</p></div>
+      <div class="rp-table-wrap" tabindex="0" role="region" aria-label="Confirmed RunPod terminations"><table><thead><tr><th>Lifecycle</th><th>Terminated</th><th>Work key</th><th>Pod</th><th>Job</th><th>Context</th></tr></thead><tbody>{terminated_rows}</tbody></table></div>
+    </div>
+  </section>
+</main>"""
+
+    css = """
+  .rp-page { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
+  .rp-header { display:flex; justify-content:space-between; align-items:flex-end; gap:2rem;
+               padding:.4rem 0 1.25rem; border-bottom:1px solid var(--border); }
+  .rp-header h1 { font-size:clamp(1.35rem,3vw,2rem); letter-spacing:-.02em; }
+  .rp-header p { color:var(--text2); margin-top:.35rem; max-width:68ch; line-height:1.5; }
+  .rp-readonly { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.72rem;
+                 text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; }
+  .rp-status-grid { display:grid; grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) 1.35fr;
+                    border-bottom:1px solid var(--border); }
+  .rp-status { padding:1.2rem 1.25rem 1.15rem 0; border-right:1px solid var(--border); }
+  .rp-status + .rp-status { padding-left:1.25rem; }
+  .rp-status h2,.rp-inventory dt { color:var(--text2); font-size:.69rem; text-transform:uppercase;
+                                   letter-spacing:.08em; font-weight:600; }
+  .rp-status strong { display:block; margin:.35rem 0 .25rem; font-size:1.35rem; letter-spacing:.02em; }
+  .rp-status p { color:var(--text2); font-size:.8rem; line-height:1.45; }
+  .rp-good strong { color:var(--green); } .rp-bad strong,.rp-danger { color:#f85149; }
+  .rp-quiet strong { color:#8b949e; }
+  .rp-inventory { display:grid; grid-template-columns:1fr 1fr; }
+  .rp-inventory div { padding:1rem 1.1rem; border-bottom:1px solid var(--border); }
+  .rp-inventory div:nth-child(odd) { border-right:1px solid var(--border); }
+  .rp-inventory div:nth-last-child(-n+2) { border-bottom:0; }
+  .rp-inventory dd { font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+                     font-size:1rem; margin-top:.3rem; font-variant-numeric:tabular-nums; }
+  .rp-section { padding-top:2rem; }
+  .rp-section-head { display:flex; align-items:baseline; justify-content:space-between; gap:1rem;
+                     margin-bottom:.8rem; }
+  .rp-section-head h2 { font-size:1rem; } .rp-section-head p,.rp-note { color:var(--text2); font-size:.78rem; }
+  .rp-budget-grid { display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--border); }
+  .rp-budget { padding:1rem 1.1rem; min-width:0; } .rp-budget + .rp-budget { border-left:1px solid var(--border); }
+  .rp-budget-head { display:flex; justify-content:space-between; gap:1rem; align-items:baseline; }
+  .rp-budget-head h2 { font-size:.82rem; font-weight:600; } .rp-budget-head strong { font-variant-numeric:tabular-nums; }
+  .rp-budget-head span { color:var(--text2); font-size:.75rem; font-weight:400; }
+  .rp-meter { height:5px; background:var(--bg3); margin:.75rem 0; overflow:hidden; }
+  .rp-meter span { display:block; height:100%; background:var(--accent); }
+  .rp-budget-over .rp-meter span { background:#f85149; }
+  .rp-breakdown { display:grid; grid-template-columns:repeat(4,1fr); gap:.5rem; color:var(--text2);
+                  font-size:.69rem; text-transform:uppercase; letter-spacing:.05em; }
+  .rp-breakdown b { display:block; color:var(--text); margin-top:.2rem; font-size:.78rem;
+                    font-variant-numeric:tabular-nums; }
+  .rp-note { margin-top:.55rem; }
+  .rp-table-wrap { overflow-x:auto; border:1px solid var(--border); }
+  .rp-table-wrap:focus { outline:2px solid var(--accent); outline-offset:2px; }
+  .rp-page table { width:100%; border-collapse:collapse; font-size:.78rem; }
+  .rp-page th { color:var(--text2); text-align:left; font-size:.67rem; text-transform:uppercase;
+                letter-spacing:.06em; font-weight:600; background:var(--bg2); }
+  .rp-page th,.rp-page td { padding:.62rem .7rem; border-bottom:1px solid var(--border); vertical-align:top; }
+  .rp-page tr:last-child td { border-bottom:0; } .rp-page tbody tr:hover { background:var(--bg2); }
+  .rp-page code { color:#c9d1d9; font-size:.72rem; white-space:nowrap; }
+  .rp-state { font-size:.67rem; text-transform:uppercase; letter-spacing:.05em; color:#e3b341; }
+  .rp-state-ready,.rp-state-busy { color:var(--green); } .rp-state-failed { color:#f85149; }
+  .rp-state-terminating { color:#d2a8ff; } .rp-empty { color:var(--text2); text-align:center; padding:1rem!important; }
+  .rp-split { display:grid; grid-template-columns:1fr 1fr; gap:1.25rem; }
+  ::selection { background:#1f6feb; color:#fff; }
+  @media (max-width: 820px) {
+    .rp-header { align-items:flex-start; flex-direction:column; gap:.4rem; }
+    .rp-readonly { white-space:normal; }
+    .rp-status-grid { grid-template-columns:1fr 1fr; }
+    .rp-inventory { grid-column:1/-1; border-top:1px solid var(--border); }
+    .rp-budget-grid,.rp-split { grid-template-columns:1fr; }
+    .rp-budget + .rp-budget { border-left:0; border-top:1px solid var(--border); }
+  }
+  @media (max-width: 520px) {
+    .rp-page { padding:1rem .75rem 4rem; }
+    .rp-status-grid { grid-template-columns:1fr; }
+    .rp-status,.rp-status + .rp-status { padding:1rem 0; border-right:0; border-bottom:1px solid var(--border); }
+    .rp-inventory { grid-column:auto; border-top:0; }
+    .rp-section-head { align-items:flex-start; flex-direction:column; gap:.2rem; }
+    .rp-breakdown { grid-template-columns:1fr 1fr; }
+  }
+"""
+    return _shell("RunPod status — SeeStar", body, css)
 
 
 # ---------------------------------------------------------------------------
@@ -3317,7 +3993,7 @@ def stack_history_page(target: str | None = None) -> str:
             )
 
         cards_html = ""
-        for r in runs:
+        for _sh_idx, r in enumerate(runs):
             output_path = r.get("output_path") or ""
             ts = _fmt_mst(r.get("finished_at") or "")
             engine = r.get("engine", "?")
@@ -3409,6 +4085,27 @@ def stack_history_page(target: str | None = None) -> str:
             else:
                 score_rows = '<div style="color:var(--text2);font-size:.78rem">No assessment</div>'
 
+            if output_path:
+                from pathlib import Path as _P2
+                _src_file_enc = _uparse.quote(_P2(output_path).name, safe="")
+                _tgt_enc = _uparse.quote(target, safe="")
+                _exp_id = f"sh-exp-{_sh_idx}"
+                _mr_id = f"sh-mr-{_sh_idx}"
+                queue_btn = (
+                    f'<div style="display:flex;gap:.7rem;margin-top:.4rem;font-size:.72rem;'
+                    f'color:var(--text2)">'
+                    f'<label style="display:flex;align-items:center;gap:.25rem;cursor:pointer">'
+                    f'<input type="checkbox" id="{_exp_id}" style="margin:0">Experiment</label>'
+                    f'<label style="display:flex;align-items:center;gap:.25rem;cursor:pointer">'
+                    f'<input type="checkbox" id="{_mr_id}" checked style="margin:0">Manual review</label>'
+                    f'</div>'
+                    f'<button class="go-btn" style="width:100%;margin-top:.3rem;font-size:.76rem;padding:.35rem .5rem" '
+                    f'onclick="sh_queueStack(this,\'{_tgt_enc}\',\'{_src_file_enc}\',\'{_exp_id}\',\'{_mr_id}\')">'
+                    f'&#9881; Add to Processing Queue</button>'
+                )
+            else:
+                queue_btn = ""
+
             cards_html += f"""
 <div class="sh-card" data-engine="{engine}" style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column">
   {img_html}
@@ -3424,6 +4121,7 @@ def stack_history_page(target: str | None = None) -> str:
       <div style="font-size:.7rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px">Claude</div>
       {score_rows}
     </div>
+    {queue_btn}
   </div>
 </div>"""
 
@@ -3471,6 +4169,26 @@ def stack_history_page(target: str | None = None) -> str:
   }});
   updateCount();
 }})();
+function sh_queueStack(btn, tgtEnc, fileEnc, expId, mrId) {{
+  btn.disabled = true;
+  btn.innerHTML = '&#9203; Queuing…';
+  var exp = expId && document.getElementById(expId) && document.getElementById(expId).checked;
+  var mr = mrId && document.getElementById(mrId) && document.getElementById(mrId).checked;
+  var url = '/queue?target=' + tgtEnc + '&workflow=auto&source_file=' + fileEnc
+    + '&experiment_mode=' + (exp ? 'true' : 'false')
+    + '&manual_review=' + (mr ? 'true' : 'false');
+  fetch(url, {{method: 'POST'}})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(d) {{
+      btn.innerHTML = '&#10003; Queued';
+      alert(d.message || 'Queued.');
+    }})
+    .catch(function() {{
+      alert('Error adding to queue.');
+      btn.disabled = false;
+      btn.innerHTML = '&#9881; Add to Processing Queue';
+    }});
+}}
 </script>"""
 
     else:
@@ -3586,37 +4304,25 @@ def stack_history_page(target: str | None = None) -> str:
 # FITS detail viewer  (/fits/{target}/{path:path})
 # ---------------------------------------------------------------------------
 
-def _list_target_fits(target: str) -> list[Path]:
-    """Return all FITS files for a target (raw stacks then processed), paths relative to target dir."""
-    from nas_server.config import settings
-    lib = Path(settings["seestar_library_path"])
-    tdir = lib / target
-    if not tdir.is_dir():
-        return []
-    _exts = ("*.fit", "*.fits", "*.xisf", "*.tif", "*.tiff")
-    raw = [p for ext in _exts for p in sorted(tdir.glob(ext))]
-    proc_dir = tdir / "_processed"
-    proc = ([p for ext in _exts for p in sorted(proc_dir.glob(ext))]
-            if proc_dir.is_dir() else [])
-    return [f.relative_to(tdir) for f in raw + proc]
+def _list_target_fits(target: str):
+    """Compatibility wrapper returning the canonical target's product records."""
+    from nas_server.fits_products import canonical_target_for_storage, list_fits_products
+
+    return list_fits_products(canonical_target_for_storage(target))
 
 
 def fits_viewer_page(target: str, path: str) -> str:
     from nas_server.config import settings
-    from nas_server.database import is_raw_stack
+    from nas_server.fits_products import find_fits_product
 
     lib = Path(settings["seestar_library_path"])
     fits_path = lib / target / path
 
-    all_fits = _list_target_fits(target)
-    current_rel = Path(path)
-    try:
-        idx = next(i for i, f in enumerate(all_fits) if f == current_rel)
-    except StopIteration:
-        idx = 0
+    canonical_target, selected, all_fits = find_fits_product(target, path, library=lib)
+    idx = next((i for i, product in enumerate(all_fits) if product == selected), 0)
 
-    def fits_url(rel: Path) -> str:
-        return f"/fits/{_uparse.quote(target, safe='')}/{_uparse.quote(str(rel), safe='/')}"
+    def fits_url(product) -> str:
+        return product.viewer_url
 
     prev_url = fits_url(all_fits[idx - 1]) if idx > 0 else ""
     next_url = fits_url(all_fits[idx + 1]) if idx < len(all_fits) - 1 else ""
@@ -3632,7 +4338,7 @@ def fits_viewer_page(target: str, path: str) -> str:
     is_raster = suffix_l in (".tif", ".tiff")
     # A raw stack is linear (STF on) even though it lives in _processed/; only a
     # genuine processed output is non-linear and defaults to a no-STF view.
-    is_proc_file = path.startswith("_processed") and not is_raw_stack(Path(path).name)
+    is_proc_file = bool(selected and selected.provenance == "processed_final")
     default_stf = not (is_proc_file or is_raster)
     init_src = base_img_src if default_stf else base_img_src + "?stf=0"
     _stf_checked = "checked" if default_stf else ""
@@ -3643,17 +4349,23 @@ def fits_viewer_page(target: str, path: str) -> str:
 
     # Sidebar file list
     file_items = ""
-    for i, f in enumerate(all_fits):
-        # "proc" only for genuine processed outputs; raw stacks live in _processed/
-        # too but are raw stacker results, so they stay tagged "raw".
-        is_proc = str(f).startswith("_processed") and not is_raw_stack(f.name)
-        tag_color = "#3fb950" if is_proc else "#58a6ff"
-        tag_label = "proc" if is_proc else "raw"
+    for i, product in enumerate(all_fits):
+        tag_color = {
+            "processed_final": "#3fb950",
+            "pipeline_stack": "#58a6ff",
+            "seestar_stack": "#d29922",
+        }[product.provenance]
+        tag_label = {
+            "processed_final": "final",
+            "pipeline_stack": "pipeline",
+            "seestar_stack": "seestar",
+        }[product.provenance]
+        mosaic_badge = '<span class="fv-tag">mosaic</span>' if product.mosaic else ""
         active_style = "background:var(--bg3);border-color:var(--accent);" if i == idx else ""
         file_items += (
-            f'<a href="{fits_url(f)}" class="fv-file" style="{active_style}">'
+            f'<a href="{fits_url(product)}" class="fv-file" style="{active_style}">'
             f'<span class="fv-tag" style="color:{tag_color};border-color:{tag_color}">{tag_label}</span>'
-            f'<span class="fv-fname-sm">{f.name}</span>'
+            f'{mosaic_badge}<span class="fv-fname-sm">{product.filename}</span>'
             f'</a>'
         )
 
@@ -3664,12 +4376,28 @@ def fits_viewer_page(target: str, path: str) -> str:
         return f'<span class="fv-nav-btn fv-nav-dis">{arrow} {label}</span>'
 
     _file_list_html = file_items or '<p style="color:var(--text2);padding:.5rem">No FITS found</p>'
+    queue_button = ""
+    if selected and selected.raw_input_eligible:
+        queue_target = _uparse.quote(canonical_target, safe="")
+        queue_file = _uparse.quote(Path(path).name, safe="")
+        queue_button = (
+            '<label style="display:flex;align-items:center;gap:.25rem;cursor:pointer;'
+            'font-size:.78rem;color:var(--text2)">'
+            '<input type="checkbox" id="fv-exp" style="margin:0">Experiment</label>'
+            '<label style="display:flex;align-items:center;gap:.25rem;cursor:pointer;'
+            'font-size:.78rem;color:var(--text2)">'
+            '<input type="checkbox" id="fv-mr" checked style="margin:0">Manual review</label>'
+            '<button id="fv-queue-btn" class="fv-nav-btn" '
+            f'onclick="queueAutoProcess(\'{queue_target}\', \'{queue_file}\')" '
+            'title="Queue processing from this verified raw pipeline stack" '
+            'style="cursor:pointer">&#9881; Add to Queue</button>'
+        )
 
     body = f"""
 <div class="fv-layout">
 
   <div class="fv-sidebar">
-    <div class="fv-sidebar-hdr">{target}</div>
+    <div class="fv-sidebar-hdr">{canonical_target}</div>
     <div class="fv-file-list">{_file_list_html}</div>
   </div>
 
@@ -3677,10 +4405,7 @@ def fits_viewer_page(target: str, path: str) -> str:
     <div class="fv-toolbar">
       <div class="fv-current-name">{Path(path).name}</div>
       <div class="fv-nav-row">
-        <button id="fv-queue-btn" class="fv-nav-btn"
-          onclick="queueAutoProcess('{tgt_enc}', '{_uparse.quote(Path(path).name, safe="")}')"
-          title="Queue an auto-process run using this file as the source stack"
-          style="cursor:pointer">&#9881; Add to Queue</button>
+        {queue_button}
         {nav_btn(prev_url, "Prev", "&#8592;")}
         <span class="fv-pos">{idx + 1} / {len(all_fits)}</span>
         {nav_btn(next_url, "Next", "&#8594;")}
@@ -3760,7 +4485,11 @@ function sliderChanged() {{
 function queueAutoProcess(tgtEnc, fileEnc) {{
   var btn = document.getElementById('fv-queue-btn');
   if (btn) {{ btn.disabled = true; btn.innerHTML = '&#9203; Queuing…'; }}
-  var url = '/queue?target=' + tgtEnc + '&workflow=auto&source_file=' + fileEnc;
+  var expEl = document.getElementById('fv-exp');
+  var mrEl = document.getElementById('fv-mr');
+  var url = '/queue?target=' + tgtEnc + '&workflow=auto&source_file=' + fileEnc
+    + '&experiment_mode=' + ((expEl && expEl.checked) ? 'true' : 'false')
+    + '&manual_review=' + ((mrEl && mrEl.checked) ? 'true' : 'false');
   fetch(url, {{method: 'POST'}})
     .then(function(r) {{ return r.json(); }})
     .then(function(d) {{
@@ -3847,7 +4576,8 @@ def target_detail_page(target: str) -> str:
     import json as _j
     from nas_server.database import (get_target_detail, get_story_data,
                                      get_stacking_runs, get_claude_history,
-                                     get_processed_files, is_raw_stack)
+                                     get_processed_files)
+    from nas_server.fits_products import list_fits_products
     from nas_server.config import settings
 
     story = get_story_data(target)
@@ -3862,6 +4592,7 @@ def target_detail_page(target: str) -> str:
     stacks = get_stacking_runs(target=target, limit=30, dedupe_outputs=True)
     assessments = get_claude_history(target=target, limit=3)
     proc_files = get_processed_files(target=target)
+    fits_products = list_fits_products(target, processed_rows=proc_files)
 
     # --- Hero block ---
     preview = t.get("preview_filename")
@@ -3904,7 +4635,7 @@ def target_detail_page(target: str) -> str:
         crop_html = (
             f'<div style="margin-top:.8rem;font-size:.8rem;color:var(--text2)">'
             f'Saved crop: <b>{_sc_src}</b>{_sc_dims} '
-            f'<button onclick="clearSavedCrop({_j.dumps(target)})" '
+            f"<button onclick='clearSavedCrop({_j.dumps(target)})' "
             f'style="margin-left:.5rem;background:var(--bg3);color:var(--text);'
             f'border:1px solid var(--border);border-radius:5px;padding:.2rem .6rem;'
             f'font-size:.78rem;cursor:pointer">Clear &amp; redo crop</button></div>'
@@ -4015,50 +4746,67 @@ def target_detail_page(target: str) -> str:
   </table>
 </div>"""
 
-    # --- Processed / raw-stack files grids ---
-    def _pf_card(p: dict) -> str:
-        fn = p.get("filename") or ""
-        tool = p.get("tool") or ""
-        step = p.get("step") or ""
-        integ = p.get("total_integration") or 0
+    # --- Deterministic FITS product grids ---
+    def _pf_card(p) -> str:
+        fn = _html.escape(p.filename)
+        tool = _html.escape(p.tool or "")
+        step = _html.escape(p.step or "")
+        integ = p.total_integration or 0
         hours_p = integ / 3600
-        obs = (p.get("obs_date") or "")
-        fn_enc = _uparse.quote(fn, safe="")
-        is_fits = fn.lower().endswith((".fit", ".fits", ".xisf", ".tif", ".tiff"))
-        link = f'/fits/{tgt_enc}/_processed/{fn_enc}' if is_fits else f'/image/{tgt_enc}/_processed/{fn_enc}'
-        thumb_html = ""
-        if fn.lower().endswith((".jpg", ".jpeg", ".png")):
-            thumb_html = (f'<img src="/image/{tgt_enc}/_processed/{fn_enc}" loading="lazy"'
-                          f' style="width:100%;height:100px;object-fit:cover;border-radius:4px 4px 0 0">')
+        obs = p.obs_date or ""
+        metadata = []
+        if p.frame_count:
+            metadata.append(f"{p.frame_count:,} frames")
+        if hours_p:
+            metadata.append(f"{hours_p:.1f}h")
+        if obs:
+            metadata.append(obs[:10])
+        link = p.viewer_url
+        mosaic_badge = ('<span class="td-product-badge td-product-mosaic">Mosaic</span>'
+                         if p.mosaic else "")
         return (f'<a href="{link}" style="color:inherit;text-decoration:none">'
                 f'<div style="background:var(--bg2);border:1px solid var(--border);'
                 f'border-radius:6px;overflow:hidden;font-size:.78rem">'
-                f'{thumb_html}'
                 f'<div style="padding:.45rem .55rem">'
+                f'<div style="display:flex;gap:.35rem;margin-bottom:.3rem">'
+                f'<span class="td-product-badge">{p.label}</span>{mosaic_badge}</div>'
                 f'<div style="font-family:monospace;font-size:.72rem;color:var(--text2);'
                 f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="{fn}">{fn}</div>'
                 f'<div style="color:var(--text2);margin-top:.2rem">{tool} {step}</div>'
-                f'<div style="color:var(--text2)">{hours_p:.1f}h · {obs}</div>'
+                f'<div style="color:var(--text2)">{" · ".join(metadata)}</div>'
                 f'</div></div></a>')
 
-    raw_stacks_p = [p for p in proc_files
-                    if is_raw_stack(p.get("filename", ""), p.get("step"))]
-    processed_p = [p for p in proc_files
-                   if not is_raw_stack(p.get("filename", ""), p.get("step"))]
-    raw_cards = "".join(_pf_card(p) for p in raw_stacks_p[:12])
-    pf_cards = "".join(_pf_card(p) for p in processed_p[:12])
+    pipeline_p = [p for p in fits_products if p.provenance == "pipeline_stack"]
+    processed_p = [p for p in fits_products if p.provenance == "processed_final"]
+    native_p = [p for p in fits_products if p.provenance == "seestar_stack"]
+    pipeline_cards = "".join(_pf_card(p) for p in pipeline_p[:24])
+    pf_cards = "".join(_pf_card(p) for p in processed_p[:24])
+    native_cards = "".join(_pf_card(p) for p in native_p)
+
+    def _more_products(products: list) -> str:
+        hidden = len(products) - 24
+        if hidden <= 0:
+            return ""
+        return (f'<a class="td-products-more" href="/fits/{tgt_enc}">'
+                f'Open FITS browser for {hidden} more →</a>')
 
     _grid_open = ('<div style="display:grid;grid-template-columns:'
                   'repeat(auto-fill,minmax(160px,1fr));gap:.75rem;margin-bottom:2rem">')
     proc_section = f"""
-<h2 class="td-h2">Raw Stacks</h2>
-{_grid_open}
-  {raw_cards or '<p style="color:var(--text2)">No raw stacks yet.</p>'}
-</div>
-<h2 class="td-h2">Processed Files</h2>
-{_grid_open}
-  {pf_cards or '<p style="color:var(--text2)">No processed files yet.</p>'}
-</div>"""
+<details class="td-product-group" open>
+  <summary>Pipeline Stacks <span class="td-product-count">({len(pipeline_p)})</span></summary>
+  {_grid_open}{pipeline_cards or '<p style="color:var(--text2)">No pipeline stacks yet.</p>'}</div>
+  {_more_products(pipeline_p)}
+</details>
+<details class="td-product-group">
+  <summary>Processed Finals <span class="td-product-count">({len(processed_p)})</span></summary>
+  {_grid_open}{pf_cards or '<p style="color:var(--text2)">No processed finals yet.</p>'}</div>
+  {_more_products(processed_p)}
+</details>
+<details class="td-native-products">
+  <summary>SeeStar Stacks <span class="td-product-count">({len(native_p)})</span></summary>
+  {_grid_open}{native_cards or '<p style="color:var(--text2)">No native SeeStar stacks yet.</p>'}</div>
+</details>"""
 
     # --- User comments section ---
     from nas_server.database import get_target_comments
@@ -4276,6 +5024,20 @@ async function setAutoFlag(tenc, key, val){{
   .td-btn-primary { background: var(--accent); color: #0d1117; border-color: var(--accent);
                     font-weight: 600; }
   .td-btn-primary:hover { opacity: .9; }
+  .td-product-badge { border: 1px solid var(--border); border-radius: 999px;
+                      padding: 1px 6px; color: var(--text2); font-size: .68rem; }
+  .td-product-mosaic { color: #d29922; border-color: #d29922; }
+  .td-product-count { color: var(--text2); font-size: .82rem; font-weight: 400; }
+  .td-native-products { margin-bottom: 2rem; border: 1px solid var(--border);
+                        border-radius: 6px; background: var(--bg2); }
+  .td-product-group { margin-bottom: .75rem; border: 1px solid var(--border);
+                      border-radius: 6px; background: var(--bg2); }
+  .td-native-products > summary, .td-product-group > summary {
+      cursor: pointer; padding: .7rem 1rem; font-weight: 650; min-height: 44px; }
+  .td-native-products > div, .td-product-group > div {
+      margin: 0; padding: .25rem .75rem .75rem; }
+  .td-products-more { display: inline-block; margin: 0 .75rem .8rem;
+                      font-size: .78rem; }
   details summary::-webkit-details-marker { display: none; }
   @media (max-width: 600px) {
     .td-wrap { padding: 1rem .75rem 3rem; }

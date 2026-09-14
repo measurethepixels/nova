@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the SeeStar archive-size cache computation daily (04:17 local)
+
+[Timer]
+# VM clock is MST (UTC-7, no DST). Staggered off the other daily timers
+# (daily-suggestions at 08:03, memory-tidy) to avoid NAS/SMB contention.
+OnCalendar=*-*-* 04:17:00
+Persistent=true
+Unit=archive-size.service
+
+[Install]
+WantedBy=timers.target

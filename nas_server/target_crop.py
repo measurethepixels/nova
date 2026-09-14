@@ -132,6 +132,97 @@ def has_target_crop(target: str) -> bool:
     return get_target_crop(target) is not None
 
 
+def needs_crop_review(target: str, *, experiment_mode: bool = False, dry_run: bool = False,
+                      extra_params: dict | None = None, default_on_error: bool = True) -> bool:
+    """Whether processing `target` right now would open a manual crop
+    review -- which can only run on the VM (the review DB record, blocking
+    event, candidate previews, and web UI all live there, not on any
+    remote worker; see AGENTS.md's human-in-the-loop section). The single
+    shared source of truth for this check: every dispatch path --
+    queue_manager.py's own loop AND any worker reached directly (e.g.
+    cpu_pod_worker.py, laptop_worker.py) -- calls this before deciding a
+    job is safe to run remotely, so the guard can't be silently bypassed
+    by a caller that doesn't route through queue_manager.py (see issue
+    #397: a direct-to-worker dispatch that skipped this check could hang
+    a job forever waiting for a review that will never come).
+
+    The review fires on a target's first process (no saved crop) or a
+    forced re-crop. Experiment and dry-run jobs skip the crop branch
+    entirely in auto_process, so they never review and can run remotely.
+
+    default_on_error controls what happens if the saved-crop lookup
+    itself fails (e.g. a DB error): True (the default) fails CLOSED --
+    treats the failure as "needs review, refuse to run remotely" rather
+    than risk silently skipping a real review. queue_manager.py's own
+    caller passes default_on_error=False to preserve its prior fail-open
+    behavior on the VM (where a lookup failure is far less likely, and
+    the consequence of a false positive is only "runs locally instead of
+    remotely," not a hang) -- not changed here to avoid altering already-
+    relied-upon VM dispatch behavior as a side effect of this fix. Any
+    NEW caller (a worker deciding whether to accept a job) should use the
+    default (fail closed): a lookup failure on a freshly-provisioned
+    remote worker is more likely, not less, and there the consequence of
+    a false negative is exactly the hang this function exists to
+    prevent."""
+    if experiment_mode or dry_run:
+        return False
+    if (extra_params or {}).get("re_crop"):
+        return True
+    try:
+        return get_target_crop(target) is None
+    except Exception:
+        return default_on_error
+
+
+# Columns in target_crops, in the order the schema declares them (see
+# nas_server/database.py's init_database()). Shared by upsert_target_crop_row()
+# so the snapshot payload's shape has one definition, not one per caller.
+_TARGET_CROP_COLUMNS = (
+    "target", "center_ra", "center_dec", "width_arcmin", "height_arcmin",
+    "pa_deg", "scale_arcsec", "frac_top", "frac_bottom", "frac_left",
+    "frac_right", "rotate_deg", "source", "created_at", "updated_at",
+)
+
+
+def upsert_target_crop_row(row: dict) -> None:
+    """Replace this process's local target_crops row for row["target"]
+    with exactly the given snapshot -- REPLACE semantics, never merged:
+    any existing local row for this target is fully overwritten. Used by
+    a remote worker (cpu_pod_worker.py/laptop_worker.py) to apply the
+    crop snapshot the VM attached to its job payload at dispatch time
+    (nas_server.worker_client.dispatch()), so the worker's own
+    (otherwise empty or stale) local target_crops table can't cause
+    auto_process()'s saved-crop branch to miss it and fall through to
+    opening a phantom interactive review that has nowhere to run.
+
+    Stale worker-local state must never win over the VM's snapshot --
+    that's the whole point of REPLACE over a partial UPDATE/merge."""
+    from nas_server.database import get_conn
+    values = [row.get(col) for col in _TARGET_CROP_COLUMNS]
+    placeholders = ",".join("?" * len(_TARGET_CROP_COLUMNS))
+    with get_conn() as conn:
+        conn.execute(
+            f"INSERT OR REPLACE INTO target_crops ({','.join(_TARGET_CROP_COLUMNS)}) "
+            f"VALUES ({placeholders})",
+            values,
+        )
+
+
+def crop_review_allowed_here() -> bool:
+    """Whether opening the interactive crop review is even possible in
+    this process. False on a headless remote worker
+    (cpu_pod_worker.py/laptop_worker.py set SEESTAR_HEADLESS_WORKER=1 at
+    their own module import time), where the review UI, blocking-event
+    registry, and review DB records it depends on don't exist.
+    auto_process.py checks this immediately before opening a review and
+    fails fast instead of silently hanging forever on a review that will
+    never come -- the last line of defense if the crop-snapshot fix above
+    somehow didn't apply for this target (e.g. a caller that dispatches
+    without attaching one)."""
+    import os
+    return not bool(os.environ.get("SEESTAR_HEADLESS_WORKER"))
+
+
 def clear_target_crop(target: str) -> bool:
     from nas_server.database import get_conn
     with get_conn() as conn:

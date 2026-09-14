@@ -5,8 +5,8 @@ Every function signature is:
     compute_<tool>(stats, object_type="unknown", history=None) -> dict
 
 `stats`       — output of image_analyzer.analyze()
-`object_type` — galaxy | emission_nebula | reflection_nebula | globular_cluster
-                planetary_nebula | open_cluster | unknown
+`object_type` — ontology-backed target type; sibling subtypes share the family
+                sets below so their parameter behavior stays consistent.
 `history`     — list of past {"params": {...}, "delta": {...}} dicts for this tool+type.
                 When None or empty, pure data-driven defaults are used.
                 When populated, history nudges parameters toward what has worked.
@@ -19,9 +19,12 @@ import math
 
 log = logging.getLogger(__name__)
 
-_NEBULA_TYPES = {"emission_nebula", "reflection_nebula", "planetary_nebula"}
-_GALAXY_TYPES = {"galaxy"}
-_CLUSTER_TYPES = {"globular_cluster", "open_cluster"}
+_NEBULA_TYPES = {
+    "emission_nebula", "reflection_nebula", "planetary_nebula",
+    "supernova_remnant", "nebula",
+}
+_GALAXY_TYPES = {"galaxy", "galaxy_group", "interacting_galaxies"}
+_CLUSTER_TYPES = {"globular_cluster", "open_cluster", "asterism", "double_star"}
 
 
 # ---------------------------------------------------------------------------
@@ -587,9 +590,15 @@ def compute_curves(stats, object_type="unknown", history=None) -> dict:
     # ── Target sky level by object type ──────────────────────────────────
     _SKY_TARGETS = {
         "galaxy":             0.09,
+        "galaxy_group":       0.09,
+        "interacting_galaxies": 0.09,
         "globular_cluster":   0.10,
         "open_cluster":       0.10,
+        "asterism":           0.10,
+        "double_star":        0.10,
         "emission_nebula":    0.09,
+        "supernova_remnant":  0.09,
+        "nebula":             0.09,
         "reflection_nebula":  0.09,
         "planetary_nebula":   0.08,
     }
@@ -609,9 +618,15 @@ def compute_curves(stats, object_type="unknown", history=None) -> dict:
     # nebulae can be pulled harder for star-to-sky contrast.
     _SHADOW_PULL = {
         "galaxy":             0.70,   # preserve faint outer arms / IFN
+        "galaxy_group":       0.70,
+        "interacting_galaxies": 0.70,
         "globular_cluster":   0.45,
         "open_cluster":       0.45,
+        "asterism":           0.45,
+        "double_star":        0.45,
         "emission_nebula":    0.55,   # leave room for faint Ha halos
+        "supernova_remnant":  0.55,
+        "nebula":             0.55,
         "reflection_nebula":  0.55,
         "planetary_nebula":   0.45,
     }
@@ -647,9 +662,15 @@ def compute_curves(stats, object_type="unknown", history=None) -> dict:
     # gives a smooth, monotone ramp that distributes compression evenly.
     _P999_TARGETS = {
         "galaxy":             0.90,   # galaxy cores can glow a little
+        "galaxy_group":       0.90,
+        "interacting_galaxies": 0.90,
         "globular_cluster":   0.87,   # tight core — pull back more
         "open_cluster":       0.88,
+        "asterism":           0.88,
+        "double_star":        0.88,
         "emission_nebula":    0.89,
+        "supernova_remnant":  0.89,
+        "nebula":             0.89,
         "reflection_nebula":  0.90,
         "planetary_nebula":   0.88,
     }
@@ -791,24 +812,13 @@ def compute_ihdr(stats, object_type="unknown", history=None) -> dict:
 
 
 def compute_background_neutralize(stats, object_type="unknown", history=None) -> dict:
-    """Post-stretch background neutralization pivot mode from color cast severity."""
-    color = stats.get("color", {})
-    r, g, b = (color.get("r_median", 0.20),
-               color.get("g_median", 0.20),
-               color.get("b_median", 0.20))
+    """Use the established scale correction for ordinary processing.
 
-    ch_mean  = (r + g + b) / 3.0
-    cast_rel = max(abs(r - ch_mean), abs(g - ch_mean), abs(b - ch_mean)) / max(ch_mean, 1e-9)
-
-    # Stronger cast → more aggressive pivot
-    if cast_rel > 0.25:
-        mode = "pivot1"
-    elif cast_rel > 0.10:
-        mode = "pivot2"
-    else:
-        mode = "pivot3"
-
-    return _apply_history({"mode": mode}, history, [])
+    The former severity selector returned three names that all reached the
+    same SASpro scale branch. Offset remains a real Experiment Mode candidate,
+    but promoting it conditionally needs separate calibration evidence.
+    """
+    return _apply_history({"mode": "scale"}, history, [])
 
 
 # ---------------------------------------------------------------------------
