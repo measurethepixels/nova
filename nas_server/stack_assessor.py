@@ -25,14 +25,15 @@ import logging
 from pathlib import Path
 
 import numpy as np
+from nas_server.stack_assessment_runner import assess_stack
 
 log = logging.getLogger(__name__)
 
 
-def assess_stack(fits_path: Path | str,
-                 frame_count: int,
-                 single_frame_snrs: list[float] | None = None,
-                 mask_zero_border: bool = False) -> dict:
+def _assess_stack_direct(fits_path: Path | str,
+                         frame_count: int,
+                         single_frame_snrs: list[float] | None = None,
+                         mask_zero_border: bool = False) -> dict:
     """
     Measure stacking quality from a completed stack FITS file.
 

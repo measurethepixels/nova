@@ -1,5 +1,5 @@
 {
-  "version": "1.3",
+  "version": "1.5",
   "object_types": {
     "galaxy": {
       "priority_qualities": [
@@ -9,7 +9,39 @@
       ],
       "stretch_preference": "ghs"
     },
+    "galaxy_group": {
+      "priority_qualities": [
+        "color_balance",
+        "detail_level",
+        "dynamic_range"
+      ],
+      "stretch_preference": "ghs"
+    },
+    "interacting_galaxies": {
+      "priority_qualities": [
+        "color_balance",
+        "detail_level",
+        "dynamic_range"
+      ],
+      "stretch_preference": "ghs"
+    },
     "emission_nebula": {
+      "priority_qualities": [
+        "noise",
+        "gradient",
+        "detail_level"
+      ],
+      "stretch_preference": "stat"
+    },
+    "supernova_remnant": {
+      "priority_qualities": [
+        "noise",
+        "gradient",
+        "detail_level"
+      ],
+      "stretch_preference": "stat"
+    },
+    "nebula": {
       "priority_qualities": [
         "noise",
         "gradient",
@@ -39,6 +71,20 @@
       "stretch_preference": "ghs"
     },
     "open_cluster": {
+      "priority_qualities": [
+        "star_roundness",
+        "color_balance"
+      ],
+      "stretch_preference": "stat"
+    },
+    "asterism": {
+      "priority_qualities": [
+        "star_roundness",
+        "color_balance"
+      ],
+      "stretch_preference": "stat"
+    },
+    "double_star": {
       "priority_qualities": [
         "star_roundness",
         "color_balance"
@@ -439,6 +485,26 @@
           }
         },
         {
+          "id": "graxpert_sub_gpu",
+          "description": "GraXpert subtraction on the public ML-tools GPU worker",
+          "engine": "ml_tools_gpu",
+          "fn": "graxpert_subtraction",
+          "params": {
+            "correction": "Subtraction",
+            "smoothing": 0.5
+          }
+        },
+        {
+          "id": "graxpert_div_gpu",
+          "description": "GraXpert division on the public ML-tools GPU worker",
+          "engine": "ml_tools_gpu",
+          "fn": "graxpert_division",
+          "params": {
+            "correction": "Division",
+            "smoothing": 0.5
+          }
+        },
+        {
           "id": "pi_gc",
           "description": "PixInsight GradientCorrection (modern ABE/DBE replacement)",
           "engine": "pixinsight",
@@ -514,6 +580,37 @@
           "description": "SASpro SSSC \u2014 spectrophotometric calibration; solves system response from Gaia-XP star spectra. Needs >=20 XP-matched stars (star-rich fields only); auto-falls back to SPCC otherwise.",
           "engine": "seti_astro",
           "fn": "sssc_calibrate",
+          "family": "sssc",
+          "params": {
+            "lp": false
+          }
+        },
+        {
+          "id": "cc_sssc_race_baseline",
+          "description": "SSSC with no background pre-equalization (background-equalization race baseline).",
+          "engine": "seti_astro",
+          "fn": "sssc_race_baseline",
+          "family": "sssc",
+          "params": {
+            "lp": false
+          }
+        },
+        {
+          "id": "cc_sssc_race_masked",
+          "description": "SSSC after masked (signal-preserving) background equalization \u2014 preview shows the sampled patch.",
+          "engine": "seti_astro",
+          "fn": "sssc_race_masked",
+          "family": "sssc",
+          "params": {
+            "lp": false
+          }
+        },
+        {
+          "id": "cc_sssc_race_raw",
+          "description": "SSSC after unmasked (whole-frame) background equalization \u2014 preview shows the sampled patch.",
+          "engine": "seti_astro",
+          "fn": "sssc_race_raw",
+          "family": "sssc",
           "params": {
             "lp": false
           }
@@ -564,9 +661,9 @@
       "experiment_variants": [
         {
           "id": "bxt_standard",
-          "description": "PixInsight BXT \u2014 AI PSF deconvolution, best-in-class",
-          "engine": "pixinsight",
-          "fn": "bxt",
+          "description": "RC-Astro BXT \u2014 AI PSF deconvolution, best-in-class",
+          "engine": "seti_astro",
+          "fn": "bxt_deconvolve",
           "params": {
             "bxt": true,
             "bxt_psf": 4.0,
@@ -576,9 +673,9 @@
         },
         {
           "id": "bxt_conservative",
-          "description": "PixInsight BXT conservative (less stars correction)",
-          "engine": "pixinsight",
-          "fn": "bxt",
+          "description": "RC-Astro BXT conservative (less stars correction)",
+          "engine": "seti_astro",
+          "fn": "bxt_deconvolve",
           "params": {
             "bxt": true,
             "bxt_psf": 4.0,
@@ -588,9 +685,9 @@
         },
         {
           "id": "bxt_aggressive",
-          "description": "PixInsight BXT aggressive (more sharpening)",
-          "engine": "pixinsight",
-          "fn": "bxt",
+          "description": "RC-Astro BXT aggressive (more sharpening)",
+          "engine": "seti_astro",
+          "fn": "bxt_deconvolve",
           "params": {
             "bxt": true,
             "bxt_psf": 4.0,
@@ -644,9 +741,9 @@
         },
         {
           "id": "bxt_manual_psf",
-          "description": "PixInsight BXT with manual PSF \u2014 override auto-PSF for finer control",
-          "engine": "pixinsight",
-          "fn": "bxt",
+          "description": "RC-Astro BXT with manual PSF \u2014 override auto-PSF for finer control",
+          "engine": "seti_astro",
+          "fn": "bxt_deconvolve",
           "params": {
             "bxt": true,
             "bxt_auto_psf": false,
@@ -657,8 +754,8 @@
         {
           "id": "bxt_globular",
           "description": "BXT with luminance mask protecting the bright core \u2014 applies deconvolution to outer halo stars (lum < 0.5) only, preventing ringing halos in the saturated core",
-          "engine": "pixinsight",
-          "fn": "bxt",
+          "engine": "seti_astro",
+          "fn": "bxt_deconvolve",
           "lum_mask": {
             "lower": 0.0,
             "upper": 0.5,
@@ -694,6 +791,65 @@
             "nonstellar_amount": 0.4,
             "sharpening_mode": "Both"
           }
+        },
+        {
+          "id": "cosmic_clarity_sharpen_gpu",
+          "description": "Cosmic Clarity Both-mode sharpening on the public ML-tools GPU worker",
+          "engine": "ml_tools_gpu",
+          "fn": "cosmic_sharpen",
+          "params": {
+            "stellar_amount": 0.7,
+            "nonstellar_amount": 0.4,
+            "sharpening_mode": "Both"
+          }
+        },
+        {
+          "id": "parallax_natural_light",
+          "description": "Combined SyQon Parallax Natural pipeline — light sharpening and star reduction",
+          "engine": "ml_tools_gpu",
+          "fn": "parallax_pipeline",
+          "operations": ["syqon_parallax_correct", "syqon_parallax_sharpen", "syqon_parallax_star_reduce"],
+          "params": {"mode": "natural", "alpha": 0.3, "level": 3}
+        },
+        {
+          "id": "parallax_natural_moderate",
+          "description": "Combined SyQon Parallax Natural pipeline — moderate sharpening and star reduction",
+          "engine": "ml_tools_gpu",
+          "fn": "parallax_pipeline",
+          "operations": ["syqon_parallax_correct", "syqon_parallax_sharpen", "syqon_parallax_star_reduce"],
+          "params": {"mode": "natural", "alpha": 0.5, "level": 5}
+        },
+        {
+          "id": "parallax_natural_strong",
+          "description": "Combined SyQon Parallax Natural pipeline — strong sharpening and star reduction",
+          "engine": "ml_tools_gpu",
+          "fn": "parallax_pipeline",
+          "operations": ["syqon_parallax_correct", "syqon_parallax_sharpen", "syqon_parallax_star_reduce"],
+          "params": {"mode": "natural", "alpha": 0.8, "level": 7}
+        },
+        {
+          "id": "parallax_defined_light",
+          "description": "Combined SyQon Parallax Defined pipeline — light sharpening and star reduction",
+          "engine": "ml_tools_gpu",
+          "fn": "parallax_pipeline",
+          "operations": ["syqon_parallax_correct", "syqon_parallax_sharpen", "syqon_parallax_star_reduce"],
+          "params": {"mode": "defined", "alpha": 0.3, "level": 3}
+        },
+        {
+          "id": "parallax_defined_moderate",
+          "description": "Combined SyQon Parallax Defined pipeline — moderate sharpening and star reduction",
+          "engine": "ml_tools_gpu",
+          "fn": "parallax_pipeline",
+          "operations": ["syqon_parallax_correct", "syqon_parallax_sharpen", "syqon_parallax_star_reduce"],
+          "params": {"mode": "defined", "alpha": 0.5, "level": 5}
+        },
+        {
+          "id": "parallax_defined_strong",
+          "description": "Combined SyQon Parallax Defined pipeline — strong sharpening and star reduction",
+          "engine": "ml_tools_gpu",
+          "fn": "parallax_pipeline",
+          "operations": ["syqon_parallax_correct", "syqon_parallax_sharpen", "syqon_parallax_star_reduce"],
+          "params": {"mode": "defined", "alpha": 0.8, "level": 7}
         },
         {
           "id": "none",
@@ -867,9 +1023,19 @@
           }
         },
         {
+          "id": "cosmic_clarity_standard_gpu",
+          "description": "Cosmic Clarity denoising on the public ML-tools GPU worker",
+          "engine": "ml_tools_gpu",
+          "fn": "cosmic_denoise",
+          "params": {
+            "denoise_luma": 0.7,
+            "denoise_color": 0.5
+          }
+        },
+        {
           "id": "nxt",
           "description": "PixInsight NoiseXTerminator (best-in-class, requires PI)",
-          "engine": "pixinsight",
+          "engine": "seti_astro",
           "fn": "denoise_nxt",
           "params": {
             "nxt_denoise": 0.7,
@@ -879,7 +1045,7 @@
         {
           "id": "nxt_conservative",
           "description": "PixInsight NXT conservative \u2014 less aggressive, more detail retention",
-          "engine": "pixinsight",
+          "engine": "seti_astro",
           "fn": "denoise_nxt",
           "params": {
             "nxt_denoise": 0.5,
@@ -890,7 +1056,7 @@
         {
           "id": "nxt_two_pass",
           "description": "PixInsight NXT two-pass \u2014 run NXT twice at conservative settings",
-          "engine": "pixinsight",
+          "engine": "seti_astro",
           "fn": "denoise_nxt",
           "params": {
             "nxt_denoise": 0.5,
@@ -902,7 +1068,7 @@
         {
           "id": "nxt_strong",
           "description": "PixInsight NXT strong \u2014 amount=0.90, 2 iterations. Matches Henry's manual PI workflow for globulars (C 80 2026-05-24, final score 8.2/10). Full noise removal appropriate when upstream BXT has already sharpened and the outer halo needs clean sky between stars.",
-          "engine": "pixinsight",
+          "engine": "seti_astro",
           "fn": "denoise_nxt",
           "params": {
             "nxt_denoise": 0.9,
@@ -930,8 +1096,8 @@
         {
           "id": "bxt_correct_only",
           "description": "BXT correct-only \u2014 AI star roundness correction, no background sharpening. Default.",
-          "engine": "pixinsight",
-          "fn": "bxt",
+          "engine": "seti_astro",
+          "fn": "bxt_star_correct",
           "params": {
             "bxt": true,
             "bxt_correct_only": true,
@@ -949,6 +1115,15 @@
             "stellar_amount": 0.7,
             "nonstellar_amount": 0.05,
             "sharpening_mode": "Stellar"
+          }
+        },
+        {
+          "id": "syqon_parallax_sharpen_gpu",
+          "description": "SyQon Parallax sharpening on the public ML-tools GPU worker",
+          "engine": "ml_tools_gpu",
+          "fn": "syqon_parallax_sharpen",
+          "params": {
+            "alpha": 0.5
           }
         }
       ]
@@ -1326,12 +1501,11 @@
         "mode": {
           "type": "enum",
           "values": [
-            "pivot1",
-            "pivot2",
-            "pivot3"
+            "offset",
+            "scale"
           ],
-          "default": "pivot1",
-          "description": "pivot1: darkest background region. pivot2: median bg. pivot3: conservative (less aggressive)."
+          "default": "scale",
+          "description": "offset: per-channel shift. scale: highlight-protecting scale/pivot correction."
         }
       },
       "quality_impact": [
@@ -1340,21 +1514,21 @@
       ],
       "experiment_variants": [
         {
-          "id": "bg_neutral_pivot1",
-          "description": "Background neutralize \u2014 darkest region pivot (most aggressive)",
+          "id": "bg_neutral_offset",
+          "description": "Background neutralize \u2014 per-channel offset/shift",
           "engine": "seti_astro",
           "fn": "background_neutralize",
           "params": {
-            "mode": "pivot1"
+            "mode": "offset"
           }
         },
         {
-          "id": "bg_neutral_pivot3",
-          "description": "Background neutralize \u2014 conservative pivot (gentler)",
+          "id": "bg_neutral_scale",
+          "description": "Background neutralize \u2014 highlight-protecting scale/pivot",
           "engine": "seti_astro",
           "fn": "background_neutralize",
           "params": {
-            "mode": "pivot3"
+            "mode": "scale"
           }
         },
         {
@@ -1429,23 +1603,31 @@
       ]
     },
     "noise_reduction": {
-      "seti_astro_fn": "cc_denoise_inprocess",
+      "seti_astro_fn": "denoise_nxt",
       "stage": "nonlinear",
-      "note": "Post-stretch noise reduction. Less effective than linear-stage but useful for residual noise after strong stretch.",
+      "note": "Second NoiseXTerminator pass on post-stretch data for residual noise. Distinct from denoise_linear: this deliberately runs after stretch, uses the remote RC-Astro GPU when enabled, and otherwise falls back to the local RC-Astro CLI.",
       "parameters": {
-        "denoise_luma": {
+        "nxt_denoise": {
           "type": "float",
           "min": 0.1,
           "max": 1.0,
-          "default": 0.7,
+          "default": 0.65,
           "step": 0.1
         },
-        "denoise_color": {
+        "nxt_iterations": {
+          "type": "int",
+          "min": 1,
+          "max": 4,
+          "default": 2,
+          "step": 1
+        },
+        "nxt_detail": {
           "type": "float",
-          "min": 0.1,
+          "min": 0.0,
           "max": 1.0,
-          "default": 0.5,
-          "step": 0.1
+          "default": 0.18,
+          "step": 0.05,
+          "description": "Recorded for parity with the NXT preset; the RC-Astro CLI does not currently expose an equivalent control."
         }
       },
       "quality_impact": [
@@ -1454,7 +1636,7 @@
       "experiment_variants": [
         {
           "id": "nxt_gentle",
-          "fn": "nxt_denoise",
+          "fn": "denoise_nxt",
           "params": {
             "nxt_denoise": 0.45,
             "nxt_detail": 0.25
@@ -1462,7 +1644,7 @@
         },
         {
           "id": "nxt_standard",
-          "fn": "nxt_denoise",
+          "fn": "denoise_nxt",
           "params": {
             "nxt_denoise": 0.65,
             "nxt_detail": 0.18
@@ -1470,7 +1652,7 @@
         },
         {
           "id": "nxt_strong",
-          "fn": "nxt_denoise",
+          "fn": "denoise_nxt",
           "params": {
             "nxt_denoise": 0.8,
             "nxt_detail": 0.12
@@ -1478,7 +1660,7 @@
         },
         {
           "id": "cc_denoise_gentle",
-          "fn": "cc_denoise",
+          "fn": "cc_denoise_inprocess",
           "params": {
             "denoise_luma": 0.5,
             "denoise_color": 0.35
@@ -1486,7 +1668,17 @@
         },
         {
           "id": "cc_denoise_moderate",
-          "fn": "cc_denoise",
+          "fn": "cc_denoise_inprocess",
+          "params": {
+            "denoise_luma": 0.7,
+            "denoise_color": 0.5
+          }
+        },
+        {
+          "id": "cosmic_clarity_moderate_gpu",
+          "description": "Cosmic Clarity nonlinear denoising on the public ML-tools GPU worker",
+          "engine": "ml_tools_gpu",
+          "fn": "cosmic_denoise",
           "params": {
             "denoise_luma": 0.7,
             "denoise_color": 0.5
@@ -1571,7 +1763,7 @@
         {
           "id": "pi_starxt",
           "description": "PixInsight StarXTerminator \u2014 best-in-class star removal",
-          "engine": "pixinsight",
+          "engine": "seti_astro",
           "fn": "star_removal_starxt",
           "params": {}
         },
@@ -1734,6 +1926,7 @@
       "experiment_variants": [
         {
           "id": "sat_feather",
+          "engine": "pixinsight",
           "fn": "color_sat",
           "params": {
             "color_sat_boost": 0.08
@@ -1741,6 +1934,7 @@
         },
         {
           "id": "sat_gentle",
+          "engine": "pixinsight",
           "fn": "color_sat",
           "params": {
             "color_sat_boost": 0.15
@@ -1748,6 +1942,7 @@
         },
         {
           "id": "sat_moderate",
+          "engine": "pixinsight",
           "fn": "color_sat",
           "params": {
             "color_sat_boost": 0.25
@@ -1755,9 +1950,26 @@
         },
         {
           "id": "sat_strong",
+          "engine": "pixinsight",
           "fn": "color_sat",
           "params": {
             "color_sat_boost": 0.38
+          }
+        },
+        {
+          "id": "saspro_sat_gentle",
+          "engine": "seti_astro",
+          "fn": "color_sat_boost",
+          "params": {
+            "saturation_multiplier": 1.1
+          }
+        },
+        {
+          "id": "saspro_sat_moderate",
+          "engine": "seti_astro",
+          "fn": "color_sat_boost",
+          "params": {
+            "saturation_multiplier": 1.2
           }
         },
         {
@@ -1994,11 +2206,11 @@
         },
         "boost_factor": {
           "type": "float",
-          "min": 1.0,
-          "max": 5.0,
-          "default": 2.0,
+          "min": 3.0,
+          "max": 10.0,
+          "default": 5.0,
           "step": 0.5,
-          "description": "Darkness boost multiplier. Start gentle (2.0). Only increase if faint structure is clearly missing. Max 5.0 \u2014 above this amplifies noise more than signal."
+          "description": "Darkness boost multiplier. M51 calibration found 3.0-10.0 spans distinct treatments after adaptive scaling; start at 5.0 and increase only if faint structure is clearly missing."
         },
         "mask_gamma": {
           "type": "float",
@@ -2017,7 +2229,7 @@
           "fn": "dark_enhance",
           "params": {
             "n_scales": 6,
-            "boost_factor": 1.0,
+            "boost_factor": 3.0,
             "mask_gamma": 1.0
           }
         },
@@ -2026,7 +2238,7 @@
           "fn": "dark_enhance",
           "params": {
             "n_scales": 6,
-            "boost_factor": 1.3,
+            "boost_factor": 3.5,
             "mask_gamma": 1.0
           }
         },
@@ -2035,7 +2247,7 @@
           "fn": "dark_enhance",
           "params": {
             "n_scales": 6,
-            "boost_factor": 1.8,
+            "boost_factor": 5.0,
             "mask_gamma": 1.0
           }
         },
@@ -2044,16 +2256,15 @@
           "fn": "dark_enhance",
           "params": {
             "n_scales": 6,
-            "boost_factor": 2.5,
+            "boost_factor": 7.5,
             "mask_gamma": 1.0
           }
         },
         {
           "id": "pi_lhe_dark",
-          "fn": "pi_lhe_dark",
+          "engine": "pixinsight",
+          "fn": "lhe",
           "params": {
-            "lhe_kernel_r": 64,
-            "lhe_slope_limit": 2.0,
             "lhe_amount": 0.4
           }
         },
@@ -2087,6 +2298,27 @@
       "quality_impact": [
         "detail_level",
         "star_roundness"
+      ],
+      "experiment_variants": [
+        {
+          "id": "darkstar_gpu",
+          "description": "DarkStar unscreen star removal on the public ML-tools GPU worker",
+          "engine": "ml_tools_gpu",
+          "fn": "darkstar",
+          "params": {
+            "mode": "unscreen"
+          }
+        },
+        {
+          "id": "darkstar_split_local",
+          "description": "Current local DarkStar split treatment",
+          "engine": "seti_astro",
+          "fn": "remove_stars_split",
+          "params": {
+            "mode": "unscreen",
+            "use_gpu": true
+          }
+        }
       ]
     },
     "stretch_stars": {
@@ -2875,6 +3107,7 @@
         "star_sharpen",
         "assess_pre_stretch",
         "stretch",
+        "background_neutralize",
         "curves",
         "assess_final"
       ],

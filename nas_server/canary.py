@@ -46,10 +46,13 @@ _BASELINE = _REPO / "critiques" / "golden_baselines.json"
 # Per-object-type sky-background bands (informational flag only; the diff is on
 # raw metric deltas). Mirrors _compute_stretch_stats() in auto_process.py.
 _TARGET_BANDS = {
-    "galaxy": (0.05, 0.08), "emission_nebula": (0.06, 0.16),
+    "galaxy": (0.05, 0.08), "galaxy_group": (0.05, 0.08),
+    "interacting_galaxies": (0.05, 0.08),
+    "emission_nebula": (0.06, 0.16),
     "reflection_nebula": (0.06, 0.11), "planetary_nebula": (0.05, 0.09),
     "supernova_remnant": (0.05, 0.13), "globular_cluster": (0.04, 0.08),
-    "open_cluster": (0.04, 0.08), "nebula": (0.06, 0.14),
+    "open_cluster": (0.04, 0.08), "asterism": (0.04, 0.08),
+    "double_star": (0.04, 0.08), "nebula": (0.06, 0.14),
 }
 _PCTS = [50, 80, 95, 99, 99.9]
 _PLABELS = ["p50", "p80", "p95", "p99", "p99.9"]

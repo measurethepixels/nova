@@ -171,7 +171,7 @@ def resolve_coords(target_name: str) -> tuple[float, float] | None:
     # catalog entry entirely (C 7 -> a Cygnus star, not NGC 2403). Translate
     # Messier/Caldwell IDs to their NGC/IC name before resolving, but cache under
     # the original target name.
-    from nas_server.database import _CALDWELL_NGC, _MESSIER_NGC
+    from nas_server.catalog_aliases import _CALDWELL_NGC, _MESSIER_NGC
     lookup_name = _CALDWELL_NGC.get(target_name) or _MESSIER_NGC.get(target_name) or target_name
     try:
         coord = SkyCoord.from_name(lookup_name)

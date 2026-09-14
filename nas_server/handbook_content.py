@@ -21,6 +21,33 @@ from .handbook_contract import (
     ProvenanceLabel,
     ToolGuidance,
 )
+from .handbook_content_b import (
+    CROP_FRAMING,
+    REGISTRATION_ALIGNMENT,
+    STACKING_INTEGRATION,
+    SUBFRAME_INSPECTION,
+)
+from .handbook_content_c import (
+    LINEAR_STAR_SPLIT,
+    STARLESS_FINISHING,
+)
+from .handbook_content_d import (
+    BACKGROUND_NEUTRALIZATION,
+    CURVES,
+    HDR_COMPRESSION,
+    HDR_CORE_BLEND,
+    LOCAL_CONTRAST,
+    SATURATION,
+    SKY_GREEN_REBALANCE,
+)
+from .handbook_content_e import (
+    DARK_STRUCTURE_ENHANCEMENT,
+    HALO_SUPPRESSION,
+    POST_STRETCH_DENOISE,
+)
+from .handbook_content_f import (
+    NARROWBAND_DUAL_BAND_STRATEGY,
+)
 
 
 M66_VERIFICATION = EvidenceReference(
@@ -44,10 +71,17 @@ NOVA_M66_RUN_1247 = EvidenceReference(
     provenance=ProvenanceLabel.NOVA_EXECUTION_RECORD,
 )
 
+CALIBRATION_FOUNDATIONS_PAGE = EvidenceReference(
+    reference_id="calibration-foundations-page",
+    title="Handbook concept page: Calibration Foundations",
+    locator="handbook:calibration-foundations",
+    provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
+)
+
 NOVA_COSMETIC_SOURCE = EvidenceReference(
     reference_id="nova-cosmetic-source",
     title="NOVA isolated-defect correction implementation and ontology defaults",
-    locator="nas_server/seti_astro.py:3133; nas_server/processing_ontology.json:325",
+    locator="nas_server/seti_astro.py:3582; nas_server/processing_ontology.json:373",
     provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
 )
 
@@ -136,19 +170,33 @@ NOVA_DENOISE_SOURCE = EvidenceReference(
     reference_id="nova-denoise-source",
     title="NOVA Cosmic Clarity / NoiseXTerminator denoise implementations, variants, and ontology",
     locator=(
-        "nas_server/seti_astro.py:1559; nas_server/pixinsight.py:217-219; "
-        "nas_server/experiments.py:239-243 (denoise_nxt variant dispatch -- reads "
-        "nxt_denoise/nxt_iterations only, not the ontology's nxt_detail field); "
-        "nas_server/processing_ontology.json:791"
+        "nas_server/seti_astro.py (denoise -- Cosmic Clarity; denoise_nxt -- RC-Astro CLI/GPU "
+        "dispatch via nas_server/rcastro_gpu.py's run_rcastro, no Cosmic Clarity fallback, "
+        "nxt_detail accepted but not mapped, nxt_two_pass distinct from nxt_iterations, "
+        "fail-closed orientation verification via _detect_and_fix_flip); "
+        "nas_server/processing_ontology.json's denoise_linear step (seti_astro_fn: denoise; "
+        "nxt/nxt_conservative/nxt_two_pass/nxt_strong experiment variants; "
+        "production workflows generally leave denoise_linear open to Experiment Mode; "
+        "quick_default and public_free_core deliberately pin it)"
     ),
     provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
 )
 
 NOVA_STAR_CORRECTION_SOURCE = EvidenceReference(
     reference_id="nova-star-correction-source",
-    title="NOVA BlurXTerminator correct-only star-shape implementation and ontology",
-    locator="nas_server/seti_astro.py:2623; nas_server/processing_ontology.json:915",
+    title=(
+        "NOVA BlurXTerminator correct-only star-shape implementation (dispatched via "
+        "RC-Astro CLI/RunPod GPU, not PixInsight) and ontology"
+    ),
+    locator="nas_server/seti_astro.py:2783; nas_server/processing_ontology.json:961",
     provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
+)
+
+RC_ASTRO_BXT_TECHNICAL_MANUAL = EvidenceReference(
+    reference_id="rc-astro-bxt-technical-manual",
+    title="RC-Astro BlurXTerminator Technical Manual",
+    locator="https://www.rc-astro.com/blurxterminator-technical-manual/",
+    provenance=ProvenanceLabel.VENDOR_DOCUMENTED,
 )
 
 SIRIL_NATIVE_STRETCH_MANUAL = EvidenceReference(
@@ -177,14 +225,19 @@ NOVA_STRETCH_SOURCE = EvidenceReference(
         "nas_server/seti_astro.py:376 (stat_stretch, calls "
         "setiastro.saspro.imageops.stretch), "
         "nas_server/seti_astro.py:421 (ghs_stretch, calls setiastro.saspro.ghs_preset), "
-        "nas_server/seti_astro.py:1136 (veralux_stretch, pure NumPy, NOVA-original, no "
-        "setiastro import), nas_server/seti_astro.py:1319 (smart_stretch, adaptive "
+        "nas_server/seti_astro.py:1245 (veralux_stretch, pure NumPy, NOVA-original, no "
+        "setiastro import, real parameter target_bg default 0.08), "
+        "nas_server/seti_astro.py:1319 (smart_stretch, adaptive "
         "orchestration over the above); nas_server/pixinsight.py:223 (mas flag); "
         "nas_server/pi_postprocess.js:813-833 (MultiscaleAdaptiveStretch PJSR call, "
         "no parameter override in M66's run); nas_server/tool_params.py:250-274 "
         "(compute_ghs: only alpha and pivot are data-driven, beta/gamma/lp/hp stay at "
-        "function defaults); nas_server/processing_ontology.json:956 (13 "
-        "experiment_variants across 6 engines)"
+        "function defaults); nas_server/experiments.py:531-594 "
+        "(_adapt_stretch_variants: per-run data-driven override of ontology stretch "
+        "presets, the SPCC-failure unlinked-recovery branch, and the veralux "
+        "target_median/target_bg key mismatch); "
+        "nas_server/processing_ontology.json:1002-1170 (13 "
+        "experiment_variants across 6 engines, exact params verified 2026-09-06)"
     ),
     provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
 )
@@ -193,12 +246,15 @@ NOVA_STRETCH_SOURCE = EvidenceReference(
 PEDESTAL_REMOVAL = HandbookArticle(
     article_id="pedestal-removal",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=2,
     process_family=ProcessFamily.PEDESTAL_REMOVAL,
     purpose=(
         "Remove a known residual constant electronic offset without confusing "
         "legitimate sky signal, noise, interpolation, or an isolated dark pixel "
-        "with that offset."
+        "with that offset. This page covers residual post-calibration offset "
+        "handling only; bias, dark, flat, CFA state, and calibration-time "
+        "output pedestals are upstream concerns covered by Calibration "
+        "Foundations."
     ),
     observable_symptoms=(
         "Calibration records identify a residual constant offset that was not removed.",
@@ -215,6 +271,10 @@ PEDESTAL_REMOVAL = HandbookArticle(
         "Subtracting separate channel minima can alter color balance.",
         "An output pedestal added during calibration to prevent clipping is not evidence "
         "that an arbitrary post-stack floor should be removed.",
+        "This step is not calibration. Bias, dark, and flat correction, CFA and debayer "
+        "ordering, and calibration-time output pedestals all happen upstream of the "
+        "stack this step receives; subtracting a scalar here is not a repair for any of "
+        "them.",
     ),
     required_input_state=(
         "Linear data with known calibration provenance.",
@@ -223,10 +283,14 @@ PEDESTAL_REMOVAL = HandbookArticle(
         "Before-operation channel minima, medians, and clipped-pixel counts recorded.",
     ),
     nova_action=(
-        "NOVA 1.24.7 skips remove_pedestal by default because a global minimum is "
-        "insufficient evidence. If an operator explicitly forces the current function, "
-        "it subtracts one global minimum uniformly from every channel and clips only as "
-        "a numerical safety guard."
+        "NOVA skips remove_pedestal by default because a global minimum is "
+        "insufficient evidence. The operation is declared with no tunable parameters "
+        "and no Experiment Mode variants, and it requires capture or calibration "
+        "provenance before it may be forced. If an operator explicitly forces the "
+        "current function, it subtracts one global minimum uniformly from every channel "
+        "and clips only as a numerical safety guard. The recorded M66 execution "
+        "evidence below is from NOVA 1.24.7 and is evidence for that run and "
+        "configuration, not a statement of current runtime identity."
     ),
     nova_evidence_ids=("nova-pedestal-source", "nova-m66-run-1.24.7"),
     use_when=(
@@ -248,11 +312,23 @@ PEDESTAL_REMOVAL = HandbookArticle(
         "If calibration clipped negative values, reprocess the subframes with an "
         "appropriate calibration-time output pedestal; later addition or subtraction "
         "cannot recover clipped structure.",
+        "Before-and-after statistics are diagnostics of what the subtraction did, not "
+        "proof that it was warranted. The warrant comes from calibration provenance or "
+        "a controlled calibration diagnosis, never from the statistics of the finished "
+        "stack alone.",
+        "A future comparison of pedestal handling must start from the same calibrated "
+        "source and vary only the confirmed offset treatment. Final-image aesthetic "
+        "scores are not appropriate primary evidence for a calibration-domain decision.",
+        "The evidence status of this step is scientifically grounded, source-confirmed "
+        "conditional behavior with historical execution evidence. It is not a general "
+        "claim that ordinary SeeStar stacks contain a removable pedestal.",
     ),
     tool_guidance=(
         ToolGuidance(
             tool_id="nova",
-            tool_version="1.24.7",
+            tool_version=(
+                "current source-confirmed contract; execution evidence recorded at 1.24.7"
+            ),
             host="NOVA Python pipeline",
             instructions=(
                 "Inspect capture and calibration provenance for an explicitly documented "
@@ -260,6 +336,9 @@ PEDESTAL_REMOVAL = HandbookArticle(
                 "Leave the step skipped when that evidence is absent; this is the default.",
                 "If force_apply is authorized from real provenance, record the input, "
                 "uniform amount, and before/after channel statistics.",
+                "Read Calibration Foundations first when the suspected problem is "
+                "clipping, vignetting, dust, or hot pixels: those are upstream "
+                "calibration failures, and no post-stack scalar addresses them.",
             ),
             controls_and_starting_ranges=(
                 ("default action", "skip"),
@@ -385,6 +464,7 @@ PEDESTAL_REMOVAL = HandbookArticle(
         SIRIL_CALIBRATION_144,
         SASPRO_SOURCE_118,
         SASPRO_SYNTHETIC_20260814,
+        CALIBRATION_FOUNDATIONS_PAGE,
     ),
 )
 
@@ -392,7 +472,7 @@ PEDESTAL_REMOVAL = HandbookArticle(
 COSMETIC_CORRECTION = HandbookArticle(
     article_id="cosmetic-correction",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=2,
     process_family=ProcessFamily.COSMETIC_CORRECTION,
     purpose=(
         "Identify and replace isolated defective pixels or very small residual defects "
@@ -412,6 +492,9 @@ COSMETIC_CORRECTION = HandbookArticle(
         "Ordinary cosmetic correction does not repair gradients, broad artifacts, trails, or bad calibration.",
         "Post-integration cleanup is not equivalent to correcting every calibrated subframe before registration and stacking.",
         "Aggressive thresholds can replace star cores and real compact structure.",
+        "The connected-component size cap is a heuristic risk reducer, not semantic knowledge that a flagged component is non-astronomical: a faint or undersampled star core, or a fragmented piece of real compact structure, can satisfy it.",
+        "The ontology currently exposes only sigma and kernel_size for tuning; max_defect_size=3 is materially important runtime behavior that is not exposed as a tunable parameter.",
+        "There are currently no cosmetic-correction Experiment Mode candidates, so no comparative winner corpus exists for this family.",
     ),
     required_input_state=(
         "Prefer calibrated, pre-registration subframes plus a matching master-dark or bad-pixel map.",
@@ -437,6 +520,8 @@ COSMETIC_CORRECTION = HandbookArticle(
         "Pre-integration correction preserves the stacking engine's opportunity to reject and weight data correctly.",
         "A successful tool execution proves procedure, not that the chosen stage or threshold was appropriate.",
         "Judge sparse defects at native scale and inspect a difference image; a full-frame beauty slider can hide one-pixel damage.",
+        "A whole-frame SNR-like or generically 'cleaner' score can improve even when real compact signal was replaced; that a correction ran is never evidence it preserved signal.",
+        "PixInsight CosmeticCorrection evidence here is stage-specific and partial: it supports the tested recipe stage, not a blanket validation of every use of the tool.",
     ),
     tool_guidance=(
         ToolGuidance(
@@ -523,7 +608,12 @@ COSMETIC_CORRECTION = HandbookArticle(
         ),
         ToolGuidance(
             tool_id="saspro",
-            tool_version="1.18.0 source-inspected and synthetic-array tested",
+            tool_version=(
+                "1.18.0 source-inspected and synthetic-array tested; historical/version-bound "
+                "evidence. As of this writing the official SASpro site labels its release "
+                "1.20.x, while package distribution has already moved past that label -- this "
+                "evidence should not be read as describing the current public release."
+            ),
             host="Seti Astro Suite Pro Stacking Suite Cosmetic Correction",
             instructions=(
                 "Enable Cosmetic Correction while calibrating light frames in the Stacking Suite, before registration and integration.",
@@ -535,7 +625,7 @@ COSMETIC_CORRECTION = HandbookArticle(
                 ("recommended cold sigma", "5.0 in the installed Stacking Suite"),
                 ("input mode", "Bayer pattern for CFA data; debayered/mono path otherwise"),
             ),
-            expected_result="Sparse isolated hot and cold pixels are replaced during light-frame calibration without changing real compact signal.",
+            expected_result="Sparse isolated hot and cold pixels are replaced during light-frame calibration; that real compact signal is unchanged is an acceptance target to verify, not an assured result.",
             failure_modes=(
                 "The wrong Bayer pattern or debayer state mixes unlike color samples.",
                 "Thresholds classify a sharp stellar core as a hot pixel; the synthetic check showed this is possible and requires inspection.",
@@ -553,12 +643,15 @@ COSMETIC_CORRECTION = HandbookArticle(
         "Native-scale before/after blink and a difference image.",
         "Star-core and compact-structure measurements in representative regions.",
         "Input stage, CFA/debayer state, defect-map provenance, and thresholds.",
+        "Repeatability at sensor coordinates across sessions when subframes are available.",
+        "Matched compact-source flux/profile checks against the uncorrected input.",
     ),
     acceptance_criteria=(
         "Correction occurs at the pre-integration stage when source subframes and calibration evidence are available.",
         "Any post-stack path is labeled residual cleanup, not ordinary calibration equivalence.",
         "The corrected fraction is sparse and explainable; unexpectedly high counts trigger review.",
         "No stellar core or real compact structure appears in the difference image.",
+        "A fair comparison between correction methods holds the calibrated frames, defect map, and CFA state fixed and varies only the correction method or threshold; comparisons intended to show calibration-stage benefit carry identical data through integration.",
     ),
     sources=(
         M66_VERIFICATION,
@@ -575,7 +668,7 @@ COSMETIC_CORRECTION = HandbookArticle(
 BACKGROUND_EXTRACTION = HandbookArticle(
     article_id="background-extraction",
     schema_version=SCHEMA_VERSION,
-    revision=2,
+    revision=3,
     process_family=ProcessFamily.BACKGROUND_EXTRACTION,
     purpose=(
         "Model and remove unwanted large-scale background variation while preserving "
@@ -598,6 +691,12 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         "Smoothing scales are not comparable across engines: GraXpert's smoothing runs 0.0 (aggressive) to 1.0 "
         "(gentle); PixInsight's native DynamicBackgroundExtraction smoothing is a different, larger-range control "
         "(NOVA's own DBE call uses 5.0). Copying a GraXpert number into DBE's field is not a translation.",
+        "NOVA's background-extraction call to GraXpert does not pass an AI model-version flag, unlike NOVA's "
+        "separate GraXpert denoise call, which does. The installed GraXpert CLI is confirmed 3.0.2, but the "
+        "exact AI model identity used for background extraction is not independently pinned by that fact alone.",
+        "The SASpro ADBE wrapper discards the background model that `abe_run` can return and clips its output "
+        "to [0, 1]. \"The evidence artifact is the model as well as the corrected image\" therefore does not "
+        "hold for the ADBE path today: there is no saved model to inspect for that route.",
     ),
     required_input_state=(
         "Linear, unstretched data with registration borders and low-coverage edges cropped away.",
@@ -630,6 +729,13 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         "verification established GraXpert as what NOVA actually runs. DBE and GradientCorrection are real, "
         "code-confirmed NOVA alternatives, not fabricated -- they were simply never M66's selected path, and an "
         "earlier draft implied they were without checking.",
+        "DBE has no Experiment Mode candidate id in the current ontology -- unlike GradientCorrection (`pi_gc`), "
+        "it is executable only through a direct call, not through NOVA's automated candidate dispatch. Do not "
+        "describe DBE as \"selectable\" the way the ontology's seven registered candidates are.",
+        "There is no established universal best extractor. An Experiment comparison across engines (GraXpert, "
+        "PixInsight native, SASpro ADBE, no correction) is a method comparison; varying smoothing, degree, or "
+        "sample count within one engine is a parameter comparison. Treat these as different questions and do "
+        "not average their evidence together.",
     ),
     tool_guidance=(
         ToolGuidance(
@@ -709,8 +815,9 @@ BACKGROUND_EXTRACTION = HandbookArticle(
             tool_version="not independently confirmed in this repo",
             host="Native DynamicBackgroundExtraction (DBE)",
             instructions=(
-                "A real, selectable NOVA alternative to GraXpert, not the M66-recorded path -- run it directly "
-                "in PixInsight on the linear image if you specifically want this route.",
+                "A real, code-confirmed NOVA alternative to GraXpert, not the M66-recorded path and not an "
+                "Experiment Mode candidate -- run it directly in PixInsight on the linear image if you "
+                "specifically want this route.",
                 "Set the correction mode (Subtraction or Division) to match the gradient type.",
                 "Compare against a GraXpert result on the same image before treating DBE as equivalent.",
             ),
@@ -795,7 +902,13 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         ),
         ToolGuidance(
             tool_id="saspro",
-            tool_version="1.18.0 source-inspected; ADBE execution tested on a synthetic linear array",
+            tool_version=(
+                "1.18.0 source-inspected; ADBE execution tested on a synthetic linear array; "
+                "historical/version-bound evidence. As of this writing the official SASpro site "
+                "labels its release 1.20.x, while package distribution has already moved past "
+                "that label -- this evidence should not be read as describing the current "
+                "public release."
+            ),
             host="ADBE default (polynomial degree 2 + RBF)",
             instructions=(
                 "Run ADBE on the cropped linear image with the default preset.",
@@ -808,7 +921,11 @@ BACKGROUND_EXTRACTION = HandbookArticle(
                 ("use_rbf", "true -- RBF refinement after the polynomial stage"),
                 ("rbf_smooth", "0.1 (0.01 very tight to 1.0 very smooth)"),
             ),
-            expected_result="The spatial gradient decreases without subtracting extended target signal. Fastest of the three ADBE presets.",
+            expected_result=(
+                "The spatial gradient decreases without subtracting extended target signal. Fastest of "
+                "the three ADBE presets. No background model is saved for inspection -- the wrapper "
+                "discards it -- so acceptance relies on the corrected image and difference inspection alone."
+            ),
             failure_modes=("Assuming ADBE and GraXpert produce equivalent models because both flatten backgrounds.",),
             recovery=("Revert to the original linear input and try adbe_poly_only for a gentler pass, or use the verified GraXpert path.",),
             mask_support="Tool-specific protection was not independently characterized; rely on model and difference inspection.",
@@ -818,7 +935,12 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         ),
         ToolGuidance(
             tool_id="saspro",
-            tool_version="1.18.0 source-inspected",
+            tool_version=(
+                "1.18.0 source-inspected; historical/version-bound evidence. As of this writing "
+                "the official SASpro site labels its release 1.20.x, while package distribution "
+                "has already moved past that label -- this evidence should not be read as "
+                "describing the current public release."
+            ),
             host="ADBE cubic (polynomial degree 3 + RBF)",
             instructions=(
                 "Use in place of the default preset only when the gradient is visibly more complex than a "
@@ -842,7 +964,12 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         ),
         ToolGuidance(
             tool_id="saspro",
-            tool_version="1.18.0 source-inspected",
+            tool_version=(
+                "1.18.0 source-inspected; historical/version-bound evidence. As of this writing "
+                "the official SASpro site labels its release 1.20.x, while package distribution "
+                "has already moved past that label -- this evidence should not be read as "
+                "describing the current public release."
+            ),
             host="ADBE polynomial-only (degree 2, no RBF)",
             instructions=(
                 "Use for a faster, gentler pass when the gradient is simple and RBF refinement risks pulling in "
@@ -866,15 +993,18 @@ BACKGROUND_EXTRACTION = HandbookArticle(
     ),
     measurements=(
         "Tool, host, software/model version, correction mode, smoothing/model settings, and input linear state.",
-        "The saved or displayed background model.",
+        "The saved or displayed background model, when the chosen tool/route actually produces one to inspect.",
         "Matched representative empty-sky medians and channel ratios before and after.",
         "Target-halo or nebulosity measurements plus a difference image to detect signal loss.",
+        "Target-containing versus sky-only region-of-interest statistics reported separately, with any edge or support mask used for the comparison recorded.",
     ),
     acceptance_criteria=(
         "Invalid borders and calibration defects are resolved before fitting.",
-        "The modeled background contains the unwanted large-scale trend and no recognizable target structure.",
+        "The modeled background contains the unwanted large-scale trend and no recognizable target structure, when a model is available to inspect for the chosen route.",
         "Representative sky variation decreases without material target-signal loss.",
         "Correction type and settings are recorded; the result remains linear for color calibration.",
+        "A fair comparison across engines holds the linear parent, crop/support, correction mode, model-exposure convention, output clipping policy, downstream normalization, and preview transform fixed, varying only the factor under test.",
+        "No claim states or implies a universal best background-extraction engine; evidence is scoped to source-confirmed method availability and the specific method/version actually exercised.",
     ),
     sources=(
         M66_VERIFICATION,
@@ -891,7 +1021,7 @@ BACKGROUND_EXTRACTION = HandbookArticle(
 COLOR_CALIBRATION = HandbookArticle(
     article_id="color-calibration",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=2,
     process_family=ProcessFamily.COLOR_CALIBRATION,
     purpose=(
         "Derive reproducible channel scaling from catalog spectra, the imaging system response, "
@@ -910,6 +1040,10 @@ COLOR_CALIBRATION = HandbookArticle(
         "Broadband SPCC and narrowband/dual-band calibration are not interchangeable prescriptions.",
         "Physically calibrated narrowband intensities do not automatically produce an aesthetic SHO/Hubble palette.",
         "Background neutralization is not a substitute for a valid spectrophotometric solve.",
+        "NOVA's own choice not to apply broadband SPCC to LP/dual-band data is a project engineering decision about its white reference, not a claim that filter-aware SPCC implementations in general cannot support narrowband or dual-narrowband response models -- modern SPCC versions can.",
+        "That the sanity gate did not reject a solve is evidence the result was not caught by that specific check, not evidence the calibration is physically correct; not rejected is not validated.",
+        "The Experiment Mode `cc_sssc` candidate calls SSSC with the LP flag off and without the native LP curve, so it does not exercise the LP/dual-band path the production policy actually uses for LP targets; a recorded `cc_sssc` result is evidence about the broadband-only path only.",
+        "SSSC's LP throughput curve is a real, hash-verified SeeStar S50 transmission curve, not a commercial-filter proxy -- but it remains a model of the filter's response, and any measured system-response solution built on it inherits that model's uncertainty.",
     ),
     required_input_state=(
         "Linear, unstretched color data after accepted background extraction.",
@@ -917,10 +1051,21 @@ COLOR_CALIBRATION = HandbookArticle(
         "Known OSC/mono state, sensor response, filter or passband information, and chosen white reference.",
     ),
     nova_action=(
-        "NOVA uses PixInsight SPCC as the broadband default when its prerequisites are valid, "
-        "but treats light-pollution/dual-band data separately: SSSC is the intended physical "
-        "route where configured, while failed SPCC can fall back to generic color calibration. "
-        "The step is therefore conditional, not universally forced."
+        "As of a 2026-09-02 policy change, NOVA attempts SSSC first for both broadband and "
+        "LP/dual-band data, not PixInsight SPCC. A 17-target same-methodology comparison found "
+        "SSSC tied PixInsight in every case where SSSC reached at least Stage 1 calibration "
+        "(13 of 17 targets, zero exceptions); every real divergence happened at the weaker "
+        "Stage 2, and even there SSSC's worst case was about 5% behind while its best cases were "
+        "3-8x better. PixInsight is therefore consulted as a second opinion only when SSSC's own "
+        "solve lands at Stage 2 -- SPCC for broadband, PixInsight ColorCalibration for LP/dual-band "
+        "(SPCC's broadband white reference is deliberately never applied there). The trigger is "
+        "SSSC's solve stage, not a raw fit-residual threshold, because stage reflects how many "
+        "usable calibration stars were available, which is what the evidence showed actually "
+        "predicts reliability -- a legitimately-agreeing target can carry a higher residual than "
+        "some Stage-2 disagreements. A sanity gate then checks the signal region's G/R ratio "
+        "before and after calibration and discards a solve that moved sharply away from neutral, "
+        "regardless of filter type; that check exists because a plausible-looking fit can still "
+        "pair detected stars with the wrong catalog entries in dense fields."
     ),
     nova_evidence_ids=("nova-color-source", "nova-m66-run-1.24.7"),
     use_when=(
@@ -943,20 +1088,20 @@ COLOR_CALIBRATION = HandbookArticle(
             tool_version="1.24.7",
             host="NOVA Python pipeline",
             instructions=(
-                "Verify or repair WCS and record acquisition/filter state before selecting the calibration route.",
-                "Use broadband SPCC only for a compatible broadband path; use configured SSSC handling for LP/dual-band data.",
-                "Record route, catalog/reference, matched-star or fit evidence, coefficients, and any retry or fallback.",
+                "Verify or repair WCS and record acquisition/filter state before calibration runs.",
+                "Let SSSC attempt first for both broadband and LP/dual-band data; do not treat PixInsight SPCC as the default route.",
+                "Record SSSC's solve stage, whether a PixInsight second opinion was consulted, the sanity-gate's before/after G/R values, and any fallback.",
             ),
             controls_and_starting_ranges=(
-                ("broadband route", "PixInsight SPCC with SeeStar S50 sensor/filter profile"),
-                ("LP/dual-band route", "SSSC when configured and adequately matched; otherwise explicit fallback"),
-                ("SPCC attempts", "2 in current implementation before generic ColorCalibration fallback"),
+                ("default route", "SSSC first, both broadband and LP/dual-band"),
+                ("PixInsight second opinion", "consulted only when SSSC's solve lands at Stage 2 -- SPCC for broadband, PixInsight ColorCalibration for LP/dual-band"),
+                ("sanity gate", "reject when the signal-region G/R ratio moves sharply away from neutral after calibration, applied regardless of filter type"),
             ),
             expected_result="The selected route completes with valid fit evidence and produces channel balance appropriate to the acquisition mode.",
             failure_modes=(
                 "Stale or malformed WCS allows a misleading run or forces fallback.",
-                "Broadband SPCC is applied to LP/dual-band data with an inappropriate response model.",
-                "A fallback result is labeled as successful SPCC.",
+                "Broadband SPCC's white reference is applied to LP/dual-band data, which the current policy deliberately avoids.",
+                "A fallback or second-opinion result is described as if SSSC's own solve had succeeded outright.",
             ),
             recovery=("Restore the linear input, repair astrometry/configuration, and rerun while preserving the failed-route record.",),
             mask_support="Calibration is global; background/white reference selection and catalog-star rejection are engine-specific safeguards.",
@@ -1019,7 +1164,7 @@ COLOR_CALIBRATION = HandbookArticle(
             instructions=(
                 "Use SSSC on a linear, plate-solved color image when the field supplies enough spectrum-bearing calibration stars.",
                 "Provide valid astrometry and record Gaia-XP matches, solved response, coefficients, and fallback behavior.",
-                "Label SSSC as a related physical calibration approach, not the identically implemented SPCC process.",
+                "Label SSSC as a related physical calibration approach, not the identically implemented SPCC process -- even though it is now NOVA's first-attempted route for both broadband and LP/dual-band data.",
             ),
             controls_and_starting_ranges=(
                 ("catalog", "Gaia-XP spectra"),
@@ -1040,12 +1185,18 @@ COLOR_CALIBRATION = HandbookArticle(
         "Sensor, filter/passband mode, white reference, catalog source, and software version.",
         "Matched-star count, fit plots/residuals where available, and resulting channel coefficients.",
         "Explicit success, retry, fallback, or skip state plus downstream linked/unlinked behavior.",
+        "SSSC's own solve stage and, when a PixInsight second opinion was consulted, which engine's result was ultimately kept.",
+        "The signal-region G/R ratio before and after calibration, since that is the sanity gate's own acceptance test.",
     ),
     acceptance_criteria=(
         "The image is demonstrably linear and correctly plate-solved before calibration.",
         "The response model and calibration route match the acquisition mode.",
         "Fit/match evidence and coefficients are recorded rather than inferring validity from completion alone.",
         "Any fallback is named accurately, and downstream processing preserves or deliberately revises the calibrated balance.",
+        "A candidate/evidence claim states which engine (SSSC, PixInsight SPCC, PixInsight ColorCalibration, no calibration) actually executed, not merely which the ontology label names.",
+        "A fair comparison across engines holds the same linear parent, WCS/catalog access, documented filter/system response, star selection, background state, and downstream stretch fixed.",
+        "A stellar locus, color-ratio, or channel-balance diagnostic is reported with its scope stated; visual color agreement is a perceptual judgment, not a calibration proof.",
+        "Palette or channel mapping of dual-band data (see the narrowband/dual-band strategy article) is not itself represented as color calibration.",
     ),
     sources=(M66_VERIFICATION, NOVA_COLOR_SOURCE, NOVA_M66_RUN_1247, SIRIL_SPCC_144, SASPRO_SOURCE_118),
 )
@@ -1054,7 +1205,7 @@ COLOR_CALIBRATION = HandbookArticle(
 DECONVOLUTION = HandbookArticle(
     article_id="deconvolution",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=2,
     process_family=ProcessFamily.DECONVOLUTION,
     purpose=(
         "Recover spatial detail blurred by seeing and optics on linear data, before "
@@ -1075,16 +1226,31 @@ DECONVOLUTION = HandbookArticle(
         "star removal -- NOVA's own fallback path documents exactly this failure on NGC 6914.",
         "A stable, estimable PSF is required; deconvolving an unstable or unknown PSF amplifies "
         "noise and artifacts instead of recovering detail.",
+        "AI deconvolution/restoration (BXT) and classical Richardson-Lucy deconvolution are not the "
+        "same category of operation as generic linear sharpening, and neither is the same category "
+        "as Cosmic Clarity Sharpen's AI sharpening fallback; treating any of them as mathematically "
+        "equivalent because each increases apparent sharpness would be wrong.",
+        "A stronger apparent sharpness on the linear preview is not evidence of better restoration; "
+        "it can equally mean noise or ringing that has not yet become visible.",
+        "When a measured PSF diameter is supplied instead of automatic detection, whether that "
+        "value and BlurXTerminator's own expected unit agree is not established here -- this is an "
+        "unresolved contract question, not a settled fact, and should not be normalized away.",
     ),
     required_input_state=(
         "Linear, unstretched data, after background extraction and color calibration.",
         "A usable point-spread function -- either auto-detected from stars or a supplied estimate.",
     ),
     nova_action=(
-        "NOVA's standard-mode default is bxt_deconvolve: full PixInsight BlurXTerminator with "
-        "automatic PSF detection, stellar amount 0.5 and nonstellar amount 0.3. When PixInsight/BXT "
-        "is unavailable or fails, it falls back to SASpro's Cosmic Clarity Sharpen at the same "
-        "amounts -- a different engine with a different risk profile, not a silent equivalent."
+        "NOVA's standard-mode default is bxt_deconvolve: BlurXTerminator with automatic PSF "
+        "detection, stellar amount 0.5 and nonstellar amount 0.3. This runs through the "
+        "stand-alone RC-Astro CLI, not PixInsight -- current NOVA tries a remote GPU endpoint "
+        "first, falls back to a local RC-Astro CLI (CPU) if that is unavailable, and only falls "
+        "back to SASpro's Cosmic Clarity Sharpen at the same amounts as a last resort. Each "
+        "engine change is a real change in risk profile, not a silent equivalent. Because the "
+        "RC-Astro path can drop WCS metadata and its output orientation is independently "
+        "verified before acceptance, a result whose orientation cannot be confirmed is discarded "
+        "and treated the same as an outright engine failure, falling through to the next tier "
+        "rather than risking an unverified flip reaching later steps."
     ),
     nova_evidence_ids=("nova-deconvolution-source", "nova-m66-run-1.24.7"),
     use_when=(
@@ -1097,11 +1263,23 @@ DECONVOLUTION = HandbookArticle(
         "No stable PSF can be estimated.",
     ),
     scientific_and_aesthetic_notes=(
-        "AI deconvolution (BXT, Cosmic Clarity Sharpen) is not classical Richardson-Lucy; both "
-        "exist in NOVA's codebase but only the AI path is the default -- classical RL "
-        "(deconvolve_rl) is an explicit experiment-mode comparison, not the recipe path.",
+        "BXT deconvolution/restoration is not classical Richardson-Lucy, and neither is the same "
+        "operation as Cosmic Clarity Sharpen's AI sharpening fallback; only BXT is the default -- "
+        "classical RL (deconvolve_rl) is an explicit experiment-mode comparison, not the recipe "
+        "path, and Cosmic Clarity Sharpen is a last-resort fallback engine, not an interchangeable "
+        "alternative.",
         "The same amounts (0.5 stellar / 0.3 nonstellar) mean different things on BXT and Cosmic "
         "Clarity Sharpen; do not treat identical numbers as proof of identical output.",
+        "NOVA's classical RL comparators run at 20 and 40 iterations -- fixed classical baselines "
+        "for contrast, not tuned equivalents of BXT's adaptive AI model.",
+        "A fair comparison across deconvolution candidates needs the same linear parent, a "
+        "controlled PSF and adaptation policy, identical masks, and matched downstream stretch, "
+        "since ringing and faint-structure damage can become evident only after nonlinear "
+        "transformation.",
+        "Deconvolution experiments span three different kinds of probe -- swapping the executing "
+        "engine (BXT vs Cosmic Clarity vs classical RL), swapping the strategy at a fixed engine "
+        "(bxt_globular's nonstellar=0.0 adaptation vs the general default), and tuning a parameter "
+        "within one strategy -- and conflating them treats an engine change as if it were a dial turn.",
     ),
     tool_guidance=(
         ToolGuidance(
@@ -1115,9 +1293,11 @@ DECONVOLUTION = HandbookArticle(
                 "not sufficient evidence against ringing that only appears after later steps.",
             ),
             controls_and_starting_ranges=(
-                ("engine default", "bxt_deconvolve (PixInsight BlurXTerminator)"),
+                ("engine default", "bxt_deconvolve (BlurXTerminator via the stand-alone RC-Astro CLI, not PixInsight)"),
+                ("dispatch order", "remote GPU endpoint first, local RC-Astro CLI (CPU) second, cc_sharpen_inprocess last resort"),
                 ("M66 recorded amounts", "stellar_amount 0.5, nonstellar_amount 0.3"),
-                ("fallback", "cc_sharpen_inprocess (SASpro Cosmic Clarity Sharpen) when PI/BXT unavailable"),
+                ("globular preset", "bxt_globular sets nonstellar_amount 0.0 with automatic PSF -- an object-specific adaptation, not the general default"),
+                ("manual PSF mode", "bxt_auto_psf=False passes a measured PSF diameter instead of letting BXT auto-detect it"),
             ),
             expected_result="Stars tighten and fine detail sharpens without new ringing or halos.",
             failure_modes=(
@@ -1196,20 +1376,23 @@ DECONVOLUTION = HandbookArticle(
             ),
             recovery=("Revert to the linear input, reduce the amount, or use the primary BXT path instead.",),
             mask_support="Not demonstrated; full-image operation.",
-            equivalence=EquivalenceClass.ALGORITHMICALLY_EQUIVALENT,
+            equivalence=EquivalenceClass.FUNCTIONAL_ALTERNATIVE,
             provenance=(ProvenanceLabel.ARTIFACT_CONFIRMED, ProvenanceLabel.TOOL_TESTED, ProvenanceLabel.HENRY_VALIDATED),
             source_ids=("saspro-source-1.18.0", "m66-manual-verification"),
         ),
     ),
     measurements=(
-        "Star FWHM and eccentricity before and after, from matched luminance extractions.",
+        "Star FWHM and eccentricity before and after, from matched luminance extractions on the same detected star population -- a different candidate detecting fewer or different stars is a detection-threshold effect, not evidence of shape.",
         "1:1 inspection of star cores, dark rings, and halos.",
         "Faint extended structure (galaxy arms, dust lanes, nebulosity) preserved, not eroded.",
+        "Local ringing/leakage around bright stars and compact features, inspected directly rather than inferred from a global score.",
     ),
     acceptance_criteria=(
         "Stars tighten without new ringing, halos, or damaged profiles.",
         "Faint extended structure survives at the same or better visibility.",
         "The result still looks correct after later steps (stretch, star removal) -- not just on the linear preview.",
+        "Generic sharpness or entropy scores are never used alone to prefer a candidate; both can reward amplified noise.",
+        "No claim asserts a universally preferred engine across all targets; evidence for tool/vendor capability is strong, but a general preference is not established.",
     ),
     sources=(M66_VERIFICATION, NOVA_DECONVOLUTION_SOURCE, NOVA_M66_RUN_1247, SASPRO_SOURCE_118),
 )
@@ -1218,11 +1401,15 @@ DECONVOLUTION = HandbookArticle(
 DENOISE = HandbookArticle(
     article_id="denoise",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=2,
     process_family=ProcessFamily.DENOISE,
     purpose=(
         "Reduce photon and read noise on linear data before stretch amplifies it, without "
-        "erasing the faint real structure that lives in the same tonal range as the noise."
+        "erasing the faint real structure that lives in the same tonal range as the noise. "
+        "This is Linear Denoise specifically -- NOVA also runs a separate post-stretch "
+        "noise_reduction pass later in the pipeline; that step changes the artifact and "
+        "measurement problem (nonlinear data, different noise character) and is not yet its "
+        "own published Handbook article. Do not treat guidance here as covering both."
     ),
     observable_symptoms=(
         "Visible luminance and chromatic grain, worse in shadow regions.",
@@ -1239,16 +1426,36 @@ DENOISE = HandbookArticle(
         "there is no setting that distinguishes them perfectly.",
         "A learned/AI denoiser (Cosmic Clarity, NoiseXTerminator) is not a classical wavelet or "
         "NL-Bayes denoiser; they fail differently and are not interchangeable by amount alone.",
+        "Identical-looking numeric strength values are not commensurate across engines or even "
+        "across Cosmic Clarity's own ontology/wrapper/candidate surfaces -- compare the effective "
+        "executed settings, never candidate labels or matching numbers, before concluding two runs "
+        "used 'the same' denoise amount.",
+        "NOVA's NXT path has no Cosmic Clarity fallback: if the RunPod GPU endpoint and the local "
+        "RC-Astro CLI both fail, or output orientation cannot be verified as trustworthy, the step "
+        "fails outright rather than silently substituting a different engine's result. A workflow "
+        "that selected NXT is expected to fail honestly, not quietly become a Cosmic Clarity run.",
+        "nxt_detail is accepted by the ontology/parameter surface but has no direct RC-Astro CLI "
+        "equivalent and is not mapped to anything -- requesting it does not make it an effective "
+        "parameter.",
     ),
     required_input_state=(
         "Linear, unstretched data, after deconvolution.",
     ),
     nova_action=(
         "NOVA's ontology default is Cosmic Clarity denoise (CLI or in-process) on luma/color "
-        "amounts. Individual workflows can select the 'nxt' variant instead -- PixInsight "
-        "NoiseXTerminator via the pipeline's run_postprocess(nxt=True) path -- and M66's "
-        "seestar_galaxy workflow did exactly that. The exact denoise_linear parameters were not "
-        "serialized in M66's own run record; the ontology's code defaults are the traceable source."
+        "amounts. In Experiment Mode, production workflows can compare the declared alternatives, "
+        "including the 'nxt' variant -- RC-Astro's NoiseXTerminator, dispatched to a RunPod GPU "
+        "endpoint with a local-CLI fallback. The quick_default workflow remains pinned for speed, "
+        "and public_free_core remains pinned to free/headless Cosmic Clarity. M66's recorded run "
+        "used the PixInsight NXT path in effect at the time; NOVA no longer routes NXT through "
+        "that path, and RC-Astro CLI/GPU is NOVA's current route. NXT's "
+        "internal nxt_iterations setting and NOVA's separate nxt_two_pass flag (a full second "
+        "dispatch of the tool, matching PixInsight's own 'run NXT twice' variant) are different "
+        "factors and are not interchangeable ways of expressing the same strength. Output "
+        "orientation is independently verified before acceptance; a result that cannot be "
+        "confirmed is discarded and the step fails, since this path has no fallback engine to "
+        "fall through to. The exact denoise_linear parameters were not serialized in M66's own "
+        "run record; the ontology's code defaults are the traceable source."
     ),
     nova_evidence_ids=("nova-denoise-source", "nova-m66-run-1.24.7"),
     use_when=(
@@ -1264,6 +1471,15 @@ DENOISE = HandbookArticle(
         "universal default -- do not present one as 'the' NOVA denoise without naming the workflow.",
         "Denoise-induced star FWHM inflation is the documented reason star correction exists as its "
         "own downstream family; judge denoise partly by what star correction has to fix afterward.",
+        "A fair comparison between denoise candidates requires the same linear parent image and "
+        "state, the same region of interest and support, the actually-executed tool/model/settings "
+        "recorded (not the requested ones), and an identical downstream stretch when judging results "
+        "visually -- an unequal stretch can make a genuinely worse denoise look better.",
+        "A strong candidate should be checked against a no-op/unchanged-input baseline before being "
+        "called an improvement, not only ranked against other denoise settings.",
+        "Background RMS and NOVA's own SNR-like proxy can both reward over-smoothing; entropy or "
+        "high-frequency power can reward leftover noise. None of these alone is a denoise-quality "
+        "oracle -- pair them with the faint-structure preservation check.",
     ),
     tool_guidance=(
         ToolGuidance(
@@ -1296,7 +1512,10 @@ DENOISE = HandbookArticle(
             tool_version="Core 1.9.3 Lockhart host; NoiseXTerminator version not independently confirmed in this repo",
             host="PixInsight NoiseXTerminator",
             instructions=(
-                "Run NoiseXTerminator directly on the linear image.",
+                "Run NoiseXTerminator directly on the linear image -- a manual cross-tool path, "
+                "not NOVA's current execution route (NOVA dispatches NXT through RC-Astro CLI/GPU; "
+                "it no longer routes NXT through the PixInsight run_postprocess(nxt=True) path it "
+                "once used).",
                 "Start from the pipeline's own recorded default rather than the tool's own dialog default.",
                 "Compare a representative faint-structure region before and after at native scale.",
             ),
@@ -1307,7 +1526,7 @@ DENOISE = HandbookArticle(
             failure_modes=("Accepting the tool's own higher default dialog value without checking against NOVA's recorded default.",),
             recovery=("Undo and re-run at a lower denoise amount or fewer iterations.",),
             mask_support="Not applicable; full-image operation.",
-            equivalence=EquivalenceClass.EXACT_REPLAY,
+            equivalence=EquivalenceClass.SAME_ENGINE_ADAPTED_HOST,
             provenance=(ProvenanceLabel.NOVA_SOURCE_CONFIRMED,),
             source_ids=("nova-denoise-source",),
         ),
@@ -1360,13 +1579,17 @@ DENOISE = HandbookArticle(
     ),
     measurements=(
         "Representative faint-structure region (dust lane, faint arm) before and after -- smoothed, not erased.",
-        "Sky-region noise statistic before and after.",
+        "Sky-region noise statistic before and after, on a controlled ROI rather than the whole frame.",
         "Star FWHM delta, as input evidence for the following star-correction step.",
+        "Structural-similarity (SSIM) against the pre-denoise region as one preservation signal among "
+        "several -- useful for detecting gross structure loss, not a standalone quality oracle.",
     ),
     acceptance_criteria=(
         "Noise measurably decreases in a representative sky region.",
         "Faint extended structure remains visible at 1:1, not smeared or erased.",
         "Star FWHM inflation, if any, is small enough for star correction to address.",
+        "The result is compared against a no-op baseline and against its own actually-executed "
+        "settings, not merely against a differently-labeled candidate.",
     ),
     sources=(M66_VERIFICATION, NOVA_DENOISE_SOURCE, NOVA_M66_RUN_1247, SASPRO_SOURCE_118),
 )
@@ -1375,7 +1598,7 @@ DENOISE = HandbookArticle(
 STAR_CORRECTION = HandbookArticle(
     article_id="star-correction",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=2,
     process_family=ProcessFamily.STAR_CORRECTION,
     purpose=(
         "Correct star shape -- roundness and elongation, including the FWHM inflation denoise "
@@ -1387,25 +1610,47 @@ STAR_CORRECTION = HandbookArticle(
         "Star FWHM measurably increased relative to the pre-denoise image.",
     ),
     intended_output=(
-        "Rounder, tighter stars with the background and nebulosity visually unchanged from before "
-        "this step."
+        "Rounder, tighter stars, with background and nebulosity that receive no intentional "
+        "sharpening -- though RC-Astro documents that PSF correction itself can still visibly "
+        "affect nonstellar structure near well-supported stars, so 'unchanged background' is "
+        "checked per image, not assumed by construction."
     ),
     limits=(
         "This is pure geometric correction, not sharpening or denoising -- 'Star Sharpen' is a "
         "misleading name for a step whose sharpening amounts are deliberately zero.",
         "This step happens before the star/starless split (remove_stars_linear); it is not the "
         "same operation and does not create or use a separate star layer.",
-        "It cannot fix elongation caused by tracking or guiding error -- that is not a denoise "
-        "side effect and this step will not correct it.",
+        "RC-Astro documents BlurXTerminator as trained on common acquisition-time aberrations "
+        "including guiding error, correctable in limited amounts per the vendor's own technical "
+        "manual, and recommends Correct Only as a first pass on images affected "
+        "by coma or guiding error before a second, manual-PSF pass -- so a categorical 'cannot fix "
+        "guiding-error elongation' claim overstates the tool's documented limits. NOVA has not "
+        "independently measured this step's effectiveness on guiding-error elongation "
+        "specifically, and Correct Only is not a substitute for fixing tracking/guiding at the "
+        "acquisition stage.",
+        "RC-Astro documents that correction is applied to nonstellar features as well as stars "
+        "wherever stellar support exists nearby -- Correct Only disables NOVA's sharpening "
+        "amounts (bxt_stars/bxt_nonstellar forced to 0.0), but does not confine PSF correction to "
+        "star pixels alone, and in some cases the correction itself can visibly resemble sharpening.",
     ),
     required_input_state=(
         "Linear, unstretched data, after denoise -- this step exists specifically to correct what "
         "denoise did to star shapes.",
     ),
     nova_action=(
-        "NOVA runs bxt_star_correct: PixInsight BlurXTerminator in Correct Only mode, automatic "
-        "PSF, with sharpen_stars, sharpen_nonstellar, and adjust_halos all forced to zero -- pure "
-        "star-shape correction, most consequential on dense star fields where denoise inflates FWHM."
+        "NOVA runs bxt_star_correct: RC-Astro's BlurXTerminator, correct-only mode, dispatched via "
+        "the RC-Astro CLI/RunPod GPU path (rcastro_gpu.run_rcastro) -- not PixInsight -- with "
+        "sharpen_stars, sharpen_nonstellar, and adjust_halos all forced to zero and automatic PSF "
+        "detection, most consequential on dense star fields where denoise inflates FWHM. Unlike "
+        "bxt_deconvolve and denoise_nxt, this function does not call the shared "
+        "_detect_and_fix_flip orientation check. cc_stellar (Cosmic Clarity stellar-only "
+        "sharpening) is a separate ontology experiment variant, forced by the public_free_core "
+        "workflow's own default for its free-tool-only path -- a deliberate per-workflow choice, "
+        "not a runtime fallback triggered when BXT or PixInsight is unavailable; the ontology's "
+        "own 'Fallback if PI unavailable' description does not describe current dispatch "
+        "behavior. The M66 execution record cited below has no isolated step_verdicts entry for "
+        "star_sharpen, so it is evidence for that run overall, not standalone validation evidence "
+        "for this step."
     ),
     nova_evidence_ids=("nova-star-correction-source", "nova-m66-run-1.24.7"),
     use_when=(
@@ -1413,7 +1658,10 @@ STAR_CORRECTION = HandbookArticle(
     ),
     skip_when=(
         "Stars are already round and FWHM-stable after denoise; there is nothing to correct.",
-        "Elongation is from tracking/guiding error, not denoise -- Correct Only will not fix trailing stars.",
+        "Elongation is severe trailing from an acquisition-time tracking/guiding failure rather "
+        "than the mild FWHM inflation denoise introduces -- Correct Only is not a substitute for "
+        "fixing tracking/guiding at the acquisition stage, even though RC-Astro documents guiding "
+        "error as one of the aberration classes the tool is trained on.",
     ),
     scientific_and_aesthetic_notes=(
         "Jeff's own manual verification renamed this step from 'Star Sharpen' to 'Star Correction "
@@ -1421,6 +1669,17 @@ STAR_CORRECTION = HandbookArticle(
         "does not happen here; the taxonomy's family name reflects that correction.",
         "Do not equate BlurXTerminator Correct Only with Cosmic Clarity stellar-only sharpening -- "
         "both improve star shape but are different engines and need their own before/after check.",
+        "A BXT-Correct-Only-vs-Cosmic-Clarity-stellar comparison is a strategy comparison -- two "
+        "different engines with different internals -- not a clean causal test of one shared "
+        "algorithm factor; a stronger experiment adds a true no-op (uncorrected) baseline "
+        "alongside both engines, not just the two engines against each other.",
+        "Star population counts must be matched between before/after measurements: the same "
+        "detection threshold, crop, and plate scale. A drop in detected star count can come from "
+        "a stricter threshold rather than from worse star shape, and the two must not be conflated.",
+        "RC-Astro's guiding-error and nonstellar-correction capability is vendor-documented and "
+        "NOVA's dispatch path is source-confirmed; neither establishes that one correction "
+        "strategy is universally superior across all dense star fields -- that requires its own "
+        "controlled comparison.",
     ),
     tool_guidance=(
         ToolGuidance(
@@ -1432,14 +1691,26 @@ STAR_CORRECTION = HandbookArticle(
                 "split has not happened yet at this point in the pipeline.",
                 "Use automatic PSF detection; leave all sharpen/halo amounts at zero.",
                 "Compare matched luminance extractions (identical FWHM/eccentricity settings) before and after.",
+                "Dispatch is via RC-Astro CLI/RunPod GPU (rcastro_gpu.run_rcastro), not "
+                "PixInsight -- there is no PixInsight step in this function's own execution path.",
             ),
             controls_and_starting_ranges=(
-                ("mode", "Correct Only"),
+                ("mode", "Correct Only (--correct-only)"),
                 ("PSF", "automatic detection"),
                 ("sharpen_stars / sharpen_nonstellar / adjust_halos", "0.0 / 0.0 / 0.0 -- forced, not tunable"),
+                ("dispatch", "RunPod GPU endpoint first, local RC-Astro CLI (CPU) second -- no further fallback engine"),
             ),
-            expected_result="Lower eccentricity, stable-or-improved FWHM, comparable star support, no change to background/nebulosity.",
-            failure_modes=("Confusing this step's output with a separate star layer -- none exists yet at this point.",),
+            expected_result=(
+                "Lower eccentricity, stable-or-improved FWHM, comparable star support; background "
+                "and nebulosity receive no intentional sharpening, though visible PSF-correction "
+                "effects on nonstellar structure near well-supported stars are possible and should "
+                "be checked, not assumed absent."
+            ),
+            failure_modes=(
+                "Confusing this step's output with a separate star layer -- none exists yet at this point.",
+                "Treating cc_stellar (the public_free_core workflow's forced alternative) as an "
+                "interchangeable substitute rather than a different engine needing its own comparison.",
+            ),
             recovery=("Revert to the pre-correction linear image and re-check the denoise step that preceded it.",),
             mask_support="Not applicable; BXT Correct Only operates on the full image.",
             equivalence=EquivalenceClass.EXACT_REPLAY,
@@ -1519,18 +1790,28 @@ STAR_CORRECTION = HandbookArticle(
     ),
     acceptance_criteria=(
         "Eccentricity decreases without material FWHM growth.",
-        "Star support population is comparable before and after.",
+        "Star support population is comparable before and after, using the same detection "
+        "threshold, crop, and plate scale -- a fewer-stars result from a stricter threshold is "
+        "not evidence of worse shape.",
         "No new halos, ringing, lost detail, or meaningful noise regression.",
-        "Background and nebulosity are visibly unchanged from the input.",
+        "Background and nebulosity show no intentional sharpening; any visible change to "
+        "nonstellar structure is attributable to PSF correction near well-supported stars, not "
+        "an enhancement amount, consistent with RC-Astro's documented behavior.",
     ),
-    sources=(M66_VERIFICATION, NOVA_STAR_CORRECTION_SOURCE, NOVA_M66_RUN_1247, SASPRO_SOURCE_118),
+    sources=(
+        M66_VERIFICATION,
+        NOVA_STAR_CORRECTION_SOURCE,
+        NOVA_M66_RUN_1247,
+        SASPRO_SOURCE_118,
+        RC_ASTRO_BXT_TECHNICAL_MANUAL,
+    ),
 )
 
 
 STRETCH = HandbookArticle(
     article_id="stretch",
     schema_version=SCHEMA_VERSION,
-    revision=1,
+    revision=4,
     process_family=ProcessFamily.STRETCH,
     purpose=(
         "Convert linear data -- where almost all real signal sits near zero and is "
@@ -1568,6 +1849,40 @@ STRETCH = HandbookArticle(
         "Irreversible: clipped highlights and crushed shadows from an aggressive stretch "
         "cannot be recovered from the output alone; the input's actual dynamic range sets "
         "the ceiling on what any engine can safely show.",
+        "Experiment Mode's 13 ontology presets are not what actually runs in most cases: "
+        "_adapt_stretch_variants() (experiments.py:531) overrides GHS pivot/alpha and "
+        "Statistical-Stretch target_median per run from the image's own measured stats "
+        "before any candidate executes -- comparing two runs' 'same preset' without "
+        "checking the adapted values compares different curves under one label. One "
+        "internal comment in that function calls 0.20 the 'ontology standard "
+        "target_median' for normalizing stat-variant ratios; the article's own SASpro "
+        "tool_guidance below (source-confirmed) shows the real ontology default for "
+        "stat_default is 0.08 -- the comment's label is wrong, though the ratio-preserving "
+        "math is self-consistent as long as that constant is applied uniformly across all "
+        "stat variants, which it is.",
+        "veralux_stretch()'s real parameter is target_bg (seti_astro.py:1245, default "
+        "0.08); _adapt_stretch_variants() previously wrote its computed value under the "
+        "wrong key, target_median, for veralux candidates. Experiment Mode's variant "
+        "runner (experiments.py's _run_variant, ~line 170) calls fn(input, output, "
+        "**params) directly with no signature filtering, so this was not a "
+        "silently-dropped no-op: every veralux experiment-mode candidate failed outright "
+        "(TypeError: veralux_stretch() got an unexpected keyword argument "
+        "'target_median') whenever the stat-adaptation path itself succeeded (the normal "
+        "case). Fixed 2026-09-07 (#626, PR #633; regression test against the real "
+        "signature) and confirmed 2026-09-08 with a real production run, not just a "
+        "synthetic test: all three veralux candidates now execute against a real "
+        "pre-stretch M66 linear intermediate, adapted params correctly carrying "
+        "target_bg with target_median nowhere in sight (scripts/"
+        "veralux_experiment_reproduction.py, PR #653).",
+        "When SPCC fails upstream (a .spcc_failed sentinel in the run directory -- see "
+        "the Color Calibration article, and #623/#624's related but distinct linear-stage "
+        "background-neutralize work), _adapt_stretch_variants() forces the stat_stretch "
+        "and stf_stretch candidates to run UNLINKED (per-channel) instead of their normal "
+        "linked default, specifically to neutralise a green cast SPCC never white-balanced "
+        "out. That is a real, deliberate recovery strategy for a specific failure -- not "
+        "evidence that unlinked stretching is generally preferable, and a stretch-only "
+        "comparison that doesn't record whether SPCC succeeded is silently comparing two "
+        "different regimes.",
     ),
     required_input_state=(
         "Linear, unstretched data, after deconvolution and denoise (and star correction, "
@@ -1583,7 +1898,19 @@ STRETCH = HandbookArticle(
         "concept, presets stf_galaxy/stf_nebula), veralux_stretch (an original arcsinh-based "
         "design with auto-detected symmetry point, presets veralux_default/colorful/globular), "
         "and smart_stretch, which profiles the image's dynamic range and star fraction and "
-        "adaptively selects among STF/veralux/GHS/stat rather than running one fixed engine."
+        "adaptively selects among STF/veralux/GHS/stat rather than running one fixed engine. "
+        "The 13 Experiment Mode candidates are not one uniform class: pi_mas is a fixed "
+        "method (module defaults, no per-run adaptation); stat_default/stat_bright/"
+        "stat_globular, ghs_default/ghs_galaxy, stf_galaxy/stf_nebula, and veralux_default/"
+        "colorful/globular are all parameter probes around a fixed engine, each "
+        "individually re-targeted per run by _adapt_stretch_variants() (see limits for "
+        "the real target_bg/target_median defect this once had in the veralux probes, "
+        "fixed 2026-09-07 and confirmed against real data 2026-09-08); "
+        "smart_default/smart_dark are an adaptive strategy choosing among the other "
+        "engines rather than a fixed curve; and the SPCC-failure unlinked branch is a "
+        "recovery strategy for a specific upstream failure, not a preference candidate. "
+        "Treat these four classes separately in any comparison -- an engine-vs-engine "
+        "result and a strategy-vs-fixed-method result answer different questions."
     ),
     nova_evidence_ids=("nova-stretch-source", "nova-m66-run-1.24.7"),
     use_when=(
@@ -1604,6 +1931,22 @@ STRETCH = HandbookArticle(
         "The historical MAS parameters recorded from M66 are the module's own installed "
         "defaults (version 1.1.1.0), not values NOVA computed or tuned for this image -- the "
         "workflow created the process and ran it with zero overrides.",
+        "A fair comparison across stretch candidates needs the same linear parent, the same "
+        "upstream state (in particular, the same SPCC success/failure outcome -- see limits), "
+        "identical output precision/normalization, the same ROI, and the same display/export "
+        "transformation applied afterward; candidate failures must be recorded, not silently "
+        "excluded, and a class conclusion (e.g. 'GHS beats Statistical Stretch') needs "
+        "replication across morphology, filter, and linear state before it generalizes beyond "
+        "the specific run it was measured on.",
+        "None of median alone, entropy, high-frequency power, a generic SNR-like score, a "
+        "'brighter-looking' preview, or an AI aesthetic preference validates a stretch by "
+        "itself -- each can reward a candidate that clipped, crushed, or amplified noise "
+        "rather than one that actually preserved faint structure with real headroom.",
+        "This article covers the main-image stretch only. When stars and the starless layer "
+        "are stretched separately, the tonal state machine is broader than a single stretch "
+        "call -- see the Linear Star Split, Star-Layer Stretch, and Recombination article for "
+        "that separate path, and Nonlinear Star Removal and Starless Finishing for the distinct "
+        "post-stretch strategy; neither shares this article's acceptance criteria.",
     ),
     tool_guidance=(
         ToolGuidance(
@@ -1828,6 +2171,13 @@ STRETCH = HandbookArticle(
         "Star cores and highlights retain headroom; hard clipping is explicitly measured, not just visually judged absent.",
         "Faint extended structure is visible without being flattened into noise.",
         "The specific engine, preset, and version used are recorded -- not just 'stretch applied'.",
+        "When comparing candidates, each one's class (fixed method, parameter probe, "
+        "adaptive strategy, or failure-recovery variant) and whether SPCC succeeded "
+        "upstream are recorded alongside the result -- not just the winning label.",
+        "No claim of one engine/preset being generally better rests on median, entropy, "
+        "high-frequency power, a generic SNR-like score, or a preview's apparent "
+        "brightness alone; a failed or crashed candidate is recorded as a failure, not "
+        "silently excluded from the comparison.",
     ),
     sources=(
         M66_VERIFICATION,
@@ -1842,13 +2192,30 @@ STRETCH = HandbookArticle(
 
 HANDBOOK_ARTICLES: tuple[HandbookArticle, ...] = (
     PEDESTAL_REMOVAL,
+    SUBFRAME_INSPECTION,
+    REGISTRATION_ALIGNMENT,
+    STACKING_INTEGRATION,
+    CROP_FRAMING,
     COSMETIC_CORRECTION,
     BACKGROUND_EXTRACTION,
     COLOR_CALIBRATION,
     DECONVOLUTION,
     DENOISE,
     STAR_CORRECTION,
+    LINEAR_STAR_SPLIT,
     STRETCH,
+    STARLESS_FINISHING,
+    BACKGROUND_NEUTRALIZATION,
+    SKY_GREEN_REBALANCE,
+    CURVES,
+    SATURATION,
+    LOCAL_CONTRAST,
+    HDR_COMPRESSION,
+    HDR_CORE_BLEND,
+    POST_STRETCH_DENOISE,
+    DARK_STRUCTURE_ENHANCEMENT,
+    HALO_SUPPRESSION,
+    NARROWBAND_DUAL_BAND_STRATEGY,
 )
 
 # Compatibility name retained for the first-batch exporter and downstream imports.

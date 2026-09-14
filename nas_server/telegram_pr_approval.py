@@ -58,6 +58,7 @@ exist for the same pair without a later genuine approval being dropped by
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sqlite3
@@ -93,7 +94,11 @@ def parse_approve_command(text: str) -> int | None:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(db_path, timeout=10)
+    connection = sqlite3.connect(
+        f"{db_path.resolve().as_uri()}?mode=rw",
+        uri=True,
+        timeout=10,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 10000")
     connection.executescript(_SCHEMA)
@@ -226,7 +231,7 @@ def consume_telegram_approval(db_path: Path, pr_number: int, current_head: str) 
 
 
 def handle_approve_command(
-    text: str, *, relay_dir: Path = DEFAULT_RELAY_DIR
+    text: str, *, relay_dir: str | os.PathLike[str] | None = None
 ) -> str | None:
     """Registered via `telegram.set_approve_command_handler()`. Returns
     None for any text that isn't an approve command -- telegram.py's poll
@@ -238,7 +243,10 @@ def handle_approve_command(
     pr_number = parse_approve_command(text)
     if pr_number is None:
         return None
-    db_path = Path(relay_dir) / "relay.sqlite3"
+    resolved_relay_dir = (
+        Path(relay_dir).expanduser() if relay_dir else DEFAULT_RELAY_DIR
+    )
+    db_path = resolved_relay_dir / "relay.sqlite3"
     result = record_telegram_approval(db_path, pr_number)
     if result is None:
         return f"Couldn't find an open PR #{pr_number} -- nothing recorded."

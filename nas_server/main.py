@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Body
@@ -100,6 +101,15 @@ async def lifespan(app: FastAPI):
 
     log.info("Starting SeeStar NAS Server")
     database.init_database()
+    try:
+        from nas_server.experiment_artifacts import reconcile_expired_runs
+        findings = reconcile_expired_runs()
+        if findings:
+            log.warning("[startup] reconciled %d expired experiment artifact states",
+                        len(findings))
+    except Exception as exc:
+        # Recovery is evidence-preserving and must never silently disappear.
+        log.error("[startup] experiment artifact reconciliation failed: %s", exc)
 
     # Delete any orphaned stack work dirs left by previous crashes/restarts.
     # The finally-block cleanup in stacker.py doesn't run when systemd kills uvicorn.
@@ -121,13 +131,16 @@ async def lifespan(app: FastAPI):
         settings.get("telegram_token", ""),
         settings.get("telegram_chat_id", ""),
     )
+    relay_dir = settings.get("relay_dir") or None
     # Henry's Telegram approve/reject decisions for GATE/yellow/red relay
     # messages. Read-then-validate-then-record-once; safe to register even
     # while relay_watcher_enabled is false (no buttons exist to tap yet).
     try:
         from nas_server import gate_approval
 
-        telegram.set_callback_handler(gate_approval.handle_relay_callback)
+        telegram.set_callback_handler(
+            partial(gate_approval.handle_relay_callback, relay_dir=relay_dir)
+        )
     except Exception as e:
         log.warning(f"[startup] gate-approval callback handler failed to register: {e}")
 
@@ -139,7 +152,9 @@ async def lifespan(app: FastAPI):
     try:
         from nas_server import telegram_pr_approval
 
-        telegram.set_approve_command_handler(telegram_pr_approval.handle_approve_command)
+        telegram.set_approve_command_handler(
+            partial(telegram_pr_approval.handle_approve_command, relay_dir=relay_dir)
+        )
     except Exception as e:
         log.warning(f"[startup] telegram approve-command handler failed to register: {e}")
 
@@ -171,14 +186,17 @@ async def lifespan(app: FastAPI):
     try:
         from nas_server import relay_watcher
 
-        _relay_observer, _relay_stop = relay_watcher.start_relay_watcher()
+        _relay_observer, _relay_stop = relay_watcher.start_relay_watcher(
+            relay_dir=relay_dir
+        )
     except Exception as e:
         log.warning(f"[startup] relay watcher (claude) failed to start: {e}")
     try:
         from nas_server import relay_watcher
 
         _relay_observer_codex, _relay_stop_codex = relay_watcher.start_relay_watcher(
-            recipient="codex"
+            relay_dir=relay_dir,
+            recipient="codex",
         )
     except Exception as e:
         log.warning(f"[startup] relay watcher (codex) failed to start: {e}")
@@ -1719,19 +1737,15 @@ def fits_viewer_route(target: str, path: str):
 
 @app.get("/fits/{target}", response_class=HTMLResponse)
 def fits_viewer_default(target: str):
-    """Redirect to the first FITS file found for a target."""
+    """Redirect to the first classified product for a canonical target."""
     from fastapi.responses import RedirectResponse
-    lib = Path(settings["seestar_library_path"])
-    tdir = lib / target
-    # Prefer _processed files, fall back to raw stacks
-    proc = sorted((tdir / "_processed").glob("*.fit")) + sorted((tdir / "_processed").glob("*.fits"))
-    raw = sorted(tdir.glob("*.fit")) + sorted(tdir.glob("*.fits"))
-    candidates = proc or raw
-    if not candidates:
+    from nas_server.fits_products import canonical_target_for_storage, list_fits_products
+
+    canonical = canonical_target_for_storage(target)
+    products = list_fits_products(canonical)
+    if not products:
         raise HTTPException(404, detail=f"No FITS files found for {target}")
-    first = candidates[0].relative_to(tdir)
-    import urllib.parse
-    return RedirectResponse(f"/fits/{urllib.parse.quote(target, safe='')}/{urllib.parse.quote(str(first), safe='/')}")
+    return RedirectResponse(products[0].viewer_url)
 
 
 # ---------------------------------------------------------------------------
@@ -1744,6 +1758,49 @@ from nas_server import web as _web
 @app.get("/", response_class=HTMLResponse)
 def home():
     return _web.home_page()
+
+
+@app.get("/weather-history")
+def weather_history(start: str, end: str):
+    """Cached historical estimates for the private observing heatmap."""
+    from datetime import date
+    from nas_server.database import get_nightly_decisions_range
+    from nas_server.weather_history import archive_coverage_end, get_historical_conditions
+
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+        if end_date < start_date:
+            raise ValueError("end must be on or after start")
+        recorded_decisions = get_nightly_decisions_range(start, end)
+        archive_end = archive_coverage_end(end_date)
+        if archive_end < start_date:
+            return {
+                "source": "Open-Meteo historical weather estimate",
+                "night_window": "18:00–06:59 local time",
+                "coverage_end": None,
+                "nights": {},
+                "recorded_decisions": recorded_decisions,
+            }
+        nights = get_historical_conditions(
+            float(settings["observer_lat"]),
+            float(settings["observer_lon"]),
+            start_date,
+            archive_end,
+            cache_path=Path(settings["db_path"]).parent / "weather_history_cache.json",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.warning("[weather-history] unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="historical weather unavailable") from exc
+    return {
+        "source": "Open-Meteo historical weather estimate",
+        "night_window": "18:00–06:59 local time",
+        "coverage_end": archive_end.isoformat(),
+        "nights": nights,
+        "recorded_decisions": recorded_decisions,
+    }
 
 
 @app.get("/targets-view", response_class=HTMLResponse)
@@ -1900,6 +1957,53 @@ def queue_view():
 @app.get("/queue-view/rows", response_class=HTMLResponse)
 def queue_rows():
     return _web.queue_rows_partial()
+
+
+@app.get("/telemetry", response_class=HTMLResponse)
+def telemetry_view():
+    return _web.telemetry_page()
+
+
+@app.get("/runpod-status", response_class=HTMLResponse)
+def runpod_status_view():
+    return _web.runpod_status_page()
+
+
+@app.get("/environment-health", response_class=HTMLResponse)
+def environment_health_view():
+    from nas_server.database import get_conn
+    from nas_server.environment_health import render, CARD_CSS
+    with get_conn() as conn:
+        return _web._shell("Environment Health — NOVA", render(conn), extra_css=CARD_CSS)
+
+
+@app.get("/experiment-runs", response_class=HTMLResponse)
+def experiment_runs_view():
+    from nas_server.experiment_operator_runs import list_experiment_runs
+    from nas_server.experiment_operator_runs_page import render_run_index
+    return render_run_index(list_experiment_runs())
+
+
+@app.get("/experiment-runs/{experiment_run_id}", response_class=HTMLResponse)
+def experiment_run_view(experiment_run_id: str):
+    from nas_server.experiment_operator_runs import experiment_run_view as load_run
+    from nas_server.experiment_operator_runs_page import render_run_detail
+    view = load_run(experiment_run_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Experiment run not found")
+    return render_run_detail(view)
+
+
+@app.post("/experiment-runs/reconcile", response_class=HTMLResponse)
+def reconcile_experiment_runs(return_run_id: str):
+    from nas_server.experiment_artifacts import reconcile_expired_runs
+    from nas_server.experiment_operator_runs import experiment_run_view as load_run
+    from nas_server.experiment_operator_runs_page import render_run_detail
+    if load_run(return_run_id) is None:
+        raise HTTPException(status_code=404, detail="Experiment run not found")
+    findings = reconcile_expired_runs()
+    view = load_run(return_run_id)
+    return render_run_detail(view, reconciliation=findings)
 
 
 @app.get("/learning-view", response_class=HTMLResponse)
