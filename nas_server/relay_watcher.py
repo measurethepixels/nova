@@ -25,8 +25,7 @@ RELAY_FILENAMES = {"relay.sqlite3", "relay.sqlite3-wal", "relay.sqlite3-shm"}
 POLL_SECONDS = 45.0
 SETTLE_SECONDS = 1.0
 GATE_KINDS = frozenset({"GATE"})
-ELEVATED_RISKS = frozenset({"yellow", "red"})
-GREEN_ELIGIBLE_KINDS = frozenset({"QUESTION", "REVIEW", "FACT_CHECK"})
+NOTIFY_RISK = "red"
 
 
 def _connect_read_only(db_path: Path) -> sqlite3.Connection:
@@ -128,23 +127,11 @@ def _notification(message: dict[str, Any]) -> str:
 
 
 def _is_gate(message: dict[str, Any]) -> bool:
-    return message.get("kind") in GATE_KINDS or message.get("risk") in ELEVATED_RISKS
-
-
-def _is_green_eligible(message: dict[str, Any]) -> bool:
-    return (
-        message.get("kind") in GREEN_ELIGIBLE_KINDS
-        and message.get("intent") == "CHECK"
-        and message.get("risk") == "green"
-    )
-
-
-def _is_interactive_handoff(message: dict[str, Any]) -> bool:
-    return (
-        message.get("risk") == "green"
-        and message.get("kind") != "GATE"
-        and message.get("intent") in {"TASK", "COORDINATION"}
-    )
+    """Pure message-kind check, independent of risk -- see scan_once's own
+    docstring for why risk no longer feeds into this: whether to notify AT
+    ALL is decided once, up front, by risk alone; this only decides WHICH
+    style a red-risk message gets once that gate has already passed."""
+    return message.get("kind") in GATE_KINDS
 
 
 def _gate_reply_markup(message_id: int) -> dict[str, Any]:
@@ -172,33 +159,6 @@ def _gate_notification(message: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return text, _gate_reply_markup(message["id"])
 
 
-def _fyi_notification(message: dict[str, Any]) -> str:
-    """Lighter, no-buttons notice for a green message an automated checker may
-    answer — monitor mode, not silence, and not the urgency of a gate."""
-    sender = html.escape(str(message["sender"]))
-    question = html.escape(str(message["question"]))
-    kind = html.escape(str(message["kind"]))
-    loop_id = html.escape(str(message["loop_id"]))
-    return (
-        f"🟢 <b>NOVA Relay (monitor)</b> · <code>#{message['id']}</code>\n"
-        f"<b>{kind}</b> from <code>{sender}</code> · loop <code>{loop_id}</code>\n"
-        f"{question}"
-    )
-
-
-def _interactive_notification(message: dict[str, Any]) -> str:
-    recipient = html.escape(str(message["recipient"]).capitalize())
-    intent = html.escape(str(message["intent"]))
-    role = html.escape(str(message["role"]))
-    question = html.escape(str(message["question"]))
-    return (
-        f"📥 <b>NOVA Relay needs interactive {recipient}</b> · "
-        f"<code>#{message['id']}</code>\n"
-        f"intent <code>{intent}</code> · role <code>{role}</code>\n"
-        f"{question}"
-    )
-
-
 def scan_once(
     db_path: Path,
     state_path: Path,
@@ -206,30 +166,37 @@ def scan_once(
     recipient: str = "claude",
     send: Callable[..., bool] = telegram.send,
 ) -> int:
-    """Notify in ID order, persisting only each successfully delivered ID.
+    """Notify in ID order, persisting the watermark for EVERY message seen
+    (sent or not) so nothing is silently reprocessed forever.
 
-    Tiered by message shape: GATE/yellow/red gets an actionable notice with
-    inline Approve/Reject buttons (see nas_server/gate_approval.py for what a
-    tap does); a green TASK/COORDINATION gets an interactive handoff notice;
-    a green CHECK with an eligible kind gets a lighter no-buttons FYI
-    (monitor mode, not silence); anything else keeps the original plain
-    notification. `send` is called with a single argument except for the gate
-    tier, which passes `reply_markup` as a keyword.
+    As of 2026-08-24 (AGENTS.md's "Coordinator and briefing contract",
+    confirmed with Henry): only `risk == "red"` messages page Telegram
+    immediately. Yellow and green messages are deliberately left unsent
+    here -- they still land in the Relay mailbox and reach Henry through the
+    next `/briefing` instead, which reads the mailbox directly rather than
+    depending on this watcher's own watermark. This intentionally narrows
+    the old behavior, where a green- or yellow-risk GATE message paged
+    immediately just for being GATE-kind: `/briefing`'s own pending-decision
+    query already surfaces any unresolved GATE message regardless of risk,
+    so a non-red GATE decision is still visible, just pooled instead of
+    interrupting.
+
+    A red-risk message gets the actionable Approve/Reject notice when it's
+    GATE-kind (see nas_server/gate_approval.py for what a tap does), a plain
+    urgent notice otherwise. `send` is called with a single argument except
+    for the gate style, which passes `reply_markup` as a keyword.
     """
     watermark = initialize_watermark(db_path, state_path, recipient=recipient)
     for message in _new_messages(db_path, recipient, watermark):
-        if _is_gate(message):
-            text, markup = _gate_notification(message)
-            delivered = send(text, reply_markup=markup)
-        elif _is_interactive_handoff(message):
-            delivered = send(_interactive_notification(message))
-        elif _is_green_eligible(message):
-            delivered = send(_fyi_notification(message))
-        else:
-            delivered = send(_notification(message))
-        if not delivered:
-            log.warning("[relay-watcher] Telegram send failed for message %s", message["id"])
-            break
+        if message.get("risk") == NOTIFY_RISK:
+            if _is_gate(message):
+                text, markup = _gate_notification(message)
+                delivered = send(text, reply_markup=markup)
+            else:
+                delivered = send(_notification(message))
+            if not delivered:
+                log.warning("[relay-watcher] Telegram send failed for message %s", message["id"])
+                break
         watermark = int(message["id"])
         _write_watermark(state_path, watermark)
     return watermark
@@ -281,7 +248,7 @@ def _scanner_loop(
 def start_relay_watcher(
     *,
     enabled: bool | None = None,
-    relay_dir: Path = DEFAULT_RELAY_DIR,
+    relay_dir: str | os.PathLike[str] | None = None,
     recipient: str = "claude",
     send: Callable[[str], bool] = telegram.send,
     observer_factory: Callable[[], Any] | None = None,
@@ -299,7 +266,7 @@ def start_relay_watcher(
         log.info("[relay-watcher] disabled")
         return None, stop
 
-    relay_dir = Path(relay_dir)
+    relay_dir = Path(relay_dir).expanduser() if relay_dir else DEFAULT_RELAY_DIR
     db_path = relay_dir / "relay.sqlite3"
     state_path = relay_dir / f"{recipient}_notify_state.json"
 

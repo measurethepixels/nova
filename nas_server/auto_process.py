@@ -5,6 +5,7 @@ Workflow:
   assess_initial → per-step: condition check → Claude param recommendation →
   seti_astro execution → mini-assess → iterate → assess_final → Telegram summary
 """
+import hashlib
 import inspect
 import json
 import logging
@@ -19,6 +20,46 @@ _ONTOLOGY_PATH = Path(__file__).parent / "processing_ontology.json"
 
 _active: dict[str, dict] = {}
 _active_lock = threading.Lock()
+
+
+def _fine_tune_runner(variant: dict):
+    """Resolve the declared winner engine without cross-engine fallback."""
+    engine = variant.get("engine", "seti_astro")
+    if engine == "seti_astro":
+        from nas_server import seti_astro
+        runner = getattr(seti_astro, variant.get("fn", ""), None)
+        names = set(inspect.signature(runner).parameters) if runner else set()
+        return runner, names, names
+    if engine == "ml_tools_gpu" and variant.get("operations"):
+        from nas_server.ml_tools_gpu import run_ml_tool_pipeline_gpu
+        operations = list(variant["operations"])
+
+        def runner(source, destination, **parameters):
+            return run_ml_tool_pipeline_gpu(operations, source, destination, parameters)
+
+        return runner, {"mode", "alpha", "level"}, {"alpha", "level"}
+    return None, set(), set()
+
+
+def _fine_tuned_winner_id(declared_variant_id: str) -> str:
+    """Retain the exact declared mode/preset identity in tuned provenance."""
+    return f"{declared_variant_id}_tuned"
+
+
+def _fine_tune_provenance(*, variant: dict, effective_params: dict,
+                          retained_iteration: int, artifact_path: Path) -> dict:
+    """Bind the subsequent tuned treatment to its retained artifact."""
+    return {
+        "declared_variant_id": variant["id"],
+        "applied_variant_id": _fine_tuned_winner_id(variant["id"]),
+        "engine": variant.get("engine", "seti_astro"),
+        "operations": list(variant.get("operations") or []),
+        "fixed_mode": effective_params.get("mode"),
+        "effective_params": dict(effective_params),
+        "retained_iteration": retained_iteration,
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+    }
 
 # ---------------------------------------------------------------------------
 # Global PI pipeline lock — ensures only ONE autoprocess pipeline runs at a
@@ -922,18 +963,30 @@ def _compute_stretch_stats(fits_path: Path, object_type: str = "galaxy",
         flat = d.ravel()
         p95 = float(np.percentile(flat, 95))
         p99 = float(np.percentile(flat, 99))
+        # Exact-zero pixel fraction across the WHOLE frame (not just corners) --
+        # the direct measure of hard black-clipping. bg/bg_noise (corner-only)
+        # can both read ~0 on a clipped candidate, but so can a legitimately
+        # very dark, low-noise sky; the exact-zero fraction is what actually
+        # separates "94% of the frame destroyed" from "a normal dark corner"
+        # (#479: veralux/veralux_strong measured 94.3%/94.32% on M 27 vs
+        # 2.5-10% for every healthy candidate on the same run).
+        exact_zero_frac = float(np.mean(flat == 0.0))
         # Per-type sky background thresholds.
         # Emission nebulae: corners pick up diffuse Ha/OIII, so genuine emission fill
         # can read 0.10-0.16 even on a well-stretched image — don't flag as "too bright".
         # p99 (< 0.70) is the real under-stretch indicator for nebulae.
         _targets = {
             "galaxy":            (0.05, 0.08),
+            "galaxy_group":      (0.05, 0.08),
+            "interacting_galaxies": (0.05, 0.08),
             "emission_nebula":   (0.06, 0.16),   # wide — corners contain real emission
             "reflection_nebula": (0.06, 0.11),
             "planetary_nebula":  (0.05, 0.09),   # compact — corners are true sky
             "supernova_remnant": (0.05, 0.13),
             "globular_cluster":  (0.04, 0.08),
             "open_cluster":      (0.04, 0.08),
+            "asterism":          (0.04, 0.08),
+            "double_star":       (0.04, 0.08),
             "nebula":            (0.06, 0.14),   # generic fallback for nebula subtype
         }
         # Normalise subtype strings (e.g. "emission nebula" → "emission_nebula")
@@ -984,6 +1037,7 @@ def _compute_stretch_stats(fits_path: Path, object_type: str = "galaxy",
             "frame_fill": frame_fill,    # True → bg/bg_noise are dark-anchored, not corner
             "p50_target_lo": p50_target_lo,
             "p50_dist": p50_dist,        # midtone under-brightness charge (frame_fill only)
+            "exact_zero_frac": exact_zero_frac,
         }
     except Exception as e:
         log.debug(f"[autoprocess] _compute_stretch_stats failed: {e}")
@@ -1267,6 +1321,179 @@ def _stretch_preview_path(run_dir, name: str):
     return hits[0] if hits else None
 
 
+_GHS_FAMILY = ("ghs", "ghs_soft", "ghs_strong")
+
+
+def _ghs_pixel_distance(fits_a, fits_b) -> tuple[float, float] | None:
+    """(max_abs_diff, mean_abs_diff) between two candidate FITS' raw pixel
+    data -- the same evidence model #480 itself measured (max/mean absolute
+    difference over the candidate FITS), not a proxy over summary scalars.
+    None if either file can't be read or their shapes disagree."""
+    try:
+        from astropy.io import fits as _af
+        import numpy as np
+        with _af.open(str(fits_a), memmap=False) as h:
+            a = h[0].data.astype(np.float32)
+        with _af.open(str(fits_b), memmap=False) as h:
+            b = h[0].data.astype(np.float32)
+        if a.shape != b.shape:
+            return None
+        diff = np.abs(a - b)
+        return float(diff.max()), float(diff.mean())
+    except Exception:
+        return None
+
+
+def _collapse_near_duplicate_ghs(scored: list[dict], *, eps: float = 0.005) -> list[dict]:
+    """Near-duplicate collapse for the ghs/ghs_soft/ghs_strong family (#480).
+
+    The three GHS variants differ only in the `alpha` passed to the underlying
+    stretch (`alpha_mult` 0.7/1.0/1.5) -- but `_ghs_sky_correct` runs
+    unconditionally right after and pulls EVERY variant's sky to the SAME
+    target black-point whenever it exceeds the object-type band's high
+    threshold. On a target where GHS's naturally-elevated sky (its own
+    docstring: "sky floats high on faint targets") triggers that correction
+    for all three, the alpha-driven differentiation gets erased by the shared
+    renormalization: M 27 measured max_abs_diff 0.0024 / mean_abs_diff
+    0.00034 between ghs and ghs_strong (0.24% of range). That let a 0.0016
+    grain gap decide the winner on M 27, which is noise, not a quality
+    signal. M 31 is the counter-example where the correction does NOT
+    uniformly erase the difference (p99 0.1306/0.1876/0.1010) -- there the
+    three are genuinely distinct and must stay that way.
+
+    Rather than touch `_ghs_sky_correct`'s normalization strength (every
+    GHS-family output on every nebula run depends on it landing the sky
+    on-target -- too broad a blast radius for this issue's scope), collapse
+    duplicates at the PICKER level, on the issue's own pixel-data contract:
+    two GHS-family candidates are near-duplicate iff their rendered FITS
+    pixels differ by at most `eps` max absolute difference (bounding the max
+    also bounds the mean, so one threshold catches both an overall wash and
+    a smaller region of genuine local-structure difference the coarse
+    summary scalars p99/under/blown/bg_level can't see -- #512 review).
+    `eps=0.005` sits comfortably above M 27's measured 0.0024 max_abs_diff
+    and well below a genuinely distinct pair's full-frame difference.
+
+    Grouping is by union-find over pairwise pixel distance, not by rounding
+    each candidate into a shared bucket: `round(value / eps)` is not
+    equivalent to "agrees within eps" (two values less than eps apart can
+    still land in adjacent buckets at a boundary), and pairwise union-find
+    has no such boundary (#512 review).
+
+    Union-find alone is not equivalent to the epsilon contract either: it is
+    transitive, so a chain A-B <= eps and B-C <= eps unions A and C into one
+    component even when A-C > eps. If the component's chosen survivor is B,
+    that is harmless (both A and C are individually within eps of B) -- but
+    if the survivor is A, C would be wrongly collapsed despite being outside
+    eps of A. So each component only fixes *candidacy*; once a component's
+    preferred survivor is chosen, every other member is re-checked directly
+    against that survivor's own pixels before being dropped, and only those
+    within eps of the actual survivor collapse (#512 review round 2).
+    """
+    family = [c for c in scored if c["name"] in _GHS_FAMILY]
+    if len(family) < 2:
+        return scored
+
+    parent = {c["name"]: c["name"] for c in family}
+
+    def _find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(len(family)):
+        for j in range(i + 1, len(family)):
+            dist = _ghs_pixel_distance(family[i]["fits"], family[j]["fits"])
+            if dist is not None and dist[0] <= eps:
+                _union(family[i]["name"], family[j]["name"])
+
+    groups: dict[str, list[dict]] = {}
+    for c in family:
+        groups.setdefault(_find(c["name"]), []).append(c)
+
+    dropped_any = False
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        keep = min(group, key=lambda c: c["pref"])
+        collapsed = []
+        for c in group:
+            if c is keep:
+                continue
+            # Re-check directly against the chosen survivor -- component
+            # membership only proves candidacy, not that this specific
+            # member is within eps of the specific candidate being kept
+            # (a transitive chain can union two candidates that are each
+            # within eps of a shared middle member but not of each other).
+            dist = _ghs_pixel_distance(c["fits"], keep["fits"])
+            if dist is not None and dist[0] <= eps:
+                c["dropped"] = "ghs_near_duplicate"
+                dropped_any = True
+                collapsed.append(c["name"])
+        if collapsed:
+            log.info(f"[autoprocess] stretch GHS near-duplicate collapse {collapsed} "
+                     f"→ kept {keep['name']} (pixel max-abs-diff ≤ {eps})")
+
+    if not dropped_any:
+        return scored
+    return [c for c in scored if c.get("dropped") != "ghs_near_duplicate"]
+
+
+def _apply_sky_clip_dq(scored: list[dict], *, threshold: float = 0.50) -> list[dict]:
+    """Hard sky-clipping disqualifier (#479) -- universal, applies before the
+    galaxy/nebula branches split, not gated on object type.
+
+    A candidate that clips the sky to exact zero across most of the frame has
+    destroyed faint signal irrecoverably; this is strictly worse than an
+    at-stretch overshoot, which still contains the signal downstream.
+    `bg_dist` alone is not enough to catch this: on M 27, veralux and
+    veralux_strong clipped 94.3%/94.32% of ALL pixels to exact zero yet still
+    ranked 5th-6th of 9 by decision_rank, staying eligible to win on any
+    target whose sky band happened to sit lower. This has to be a
+    DISQUALIFIER, not a cost term, precisely because a near-zero `bg_dist` is
+    exactly what a clipped candidate produces -- the failure mode the cost
+    function itself cannot see.
+
+    Real candidate data (M 27, C 19, M 31 -- see #479 evidence) puts every
+    healthy candidate at 2.5-10% exact-zero and every observed clipped one at
+    94%+, so the default threshold (0.50) sits with wide margin on both sides
+    without risking a false positive on a legitimately dark sky.
+
+    Mutates the `dropped` field of removed candidates in place (same
+    convention as the galaxy grain-DQ / sky-ceiling gates) and returns the
+    surviving list. Never returns an empty list for a non-empty input -- if
+    every candidate clips, keeps the least-clipped one rather than failing
+    the run.
+    """
+    if not scored:
+        return scored
+    unclipped = [c for c in scored if c.get("exact_zero_frac", 0.0) <= threshold]
+    if unclipped and len(unclipped) < len(scored):
+        cut = [f"{c['name']}(zero{c['exact_zero_frac']:.2f})"
+               for c in scored if c not in unclipped]
+        for c in scored:
+            if c not in unclipped:
+                c["dropped"] = "sky_clip"
+        log.info(f"[autoprocess] stretch sky-clip dropped {cut} "
+                 f"(exact-zero fraction > {threshold})")
+        return unclipped
+    if not unclipped:
+        keep = min(scored, key=lambda c: c.get("exact_zero_frac", 0.0))
+        for c in scored:
+            if c is not keep:
+                c["dropped"] = "sky_clip"
+        log.warning(f"[autoprocess] stretch sky-clip: ALL candidates exceed "
+                    f"exact-zero {threshold} — keeping least-clipped "
+                    f"{keep['name']} (zero{keep.get('exact_zero_frac', 0.0):.2f})")
+        return [keep]
+    return scored
+
+
 def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
                           depth: float = 1.0,
                           folio_band: tuple[float, float] | None = None,
@@ -1365,6 +1592,7 @@ def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
             "grain": bg_noise + 0.25 * rel_grain,
             "bg_level": st.get("bg_level", 0.0),
             "p50": st.get("p50", 0.0),
+            "exact_zero_frac": st.get("exact_zero_frac", 0.0),
             "fits": str(fp),
         })
     if not scored:
@@ -1406,6 +1634,14 @@ def _physics_pick_stretch(variants: list[dict], run_dir, object_type: str,
             scored_out.append(rec)
 
     is_galaxy = "galaxy" in (object_type or "")
+
+    # Sky-clip disqualification (#479) runs first: it removes candidates that
+    # are outright broken (mostly clipped to black) before GHS near-duplicate
+    # collapse (#480) ever compares pixel data among what's left -- a clipped
+    # GHS-family candidate should never be eligible to be chosen as the
+    # "survivor" of a duplicate group.
+    scored = _apply_sky_clip_dq(scored)
+    scored = _collapse_near_duplicate_ghs(scored)
 
     # Absolute grain disqualifier (workflow 1.21.0; GALAXY-SCOPED in 1.22.2): a
     # candidate whose sky/dark σ exceeds 0.10 is visually ruined for GALAXIES,
@@ -2367,6 +2603,70 @@ def _object_type_from_name(target: str) -> str:
     return "unknown"
 
 
+def _resolve_object_classification(
+    target: str, folio: dict | None
+) -> tuple[str, str, float]:
+    """Resolve type provenance with existing precedence.
+
+    Strength is an ordinal policy weight, not a calibrated probability.
+    """
+    resolved = _object_type_from_name(target)
+    source = "name_heuristic" if resolved != "unknown" else "fallback"
+    strength = 0.4 if source == "name_heuristic" else 0.0
+    db_type = _object_type_from_db(target)
+    if db_type:
+        if db_type != resolved:
+            log.info(f"[autoprocess] {target}: object_type override "
+                     f"{resolved!r} → {db_type!r} (from DB targets.type)")
+        resolved, source, strength = db_type, "db", 0.8
+    folio_type = (folio or {}).get("type") or (folio or {}).get("object_type")
+    if folio_type:
+        if folio_type != resolved:
+            log.info(f"[autoprocess] {target}: object_type override "
+                     f"{resolved!r} → {folio_type!r} (from folio)")
+        resolved, source, strength = folio_type, "folio", 1.0
+    return resolved, source, strength
+
+
+def _apply_target_prior_params(params: dict, prior_decision: dict) -> dict:
+    """Apply only the explicit adapted prior delta to current physics params."""
+    if prior_decision.get("action") != "adapt":
+        return dict(params)
+    views = prior_decision.get("params", {})
+    prior_keys = set((views.get("prior") or {}).keys())
+    applied = views.get("applied") or {}
+    return {**params, **{key: applied[key] for key in prior_keys if key in applied}}
+
+
+def _apply_configured_target_prior(
+    params: dict, *, enabled: bool, step_name: str, dry_run: bool,
+    experiment_mode: bool, baseline_run: bool, target: str, object_type: str,
+    parameter_specs: dict, adaptive_run_id: str, input_fits: str | Path | None = None,
+) -> tuple[dict, dict | None]:
+    """The guarded auto-process seam for applying and recording a target prior."""
+    if not (enabled and step_name == "deconvolution" and not dry_run
+            and not experiment_mode and not baseline_run):
+        return dict(params), None
+    from nas_server.target_prior import build_current_context, derive_param_prior
+    from nas_server.database import log_adaptive_decisions
+    current_context = (build_current_context(target, object_type, input_fits)
+                       if input_fits is not None else {})
+    decision = derive_param_prior(target, step_name, object_type, parameter_specs,
+                                  current_context=current_context)
+    updated = _apply_target_prior_params(params, decision)
+    views = decision["params"]
+    evidence = decision["evidence"]
+    log_adaptive_decisions([{
+        "run_id": adaptive_run_id, "target_name": target,
+        "object_type": object_type, "phase": "linear",
+        "step_name": "deconvolution", "decision_type": "param_nudge",
+        "chosen_value": json.dumps({k: views[k] for k in ("baseline", "prior", "applied")}),
+        "physics_suggestion": json.dumps({k: v.get("default") for k, v in parameter_specs.items()}),
+        "rationale": f"{decision['action']}: {decision['reason']} experiment={evidence.get('experiment_run_id')}",
+    }])
+    return updated, decision
+
+
 def _data_integrity_flags(target: str, source_fits) -> list[dict]:
     """Detect provenance/pointing problems so a run isn't credited or blamed for them.
 
@@ -2588,6 +2888,34 @@ def _filter_label(fits_path) -> str:
     return f"{raw} (broadband)"
 
 
+def _build_valid_params(fn, params: dict) -> dict:
+    """Filter `params` down to what `fn` will actually accept as keyword
+    arguments -- except when `fn` declares `**kwargs`, in which case every
+    key passes through unfiltered.
+
+    A plain `k in inspect.signature(fn).parameters` check treats a
+    VAR_KEYWORD catch-all as ONE named entry (its own parameter name, e.g.
+    "_kwargs") rather than "accepts any key" -- so a real opt-in kwarg a
+    caller means to pass (e.g. sky_green_rebalance's own
+    allow_signal_green/signal_trigger/signal_amount) gets silently dropped
+    before the call, no error, no log. Found via a real M 42 post-mortem
+    (2026-09-04): auto_process correctly computed
+    params["allow_signal_green"] = True from the target's folio colour
+    prior, but sky_green_rebalance never received it -- its own do_signal
+    gate stayed False every time, and a real green-cast bug went unfixed
+    by a mechanism that was already built and already correctly gated for
+    it. `params` here is already scoped to the current step (rebuilt fresh
+    per step from step_def["parameters"], only conditionally extended
+    inside `if step_name == "...":` blocks for that exact step) -- passing
+    it through whole when `fn` accepts `**kwargs` cannot leak an unrelated
+    step's params."""
+    sig = inspect.signature(fn)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return dict(params)
+    sig_params = set(sig.parameters)
+    return {k: v for k, v in params.items() if k in sig_params}
+
+
 def auto_process(
     target: str,
     workflow: str = "seestar_broadband",
@@ -2636,6 +2964,7 @@ def auto_process(
 
     start_ts = time.time()
     started_at = _dt.datetime.utcnow().isoformat()
+    _processing_experiment_run_id: str | None = None
     _diag_mark = api_diagnostics.mark()  # baseline for this run's AI-call accounting
     _set_status(target, phase="starting", started_at=start_ts, workflow=workflow, dry_run=dry_run)
     clear_abort(target)  # drop any stale abort flag from a prior run
@@ -2799,16 +3128,12 @@ def auto_process(
     log.info(f"[autoprocess] {target}: stretch depth factor = {_run_depth:.2f} "
              f"(frames={latest.get('frame_count')})")
 
-    object_type = _object_type_from_name(target)
+    folio = _load_folio(target)
+    object_type, classification_source, classification_strength = (
+        _resolve_object_classification(target, folio)
+    )
     # DB catalog type beats the name heuristic (which collides on substrings like
     # 'm 10' ⊂ 'm 109'). Folio, if present, still wins below — it's hand-curated.
-    _db_type = _object_type_from_db(target)
-    if _db_type and _db_type != object_type:
-        log.info(f"[autoprocess] {target}: object_type override "
-                 f"{object_type!r} → {_db_type!r} (from DB targets.type)")
-        object_type = _db_type
-    obj_cfg = ontology["object_types"].get(object_type, ontology["object_types"]["unknown"])
-
     # ── Guard: refuse to run the linear pipeline on already-stretched input ──
     # A standard workflow expects a LINEAR stack and applies its own stretch. If the
     # source FITS is already non-linear (e.g. a branch snapshot fed in by mistake, or
@@ -2849,16 +3174,16 @@ def auto_process(
     if not dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
 
-    folio = _load_folio(target)
     if folio:
         # Override object_type from folio if available — more reliable than name matching
         # Folio uses key "type"; fall back to "object_type" for older folios
-        _folio_type = folio.get("type") or folio.get("object_type")
-        if _folio_type and _folio_type != object_type:
-            log.info(f"[autoprocess] {target}: object_type override "
-                     f"{object_type!r} → {_folio_type!r} (from folio)")
-            object_type = _folio_type
         log.info(f"[autoprocess] {target}: loaded reference folio — {folio.get('common_name', '')}")
+    # Resolve config only after the authoritative folio override. Computing it
+    # above leaves folio-only classifications paired with the heuristic/DB type's
+    # stale config even though the object_type string itself has changed.
+    obj_cfg = ontology["object_types"].get(
+        object_type, ontology["object_types"]["unknown"]
+    )
     # Per-target sky band for the folio-aware nebula stretch pick (workflow 1.8.0).
     _folio_band: tuple[float, float] | None = None
     if folio:
@@ -3051,7 +3376,7 @@ def auto_process(
                                               corrective_candidates=_corr_cands or None,
                                               measured_bg=_meas_bg)
                 if scores:
-                    model_tag = "claude-sonnet-4-6"
+                    model_tag = "claude-sonnet-5"
             except Exception as _fe:
                 log.warning(f"[autoprocess] {target}: final assess_stacked_image "
                             f"failed ({_fe}) — physics fallback")
@@ -3828,7 +4153,10 @@ def auto_process(
                 log.warning(f"[autoprocess] {target}: frame-fill detect failed: {_ffe}")
 
             # force_variant: workflow bypasses multi-variant experiment (e.g. quick_default)
-            forced_stretch_id = force_variants.get("stretch")
+            # Bypassed in experiment_mode — same [[feedback_experiment_mode]] rule as the
+            # generic force_variant gate below: a pinned stretch default must not pre-empt
+            # experiment mode's own comparison/manual-review pipeline.
+            forced_stretch_id = force_variants.get("stretch") if not experiment_mode else None
             if forced_stretch_id:
                 stretch_step_def = ontology["processing_steps"].get("stretch", {})
                 forced_variant = next(
@@ -4042,19 +4370,44 @@ def auto_process(
                 "mas":         _run_mas,
             }
             variants = []
+            _stretch_generated = []
             _stretch_scored: list = []   # per-candidate physics metrics for run.log
+            _stretch_input_path = current_path
             for sname, sfn in stretch_fns.items():
                 out = run_dir / f"auto_stretch_{sname}.fit"
                 jpg = run_dir / f"auto_stretch_{sname}_preview.jpg"
                 try:
                     r = sfn(current_path, out)
-                    if r.get("ok") and out.exists() and _generate_preview_nl(out, jpg):
-                        variants.append({"name": sname, "jpeg_path": str(jpg),
-                                         "command": f"{sname}_stretch"})
+                    if r.get("ok") and out.exists():
+                        _runtime_params = {
+                            "stat": {**_stat_p, "linked": _stat_linked},
+                            "stat_bright": {**_stat_p,
+                                "target_median": min(_stat_p["target_median"] * 1.4, 0.35),
+                                "linked": _stat_linked},
+                            "ghs": dict(_ghs_p),
+                            "ghs_strong": {**_ghs_p, "alpha_multiplier": 1.5},
+                            "ghs_soft": {**_ghs_p, "alpha_multiplier": 0.7},
+                            "stf": {"target_bg": 0.07 if object_type == "galaxy" else 0.09},
+                            "veralux": {"target_bg": _stat_p["target_median"], "color_grip": 1.0},
+                            "veralux_strong": {"target_bg": min(
+                                _stat_p["target_median"] * 1.3, 0.30), "color_grip": 1.0},
+                            "mas": {},
+                        }[sname]
+                        _generated = {"name": sname, "jpeg_path": str(jpg),
+                                      "fits": str(out),
+                                      "command": f"{sname}_stretch",
+                                      "engine": ("pixinsight" if sname == "mas"
+                                                 else "seti_astro"),
+                                      "params": _runtime_params}
+                        _stretch_generated.append(_generated)
+                        if _generate_preview_nl(out, jpg):
+                            variants.append(_generated)
                 except Exception as e:
                     log.warning(f"[autoprocess] stretch variant {sname} failed: {e}")
 
             winner_name = preferred
+            _experiment_winner_path = None
+            _stretch_selection_source = "configured_preferred"
             if len(variants) >= 2:
                 # Physics-default stretch pick (Claude pick_best_stretch removed).
                 # Don't blindly fall to `preferred` (=ghs for galaxies) — that
@@ -4072,6 +4425,7 @@ def auto_process(
                                                      scored_out=_stretch_scored)
                 if _phys_winner:
                     winner_name = _phys_winner
+                    _stretch_selection_source = "physics_pick"
                     log.info(f"[autoprocess] {target}: stretch winner={winner_name} "
                              "(physics pick)")
 
@@ -4089,6 +4443,18 @@ def auto_process(
             def _stretch_dead(_n: str) -> bool:
                 _m = _dark_sky_channel_meds(run_dir / f"auto_stretch_{_n}.fit")
                 return _m is not None and min(_m) < 0.01 and max(_m) > 0.04
+            _score_by_name = {item["name"]: item for item in _stretch_scored}
+            _stretch_rejections = {}
+            for _candidate in _stretch_generated:
+                _candidate_name = _candidate["name"]
+                _reasons = []
+                _dropped = _score_by_name.get(_candidate_name, {}).get("dropped")
+                if _dropped:
+                    _reasons.append(str(_dropped))
+                if _stretch_dead(_candidate_name):
+                    _reasons.append("black_channel_clipped")
+                if _reasons:
+                    _stretch_rejections[_candidate_name] = _reasons
             if _stretch_dead(winner_name):
                 _alive = [v["name"] for v in variants if not _stretch_dead(v["name"])]
                 if _alive:
@@ -4101,8 +4467,64 @@ def auto_process(
                                   f"killed a colour channel; using '{_alt}' to preserve "
                                   f"calibrated colour")
                     winner_name = _alt
+                    _stretch_selection_source = "dead_channel_guard"
 
-            winner_fits = run_dir / f"auto_stretch_{winner_name}.fit"
+            # Observe the already-made production choice.  This is deliberately
+            # fail-soft and runs before any downstream mutation of the winning FITS;
+            # evidence failure must never change which bytes continue through the run.
+            if _stretch_generated and winner_name:
+                try:
+                    from nas_server.stretch_shadow_evidence import (
+                        record_stretch_shadow_evidence as _record_stretch_shadow,
+                    )
+                    _record_stretch_shadow(
+                        input_path=_stretch_input_path, variants=_stretch_generated,
+                        winner_name=winner_name, scored=_stretch_scored,
+                        operation_key=f"stretch-shadow:{_adaptive_run_id}",
+                        pipeline_run_id=_adaptive_run_id,
+                        selection_source=_stretch_selection_source,
+                    )
+                except Exception as _shadow_error:
+                    log.warning(f"[autoprocess] {target}: stretch shadow evidence "
+                                f"recording failed: {_shadow_error}")
+
+            # Standard runs retain the physics pick's production authority.
+            # Experiment Mode additionally imports the already-generated bytes
+            # into the canonical experiment graph and conducts a prior/identity-
+            # blind comparison.  The shadow recommendation above remains useful
+            # counterfactual evidence but is never shown to either evaluator.
+            if experiment_mode and _stretch_generated:
+                from nas_server.exceptions import ProcessingAbortedError, ProcessingRetryError
+                _comparison_candidates = [{
+                    "id": item["name"], "description": "Stretch candidate",
+                    "engine": item["engine"], "fn": item["command"],
+                    "params": item["params"],
+                } for item in _stretch_generated]
+                try:
+                    _stretch_experiment = run_experiment(
+                        target=target, step="stretch", input_fits=str(_stretch_input_path),
+                        object_type=object_type, custom_variants=_comparison_candidates,
+                        proc_dir=run_dir, manual_review=manual_review,
+                        pipeline_run_id=_adaptive_run_id,
+                        experiment_question="Compare declared variants for stretch",
+                        precomputed_outputs={item["name"]: item["fits"]
+                                             for item in _stretch_generated},
+                        precomputed_rejections=_stretch_rejections,
+                        blind_comparison=True,
+                    )
+                except (ProcessingAbortedError, ProcessingRetryError):
+                    raise
+                if not _stretch_experiment.get("ok"):
+                    return {"ok": False, "target": target,
+                            "error": _stretch_experiment.get(
+                                "error", "stretch experiment comparison failed"),
+                            "steps_applied": steps_applied}
+                winner_name = _stretch_experiment["winner"]
+                _experiment_winner_path = Path(_stretch_experiment["output_path"])
+                _stretch_selection_source = "experiment_operational_selection"
+
+            winner_fits = (_experiment_winner_path or
+                           run_dir / f"auto_stretch_{winner_name}.fit")
             winner_jpg = run_dir / f"auto_stretch_{winner_name}_preview.jpg"
             if winner_fits.exists():
                 _wcs_src_prev = current_path  # audit F2
@@ -4287,40 +4709,17 @@ def auto_process(
             split_ok = False
             split_elapsed = 0
 
-            # Try PI StarXTerminator first — highest quality, generates stars natively
+            # Try StarXTerminator first (RunPod GPU, then local CLI fallback)
+            # — highest quality, generates stars natively.
             try:
-                from nas_server.pixinsight import run_postprocess as _pi_pp
-                # Scale timeout by image megapixels: StarXT on large (≥20MP) images
-                # can easily take 15–25 min. Formula: 900s baseline + 30s/MP above 10MP.
-                try:
-                    from astropy.io.fits import getheader as _gethdr
-                    _hdr = _gethdr(str(current_path), memmap=False)
-                    _mp = (_hdr.get("NAXIS1", 3000) * _hdr.get("NAXIS2", 3000)) / 1_000_000
-                except Exception:
-                    _mp = 10.0
-                _starxt_timeout = int(max(900, 900 + 30 * max(0, _mp - 10)))
-                log.info(f"[autoprocess] {target}: StarXT timeout={_starxt_timeout}s "
-                         f"(image {_mp:.1f}MP)")
-                pi_res = _pi_pp(
-                    target=target,
-                    input_fits=str(current_path),
-                    output_path=str(starless_out),
-                    starxt=True,
-                    starxt_stars_output=str(stars_out),
-                    # all other tools off — this pass is star-split only
-                    dbe=False, gradient_correction=False,
-                    color_calibration=False, bgn=False, spcc=False,
-                    mlt=False, tgv=False, bxt=False, nxt=False,
-                    ht=False, scnr=False, hdrmt=False, lhe=False,
-                    color_sat=False, curves=False, cms=False, morph=False,
-                    timeout=_starxt_timeout,
-                )
-                if pi_res.get("ok") and starless_out.exists() and stars_out.exists():
+                sxt_res = seti_astro.sxt_star_split(current_path, starless_out, stars_out)
+                if sxt_res.get("ok") and starless_out.exists() and stars_out.exists():
                     split_ok = True
-                    split_elapsed = pi_res.get("elapsed", 0)
+                    split_elapsed = sxt_res.get("elapsed_s", 0)
                     log.info(f"[autoprocess] {target}: StarXT split done in {split_elapsed:.0f}s")
                 else:
                     log.warning(f"[autoprocess] {target}: StarXT split failed — "
+                                f"{sxt_res.get('error')} "
                                 f"starless={starless_out.exists()} stars={stars_out.exists()}")
             except Exception as e:
                 log.warning(f"[autoprocess] {target}: StarXT split exception: {e}")
@@ -4694,8 +5093,16 @@ def auto_process(
             continue
 
         # ── force_variant: workflow specifies exact variant to use (e.g. quick_default) ──
+        # Bypassed in experiment_mode (matches the crop saved-crop-reuse precedent
+        # above) — a workflow-pinned default is exactly the kind of shortcut
+        # [[feedback_experiment_mode]] says experiment mode must never take: every
+        # eligible variant must get a fair trial, and manual review needs real
+        # candidates to compare. Without this, force_apply_steps like
+        # denoise_linear/star_sharpen/curves silently skip Experiment Mode's
+        # comparison and manual-review entirely (M51, 2026-09-12).
         forced_variant_id = force_variants.get(step_name)
-        if forced_variant_id and step_def.get("experiment_variants") and not dry_run:
+        if (forced_variant_id and step_def.get("experiment_variants") and not dry_run
+                and not experiment_mode):
             fv = next((v for v in step_def["experiment_variants"] if v["id"] == forced_variant_id), None)
             if fv:
                 # Apply adaptive param nudges from Phase 1 linear plan (physics-bounded).
@@ -4978,6 +5385,7 @@ def auto_process(
                         proc_dir=run_dir,
                         manual_review=manual_review,
                     )
+                    _processing_experiment_run_id = exp_result.get("experiment_run_id")
                     break
                 except ProcessingAbortedError:
                     log.warning(f"[autoprocess] {target}: processing aborted by user review")
@@ -4996,18 +5404,17 @@ def auto_process(
                 if winner_path.exists():
                     current_path = winner_path
 
-                    # ── Fine-tune experiment winner (seti_astro variants only) ──
+                    # ── Fine-tune experiment winner through its declared engine ──
                     _ew_id = exp_result["winner"]
                     _ew_def = next((v for v in step_def.get("experiment_variants", [])
                                     if v["id"] == _ew_id), None)
-                    if (_ew_def and _ew_def.get("engine", "seti_astro") == "seti_astro"
+                    _ew_engine = (_ew_def or {}).get("engine", "seti_astro")
+                    if (_ew_def and _ew_engine in ("seti_astro", "ml_tools_gpu")
                             and _ew_def.get("fn") and settings.get("anthropic_api_key")
                             and not dry_run):
-                        from nas_server import seti_astro as _ft_sa
                         from nas_server.claude_client import assess_quality_dimensions as _ft_aqd
-                        _ft_fn = getattr(_ft_sa, _ew_def["fn"], None)
+                        _ft_fn, _ft_sig, _ft_tunable = _fine_tune_runner(_ew_def)
                         if _ft_fn:
-                            _ft_sig = set(inspect.signature(_ft_fn).parameters)
                             _ft_dims = step_def.get("quality_impact", ["overall"])
                             _ew_prev = (run_dir / "experiments" / step_name
                                         / f"{_ew_id}_preview.jpg")
@@ -5021,6 +5428,8 @@ def auto_process(
                                                for d in _ft_dims)
                             _ft_init_sum = _ft_best_sum
                             _ft_best_path = current_path
+                            _ft_best_params = None
+                            _ft_best_iteration = None
                             _ft_params_cur = dict(_ew_def.get("params", {}))
                             _ft_exp_dir = run_dir / "experiments" / step_name
                             log.info(f"[autoprocess] {target}: {step_name} fine-tune "
@@ -5054,6 +5463,8 @@ def auto_process(
                                 if _es_sum > _ft_best_sum:
                                     _ft_best_sum = _es_sum
                                     _ft_best_path = _efit
+                                    _ft_best_params = dict(_evp)
+                                    _ft_best_iteration = _ei
                                 if _ft_delta >= improvement_threshold:
                                     break
                                 if _ei + 1 < max_iters and _ejpg.exists():
@@ -5066,7 +5477,7 @@ def auto_process(
                                     if not (_enrec and _enrec.get("parameters")):
                                         break
                                     _entp = {k: v for k, v in _enrec["parameters"].items()
-                                             if k in _ft_sig}
+                                             if k in _ft_tunable}
                                     if not _entp or all(
                                             _ft_params_cur.get(k) == v
                                             for k, v in _entp.items()):
@@ -5076,9 +5487,19 @@ def auto_process(
                                              f"fine-tune nudge → {_entp}")
                             if _ft_best_path != current_path:
                                 current_path = _ft_best_path
+                                _ft_provenance = _fine_tune_provenance(
+                                    variant=_ew_def,
+                                    effective_params=_ft_best_params,
+                                    retained_iteration=_ft_best_iteration,
+                                    artifact_path=_ft_best_path,
+                                )
                                 exp_result = {
                                     **exp_result,
-                                    "winner": f"{_ew_id}_tuned",
+                                    # `winner` remains the actual comparative winner.
+                                    # Tuning is a subsequent applied treatment, not a
+                                    # fabricated comparison outcome.
+                                    "applied_variant": _fine_tuned_winner_id(_ew_id),
+                                    "fine_tune": _ft_provenance,
                                     "reasoning": (
                                         exp_result.get("reasoning", "")
                                         + f" [fine-tuned +{_ft_best_sum - _ft_init_sum:.1f}]"
@@ -5095,11 +5516,13 @@ def auto_process(
                                 log.info(f"[autoprocess] {target}: {step_name} fine-tune "
                                          "no improvement")
 
-                    step_label = f"{step_name}[{exp_result['winner']}]"
+                    _applied_variant = exp_result.get("applied_variant",
+                                                      exp_result["winner"])
+                    step_label = f"{step_name}[{_applied_variant}]"
                     steps_applied.append(step_label)
                     log_processing_step(
                         target, step=step_label, engine="experiment",
-                        params=None,
+                        params=exp_result.get("fine_tune"),
                         scores_before=current_scores or None,
                         claude_reasoning=exp_result.get("reasoning"),
                         elapsed_s=round(exp_result.get("elapsed", 0), 1),
@@ -5263,6 +5686,23 @@ def auto_process(
                 fn = _fn_saved_crop
             else:
                 force_apply = True
+                if not _tcrop.crop_review_allowed_here():
+                    # Last line of defense (issue #397/crop-snapshot fix):
+                    # this process cannot open the interactive review --
+                    # either it's a headless remote worker whose own local
+                    # target_crops table doesn't have this target's saved
+                    # crop (dispatch() should have attached one, but didn't
+                    # here for some reason), or _saved_crop was genuinely
+                    # absent and this is a real first-time review that only
+                    # the VM can serve. Either way, silently opening
+                    # run_crop_review() here would hang forever waiting for
+                    # a review that will never come -- fail fast instead.
+                    _err = (f"{target}: crop review required but this process "
+                           "cannot open one (SEESTAR_HEADLESS_WORKER) -- "
+                           "crop review is VM-only")
+                    log.error(f"[autoprocess] {_err}")
+                    _set_status(target, phase="error", error=_err)
+                    return {"ok": False, "error": _err, "target": target}
                 from nas_server.crop_review import run_crop_review
                 from nas_server.exceptions import (
                     ProcessingAbortedError, ProcessingRetryError)
@@ -5477,6 +5917,16 @@ def auto_process(
                   if "default" in v}
         if phys_params:
             params.update(phys_params)
+        prior_decision = None
+        try:
+            params, prior_decision = _apply_configured_target_prior(
+                params, enabled=settings.get("target_priors_enabled", False),
+                step_name=step_name, dry_run=dry_run, experiment_mode=experiment_mode,
+                baseline_run=_baseline_run, target=target, object_type=object_type,
+                parameter_specs=step_def.get("parameters", {}),
+                adaptive_run_id=_adaptive_run_id, input_fits=current_path)
+        except Exception as exc:
+            log.warning(f"[autoprocess] {target}: target prior failed; using current params: {exc}")
         # Masked-core HDR: core mask onset is per-type — galaxy cores (M 31 bulge) sit
         # higher on the smoothed luminance than nebula cores (M 42 Trapezium region).
         # Thresholds validated visually on the 2026-06-10 prototype (0.72/0.80).
@@ -5510,15 +5960,17 @@ def auto_process(
             # catalog position (1.24.4 ladder was silently hintless without this)
             params["target"] = target
             params["spcc_lp_filter"] = _is_lp_run
-            # SSSC only on the narrowband-palette branch (1.16.0, Henry 2026-07-04):
-            # on the STANDARD chain, spectrally-faithful SSSC renders dual-band
-            # nebulae green-teal (M 42 bright-nebula G/R 1.21 vs PI CC's 0.71 — the
-            # approved 8.2 look). Henry picked "PI CC look, keep it simple": the
-            # standard chain goes straight to the PI SPCC/CC path; SSSC remains the
-            # calibrator for NBN/palette runs, which it was built for (1.9.0).
-            params["allow_sssc"] = bool(
-                _is_lp_run and ("narrowband_norm" in _force_steps
-                                or "nb_palette" in _force_steps))
+            # SSSC-first policy (2026-09-02, superseding the 1.16.0 LP-only gate):
+            # a real 17-target A/B (SSSC_vs_SPCC_CC_AB_Comparison_2026_09_02 phone
+            # note) found SSSC ties or beats PI's engine in 13/17 targets with zero
+            # catastrophic losses, across broadband, clusters, and LP alike -- the
+            # 1.16.0 restriction to LP+NBN/palette was correct evidence-wise for
+            # what was tested then (M 42 broadband) but not representative of the
+            # full picture. seti_astro.spcc() now defaults allow_sssc=True and
+            # handles the PI-second-opinion policy internally (Stage-2-triggered,
+            # not a blanket comparison) -- this flag stays available for explicit
+            # PI-only diagnostics, not as the normal per-run decision.
+            params["allow_sssc"] = True
             log.info(f"[autoprocess] {target}: LP filter detected={params['spcc_lp_filter']}"
                      f" allow_sssc={params['allow_sssc']}")
             # Hue-selective ColorSaturation preset: pass object-type aware preset to PI
@@ -5696,8 +6148,7 @@ def auto_process(
                              f"to {_chunk}px ({_n_tiles} tiles, image {_w2}×{_h2v})")
             except Exception:
                 pass
-        sig_params = set(inspect.signature(fn).parameters)
-        valid_params = {k: v for k, v in params.items() if k in sig_params}
+        valid_params = _build_valid_params(fn, params)
 
         quality_dims = step_def.get("quality_impact", [])
         # Track the best result seen across ALL attempts (not just stop-on-threshold)
@@ -5982,6 +6433,8 @@ def auto_process(
                 "preview_before": f"auto_preview_pre_{step_name}.jpg",
                 "preview_after": f"auto_preview_{step_name}_a0.jpg",
             }
+            if prior_decision is not None:
+                _std_rec["prior"] = prior_decision
             # color_calibration: surface which engine ran (sssc/spcc/pi_cc_fallback)
             # plus the SSSC solve diagnostics for validation review
             if step_name == "color_calibration" and isinstance(result, dict):
@@ -6145,6 +6598,19 @@ def auto_process(
         shutil.copy2(str(final_fits), str(proc_dir / _ext_fit))
         shutil.copy2(str(final_jpg), str(proc_dir / _ext_jpg))
 
+        # Passive grading-evidence observer only: this result has no read-back
+        # path into final_scores, notifications, retry behavior, or run success.
+        try:
+            from nas_server.quality_synthesis import record_synthesis_shadow_evidence
+            record_synthesis_shadow_evidence(final_fits, context={
+                "object_type": object_type,
+                "filter": _capture_filter,
+                "frame_fill": frame_fill_info.get("frame_fill"),
+            })
+        except Exception as _synthesis_err:
+            log.warning(f"[autoprocess] {target}: shadow quality synthesis failed: "
+                        f"{_synthesis_err}")
+
     log.info(f"[autoprocess] {target}: done in {elapsed:.0f}s — steps: {steps_applied}")
 
     if not dry_run:
@@ -6246,6 +6712,9 @@ def auto_process(
                 "target": target, "workflow": workflow,
                 "workflow_version": workflow_version(),
                 "object_type": object_type,
+                "classification_source": classification_source,
+                "classification_strength": classification_strength,
+                "experiment_run_id": _processing_experiment_run_id,
                 "started_at": started_at, "elapsed_s": round(elapsed, 1),
                 "steps_applied": steps_applied,
                 "initial_scores": initial_scores,
@@ -6276,6 +6745,12 @@ def auto_process(
                 output_path=output_path,
                 dry_run=dry_run,
                 api_diagnostics=api_diag,
+                workflow_version=workflow_version(),
+                object_type=object_type,
+                classification_source=classification_source,
+                classification_strength=classification_strength,
+                experiment_run_id=_processing_experiment_run_id,
+                run_dir=str(run_dir),
             )
             if not dry_run:
                 try:
@@ -6352,6 +6827,8 @@ def auto_process(
         "ok": True,
         "target": target,
         "workflow": workflow,
+        "object_type": object_type,
+        "object_config": obj_cfg,
         "steps_applied": steps_applied,
         "final_scores": current_scores,
         "output_path": output_path,

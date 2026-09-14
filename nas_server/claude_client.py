@@ -8,7 +8,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 
 SYSTEM_PROMPT = (
     "You are an expert astrophotographer evaluating stacked astronomical images. "
@@ -110,6 +110,16 @@ def _b64(path: str) -> str:
     except Exception:
         # PIL unavailable or failed — just truncate to avoid hard crash
         return base64.standard_b64encode(raw[:_MAX_IMAGE_BYTES]).decode()
+
+
+def _response_text(response) -> str:
+    """Return the first text block, skipping thinking/redacted-thinking blocks."""
+    for block in getattr(response, "content", ()):
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                return text
+    raise ValueError("no text block in response.content")
 
 
 def _parse_json(raw: str) -> dict:
@@ -408,7 +418,7 @@ def assess_stacked_image(
                 *_baseline_content(baseline_jpg),
             ]}],
         )
-        raw = response.content[0].text
+        raw = _response_text(response)
         scores = _parse_json(raw)
         scores["raw_response"] = raw
         scores["input_tokens"] = response.usage.input_tokens
@@ -539,7 +549,7 @@ def pick_best_stretch(target: str, variants: list[dict]) -> dict | None:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": content}],
         )
-        raw = response.content[0].text
+        raw = _response_text(response)
         result = _parse_json(raw)
         result["raw_response"] = raw
         result["input_tokens"] = response.usage.input_tokens
@@ -590,7 +600,7 @@ def recommend_processing_step(
         ld = learned_defaults
         prior_note = (
             f"\n\nLearned from {ld['sample_count']} past experiments "
-            f"(confidence {int(ld['confidence']*100)}%): "
+            f"(descriptive historical selection rate {int(ld['historical_selection_rate']*100)}%): "
             f"preferred params = {json.dumps(ld.get('params', {}))}\n"
             f"Win rates by variant: {json.dumps(ld.get('win_rates', {}))}\n"
             f"Use these as a starting point but adjust based on the image."
@@ -725,7 +735,7 @@ def recommend_processing_step(
                 *_baseline_content(baseline_jpg),
             ]}],
         )
-        raw = response.content[0].text
+        raw = _response_text(response)
         result = _parse_json(raw)
         result.setdefault("skip", False)
         result.setdefault("parameters", {})
@@ -851,7 +861,7 @@ def assess_quality_dimensions(
                 # across 20-30 calls/run for no measurable accuracy gain.
             ]}],
         )
-        raw = response.content[0].text
+        raw = _response_text(response)
         parsed = _parse_json(raw)
         scores = {d: parsed[d] for d in dimensions if d in parsed}
         log.info(f"[claude] {target} targeted [{', '.join(dimensions)}]: {scores} "
@@ -946,7 +956,7 @@ def generate_critical_eval(
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": content}],
         )
-        text = resp.content[0].text.strip()
+        text = _response_text(resp).strip()
         log.info(f"[claude] critical eval for {target}: "
                  f"{resp.usage.input_tokens}+{resp.usage.output_tokens} tok")
         return text
@@ -1016,7 +1026,7 @@ def write_story_entry(target: str, data: dict) -> str | None:
                     "2-4 sentences max. No fluff. Return only the paragraph text."),
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text.strip()
+        text = _response_text(response).strip()
         log.info(f"[claude] story entry for {target}: {len(text)} chars "
                  f"({response.usage.input_tokens}+{response.usage.output_tokens} tokens)")
         return text
@@ -1141,7 +1151,7 @@ def analyze_crop_structured(
                 ],
             }],
         )
-        raw = msg.content[0].text.strip()
+        raw = _response_text(msg).strip()
         result = _parse_json(raw)
         scores = result.get("scores", {})
         # Clamp all scores to [1.0, 10.0]
@@ -1212,15 +1222,15 @@ def analyze_crop(image_b64: str, question: str, crop_name: str = "",
             ],
         }],
     )
-    return msg.content[0].text.strip()
+    return _response_text(msg).strip()
 
 
 # ---------------------------------------------------------------------------
 # Adaptive workflow planning
 # ---------------------------------------------------------------------------
 
-MODEL_PLANNER_LINEAR = "claude-sonnet-4-6"    # physics confirmation + flag
-MODEL_PLANNER_NONLINEAR = "claude-opus-4-8"   # optional step selection — Opus 4.8 at $5/$25 is only 1.67x Sonnet
+MODEL_PLANNER_LINEAR = "claude-sonnet-5"      # physics confirmation + flag
+MODEL_PLANNER_NONLINEAR = "claude-opus-5"     # optional step selection — Opus 5 at $5/$25 is 2.5x Sonnet
 MODEL_EVAL = "claude-haiku-4-5-20251001"     # end-of-run critical eval — narrative prose, not grading; Haiku (~$0.005/run vs ~$0.038 Opus)
 
 
@@ -1375,7 +1385,7 @@ Return ONLY this JSON, nothing else:
                 }},
             ]}],
         )
-        raw = response.content[0].text
+        raw = _response_text(response)
         result = _parse_json(raw)
         result.setdefault("variant_fills", {})
         result.setdefault("param_nudges", {})
@@ -1534,7 +1544,7 @@ Return ONLY this JSON, nothing else:
                 }},
             ]}],
         )
-        raw = response.content[0].text
+        raw = _response_text(response)
         result = _parse_json(raw)
         result.setdefault("add_steps", [])
         result.setdefault("skip_steps", [])
@@ -1591,7 +1601,7 @@ def stretch_vision_tiebreak(jpg_a: str, name_a: str, jpg_b: str, name_b: str,
                 {"type": "image", "source": {"type": "base64",
                  "media_type": "image/jpeg", "data": _b64(jpg_b)}},
             ]}])
-        out = _parse_json(resp.content[0].text)
+        out = _parse_json(_response_text(resp))
         pick = str(out.get("winner", "")).strip().upper()
         if pick not in ("A", "B"):
             return None

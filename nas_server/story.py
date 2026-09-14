@@ -326,6 +326,10 @@ def _nav_html() -> str:
   <a href="/manual-processing">Manual</a>
   <a href="/calendar">Calendar</a>
   <a href="/queue-view">Queue</a>
+  <a href="/telemetry">Telemetry</a>
+  <a href="/runpod-status">RunPod</a>
+  <a href="/environment-health">Environment</a>
+  <a href="/experiment-runs">Experiments</a>
   <a href="/planner">Planner</a>
   <a href="/learning-view">Tools</a>
   <a href="/review">Reviews{badge}</a>

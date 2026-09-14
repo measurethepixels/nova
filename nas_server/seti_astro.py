@@ -17,6 +17,7 @@ import logging
 import subprocess
 import time
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
@@ -191,19 +192,34 @@ def generate_preview_image(img_path: str | Path, jpg_path: str | Path) -> bool:
 
 def generate_preview_stf(fits_path: str | Path, jpg_path: str | Path,
                           target_bg: float = 0.30, shadow_clip_k: float = 2.8,
-                          scnr: bool = False) -> bool:
+                          scnr: bool = False, linked: bool = False,
+                          rect_xywh: "tuple[int, int, int, int] | None" = None) -> bool:
     """
     Generate a JPEG preview using PixInsight's ScreenTransferFunction algorithm.
 
-    Applies per-channel (unlinked) STF to linear data so each channel is
-    independently shadow-clipped and midtone-stretched. Already-stretched
-    data (median > 0.15) is normalised and saved directly without re-stretching.
+    linked=False (default): per-channel STF — each channel is independently
+    shadow-clipped and midtone-stretched from its OWN statistics. Matches PI's
+    unlinked STF; fine for general step previews, but WRONG for color-balance
+    comparison (e.g. color_calibration candidates) because it re-normalises each
+    channel's black/white point independently, which hides the exact color
+    differences a color-calibration review needs to see.
+    linked=True: shadow-clip/midtone parameters are computed ONCE from all
+    channels pooled together, then that single transform is applied to every
+    channel — preserves relative channel ratios (real color) through the
+    stretch, matching PI's linked STF.
+    Already-stretched data (median > 0.15) is normalised and saved directly
+    without re-stretching (linked has no effect in that branch).
 
     target_bg:    desired output background level. 0.30 empirically matches PI's
                   STF with Target=0.25 + Boost background=2.00 on post-GraXpert data.
     shadow_clip_k: shadow clip in sigma units (mad * 1.4826). PI default = 2.8.
                    Lower values clip more shadows; higher values reveal faint detail.
     scnr:         apply average-neutral green suppression after stretch
+    rect_xywh:    optional (x, y, w, h) box, in the SAME raw (pre-flip, pre-
+                  resize) pixel space _load_fits()/auto_rect_50x50() use, drawn
+                  as an outline on the output preview — e.g. the background-
+                  equalization sample patch a color_calibration candidate used,
+                  so a reviewer can see exactly where it was taken from.
     """
     try:
         from astropy.io import fits as _fits
@@ -228,27 +244,41 @@ def generate_preview_stf(fits_path: str | Path, jpg_path: str | Path,
             lo = float(data.min())
             data = (data - lo) / max(hi - lo, 1e-9)
 
+        def _stf_params(ch: np.ndarray) -> tuple[float, float]:
+            m = float(np.median(ch))
+            mad = float(np.median(np.abs(ch - m))) * 1.4826
+            c0 = max(0.0, m - shadow_clip_k * mad)
+            denom0 = max(1.0 - c0, 1e-9)
+            m_shift = (m - c0) / denom0
+            mt_denom = m_shift * (2.0 * target_bg - 1.0) - target_bg
+            mt = float(np.clip(m_shift * (target_bg - 1.0) / mt_denom, 1e-6, 1.0 - 1e-6)) \
+                if abs(mt_denom) > 1e-9 and m_shift > 1e-9 else 0.5
+            return c0, mt
+
+        def _apply_stf(ch: np.ndarray, c0: float, mt: float) -> np.ndarray:
+            denom0 = max(1.0 - c0, 1e-9)
+            x = np.clip((ch - c0) / denom0, 0.0, 1.0)
+            denom_mtf = (2.0 * mt - 1.0) * x - mt
+            return np.where(np.abs(denom_mtf) > 1e-9, (mt - 1.0) * x / denom_mtf, 0.5)
+
         if float(np.median(data)) > 0.15:
             # Already stretched — just clip and save
             out = np.clip(data, 0.0, 1.0)
+        elif linked and data.ndim == 3:
+            # PI-linked STF: ONE shadow-clip/midtone transform derived from every
+            # channel pooled together, applied identically to R, G, B — preserves
+            # the relative channel ratios (real color) a color-calibration review
+            # needs to see, instead of each channel re-normalising itself.
+            c0, mt = _stf_params(data.ravel())
+            out = np.clip(_apply_stf(data, c0, mt), 0.0, 1.0)
         else:
             # Apply PI STF per-channel (unlinked)
             n_ch = data.shape[2] if data.ndim == 3 else 1
             out = np.zeros_like(data)
             for c in range(n_ch):
                 ch = data[..., c] if data.ndim == 3 else data
-                m = float(np.median(ch))
-                mad = float(np.median(np.abs(ch - m))) * 1.4826
-                c0 = max(0.0, m - shadow_clip_k * mad)
-                denom0 = max(1.0 - c0, 1e-9)
-                x = np.clip((ch - c0) / denom0, 0.0, 1.0)
-                m_shift = (m - c0) / denom0
-                mt_denom = m_shift * (2.0 * target_bg - 1.0) - target_bg
-                mt = float(np.clip(m_shift * (target_bg - 1.0) / mt_denom, 1e-6, 1.0 - 1e-6)) \
-                    if abs(mt_denom) > 1e-9 and m_shift > 1e-9 else 0.5
-                denom_mtf = (2.0 * mt - 1.0) * x - mt
-                stretched = np.where(np.abs(denom_mtf) > 1e-9,
-                                     (mt - 1.0) * x / denom_mtf, 0.5)
+                c0, mt = _stf_params(ch)
+                stretched = _apply_stf(ch, c0, mt)
                 if data.ndim == 3:
                     out[..., c] = np.clip(stretched, 0.0, 1.0)
                 else:
@@ -260,9 +290,34 @@ def generate_preview_stf(fits_path: str | Path, jpg_path: str | Path,
 
         # Cap at 1600 px wide for browser performance
         img = _Image.fromarray((out * 255).astype(np.uint8))
+
+        # rect_xywh is in _load_fits()/auto_rect_50x50()'s raw (pre-flip) pixel
+        # space — carry it through the same north-up flips already applied to
+        # `data` above (flipud/fliplr preserve shape, so the pre-flip h/w equal
+        # out.shape here) before any resize.
+        rect_draw = None
+        if rect_xywh is not None:
+            rx, ry, rw, rh = rect_xywh
+            h, w = out.shape[0], out.shape[1]
+            if _fv:
+                ry = h - ry - rh
+            if _fh:
+                rx = w - rx - rw
+            rect_draw = (rx, ry, rw, rh)
+
         if img.width > 1600:
             ratio = 1600 / img.width
             img = img.resize((1600, int(img.height * ratio)), _Image.LANCZOS)
+            if rect_draw is not None:
+                rx, ry, rw, rh = rect_draw
+                rect_draw = (rx * ratio, ry * ratio, rw * ratio, rh * ratio)
+
+        if rect_draw is not None:
+            from PIL import ImageDraw as _ImageDraw
+            rx, ry, rw, rh = rect_draw
+            _ImageDraw.Draw(img).rectangle(
+                [rx, ry, rx + rw, ry + rh], outline=(255, 90, 40), width=3)
+
         img.save(str(jpg_path), quality=90)
         return True
     except Exception as e:
@@ -795,7 +850,8 @@ def _signal_gr_ratio(path) -> float | None:
 
 def sssc_calibrate(input_path: str | Path, output_path: str | Path,
                    lp: bool | None = None, max_stars: int = 500,
-                   radius_arcsec: float = 10.0, n_ctrl: int = 8) -> dict:
+                   radius_arcsec: float = 10.0, n_ctrl: int = 8,
+                   native_lp: bool = False) -> dict:
     """
     SASpro SSSC color calibration on a plate-solved linear RGB stack: solves
     the system response R(λ) from Gaia XP star photometry (Riello et al. 2021
@@ -808,6 +864,16 @@ def sssc_calibrate(input_path: str | Path, output_path: str | Path,
     the pipeline passes it explicitly. Solutions persist per session_id in
     gaia_xp_cache.sqlite next to the XP library — later runs with the same
     config seed the Stage-3 optimizer from the prior solution (self-improving).
+
+    native_lp=True (only meaningful when lp=True; 2026-09-04, issue #593
+    phase 2): use the real SeeStar S50 LP transmission curve (converted from
+    a PixInsight filters.xspd PAN entry, not a commercial-filter proxy like
+    L-eXtreme) instead of xp_stars.SSSC_CURVES_LP. Combined with the plain
+    broadband R/G/B Bayer curves via T_sys_c = T_base_c * LP -- the same
+    multiplicative combination SASpro's own SSSC GUI applies for its LP/Cut 1
+    slot (sssc.py fetch_stars). Gets its own session_id (base broadband
+    R/G/B + "ZWO SeeStar S50 LP" + "(None)"), so it never shares or seeds
+    from the L-eNhance/L-eXtreme sessions' cached responses.
     """
     import contextlib
     import io
@@ -830,9 +896,17 @@ def sssc_calibrate(input_path: str | Path, output_path: str | Path,
         if lp is None:
             filt = str(hdr.get("FILTER", "")).upper()
             lp = any(k in filt for k in ("LP", "DUAL", "NARROW", "NB"))
-        curves = xp_stars.SSSC_CURVES_LP if lp else xp_stars.SSSC_CURVES_BROADBAND
         wl_grid = _sssc._WL_GRID
-        T_R, T_G, T_B = xp_stars.load_throughput_curves(curves, wl_grid)
+        if lp and native_lp:
+            curves = xp_stars.SSSC_CURVES_BROADBAND
+            T_R, T_G, T_B = xp_stars.load_throughput_curves(curves, wl_grid)
+            LP = xp_stars.load_native_seestar_lp_curve(wl_grid)
+            T_R, T_G, T_B = T_R * LP, T_G * LP, T_B * LP
+            session_lp1, session_lp2 = xp_stars.NATIVE_LP_EXTNAME, "(None)"
+        else:
+            curves = xp_stars.SSSC_CURVES_LP if lp else xp_stars.SSSC_CURVES_BROADBAND
+            T_R, T_G, T_B = xp_stars.load_throughput_curves(curves, wl_grid)
+            session_lp1, session_lp2 = "(None)", "(None)"
 
         enriched = xp_stars.enrich_for_sssc(res["stars"], wl_grid, T_R, T_G, T_B)
         if len(enriched) < xp_stars.MIN_MATCHED_STARS:
@@ -843,7 +917,7 @@ def sssc_calibrate(input_path: str | Path, output_path: str | Path,
                     "elapsed_s": int(time.time() - t0)}
 
         session_id = _sssc.make_session_id(
-            curves[0], curves[1], curves[2], "(None)", "(None)",
+            curves[0], curves[1], curves[2], session_lp1, session_lp2,
             camera_label=SSSC_CAMERA_LABEL)
 
         cache = prior = None
@@ -902,7 +976,7 @@ def sssc_calibrate(input_path: str | Path, output_path: str | Path,
         elapsed = int(time.time() - t0)
         logger.info(f"[seti_astro] sssc_calibrate done in {elapsed}s "
                     f"(stage={sr.stage} stars={sr.n_stars} bv_span={bv_span} "
-                    f"rms={sr.residual_rms:.4f} lp={lp})")
+                    f"rms={sr.residual_rms:.4f} lp={lp} native_lp={native_lp and lp})")
         return {
             "ok": True,
             "output_path": str(output_path),
@@ -916,6 +990,7 @@ def sssc_calibrate(input_path: str | Path, output_path: str | Path,
             "gains": [round(float(g), 4) for g in sr.gains[:3]],
             "session_id": session_id,
             "lp": bool(lp),
+            "native_lp": bool(native_lp and lp),
             "curves": list(curves),
             "prior_seeded": prior is not None,
             "counts": res["counts"],
@@ -968,6 +1043,94 @@ def background_extract(input_path: str | Path, output_path: str | Path,
     except Exception as e:
         elapsed = int(time.time() - t0)
         logger.error(f"[seti_astro] background_extract exception: {e}")
+        return {"ok": False, "error": str(e), "elapsed_s": elapsed}
+
+
+def graxpert_denoise(
+    input_path: str | Path,
+    output_path: str | Path,
+    strength: float = 0.5,
+    batch_size: int = 4,
+    gpu: bool = True,
+    model_version: str = "3.0.2",
+) -> dict:
+    """Denoise a linear FITS with GraXpert's distinct denoise AI model.
+
+    Model provisioning is deliberately separate. This wrapper fails clearly
+    when the pinned model is missing rather than downloading mutable external
+    state during an unattended production run.
+    """
+    t0 = time.time()
+    try:
+        if not 0.0 <= strength <= 1.0:
+            return {"ok": False, "error": "GraXpert denoise strength must be in [0, 1]",
+                    "elapsed_s": 0}
+        if not 1 <= batch_size <= 32:
+            return {"ok": False, "error": "GraXpert denoise batch_size must be in [1, 32]",
+                    "elapsed_s": 0}
+
+        from nas_server.ml_capabilities import probe_graxpert  # noqa: PLC0415
+
+        capability = probe_graxpert(
+            GRAXPERT_BIN,
+            denoise_model_version=model_version,
+        )
+        if not capability["operations"]["denoise"]:
+            model = capability["models"]["denoise"]
+            return {
+                "ok": False,
+                "error": f"GraXpert denoise model {model_version} is not provisioned at "
+                         f"{model['path']}",
+                "elapsed_s": 0,
+            }
+
+        inp = Path(input_path)
+        out = Path(output_path)
+        output_base = out.with_suffix("")
+        produced = output_base.with_suffix(".fits")
+        # Clear both possible output paths before invoking GraXpert. GraXpert
+        # 3.0.2 has at least one CLI combination that can exit 0 without
+        # writing anything (see background_extract(), which avoids -output
+        # for the same reason) -- if a file from an earlier call is already
+        # sitting at `out` or `produced`, the post-run existence checks below
+        # would otherwise report that stale file as this run's own success.
+        out.unlink(missing_ok=True)
+        if produced != out:
+            produced.unlink(missing_ok=True)
+        args = [
+            GRAXPERT_BIN, str(inp),
+            "-cli",
+            "-cmd", "denoising",
+            "-output", str(output_base),
+            "-gpu", "true" if gpu else "false",
+            "-ai_version", model_version,
+            "-strength", str(strength),
+            "-batch_size", str(batch_size),
+        ]
+        rc, _stdout, stderr, elapsed = _run(args, timeout=3600)
+        if rc != 0:
+            return {"ok": False, "error": stderr[-500:] or f"GraXpert exited {rc}",
+                    "elapsed_s": elapsed}
+        if produced != out and produced.exists():
+            import shutil as _shutil
+            _shutil.move(str(produced), str(out))
+        if not out.exists():
+            return {"ok": False, "error": "GraXpert denoise produced no output file",
+                    "elapsed_s": elapsed}
+        _preserve_celestial_wcs(inp, out)  # GraXpert's CLI drops WCS, same as RC-Astro
+        logger.info(f"[seti_astro] graxpert_denoise done in {elapsed}s: {out}")
+        return {
+            "ok": True,
+            "output_path": str(out),
+            "elapsed_s": elapsed,
+            "model_version": model_version,
+            "strength": strength,
+            "batch_size": batch_size,
+            "gpu": gpu,
+        }
+    except Exception as e:
+        elapsed = int(time.time() - t0)
+        logger.error(f"[seti_astro] graxpert_denoise exception: {e}")
         return {"ok": False, "error": str(e), "elapsed_s": elapsed}
 
 
@@ -1732,24 +1895,55 @@ def scnr(input_path: str | Path, output_path: str | Path,
 # Background Neutralize — post-stretch colour pedestal removal
 # ---------------------------------------------------------------------------
 
+def _background_neutralize_vendor_mode(mode: str) -> str:
+    """Translate NOVA's two stable semantics to SASpro's current API.
+
+    SASpro 1.21 implements ``offset`` explicitly and routes every other value
+    through one scale/pivot branch. Keeping that catch-all detail here stops
+    ontology callers from depending on undocumented arbitrary strings.
+    """
+    if mode not in {"offset", "scale"}:
+        raise ValueError("background neutralize mode must be 'offset' or 'scale'")
+    return "offset" if mode == "offset" else "scale"
+
+
 def background_neutralize(input_path: str | Path, output_path: str | Path,
-                           mode: str = "pivot1") -> dict:
+                           mode: str = "scale",
+                           lo_sigma: float = 1.5, hi_sigma: float = 5.0,
+                           feather: float = 3.0) -> dict:
     """
     Post-stretch background neutralisation. Samples an auto-detected dark sky
-    patch and shifts channel offsets so the background is colour-neutral.
-    mode: 'pivot1' (shift), 'pivot2' (scale), 'pivot3' (subtract).
+    patch and corrects the background toward colour-neutral. ``offset`` uses
+    SASpro's shift branch; ``scale`` uses its scale/pivot branch.
+
+    Signal-preserving mask (2026-09-04, M 42 post-mortem): SASpro's
+    `background_neutralize_rgb` computes its per-channel correction from a
+    single sampled background patch but applies it to the WHOLE frame
+    uniformly. On a real M 42 run this correctly neutralised the sky (corner
+    G/R 0.673 -> 0.939) but dragged the bright nebula CORE -- whose true
+    colour is not neutral (dominant OIII lands in G) -- from a reasonable
+    G/R 0.914 up to a visibly green 1.133, an artifact nothing downstream
+    corrected. `sky_green_rebalance`'s own sky-weight mask construction
+    (sigma-clipped luminance -> smoothstep -> gaussian feather) is reused
+    here to blend SASpro's corrected result back toward the ORIGINAL pixels
+    in signal-bearing regions, so only genuine background gets the
+    correction. Verified on the same real M 42 files: masked correction
+    restores the core to G/R 0.918 (matching its pre-correction value)
+    while leaving the corner correction (0.941) essentially unchanged.
     """
     t0 = time.time()
     try:
         from setiastro.saspro.backgroundneutral import (
             background_neutralize_rgb, auto_rect_50x50)
+        from scipy import ndimage as _ndi  # noqa: PLC0415
         data, hdr = _load_fits(input_path)
         if data.ndim == 3 and data.shape[0] in (1, 3):
             data = np.moveaxis(data, 0, -1)
         if data.ndim != 3 or data.shape[2] != 3:
             raise ValueError("Background neutralize requires a 3-channel RGB image")
         rect = auto_rect_50x50(data)
-        result = background_neutralize_rgb(data, rect_xywh=rect, mode=mode)
+        vendor_mode = _background_neutralize_vendor_mode(mode)
+        result = background_neutralize_rgb(data, rect_xywh=rect, mode=vendor_mode)
         # Completeness pass (#9): drive the DARK-CORNER sky to neutral grey. The primary
         # pass above samples a single auto-detected 50x50 patch, which on frame-filling
         # targets (IC 1805 — the Heart fills the centre) can land on an already-neutral
@@ -1780,15 +1974,291 @@ def background_neutralize(input_path: str | Path, output_path: str | Path,
                             f"{[round(m, 4) for m in _med]} → {_ref:.4f})")
         except Exception as _nce:
             logger.debug(f"[seti_astro] background_neutralize completeness pass skipped: {_nce}")
+
+        # Signal-preserving blend: build the same sky-weight mask
+        # sky_green_rebalance uses (sigma-clipped luminance floor, smoothstep,
+        # feathered) and blend the corrected result back toward the original
+        # pixels wherever the mask says "signal", not "background".
+        try:
+            R, G, B = data[..., 0], data[..., 1], data[..., 2]
+            L = 0.2126 * R + 0.7152 * G + 0.0722 * B
+            _m = L.ravel().copy()
+            for _ in range(5):
+                _med, _sd = float(np.median(_m)), float(_m.std())
+                _m = _m[_m < _med + 2.5 * _sd]
+            sky_l, sig = float(np.median(_m)), float(_m.std())
+            lo, hi = sky_l + lo_sigma * sig, sky_l + hi_sigma * sig
+            M = np.clip((L - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+            M = M * M * (3.0 - 2.0 * M)  # smoothstep
+            M = _ndi.gaussian_filter(M, feather)
+            W = (1.0 - M).astype(np.float32)  # 1=background, 0=signal
+            result = W[..., None] * result + (1.0 - W[..., None]) * data
+            logger.info(f"[seti_astro] background_neutralize masked to background "
+                        f"pixels (coverage {100 * float(W.mean()):.1f}%)")
+        except Exception as _mke:
+            # Fail CLOSED: a mask-construction failure must never silently
+            # re-enable the whole-frame correction this mask exists to guard
+            # against — that unmasked path is the exact live M 42 green-cast
+            # mechanism this fix targets. Skip neutralization for this run
+            # (including the corner-cast completeness pass above, which also
+            # only landed on `result`) rather than falling back to it.
+            logger.warning(f"[seti_astro] background_neutralize signal-preserving mask "
+                           f"failed ({_mke}) — skipping neutralization (fail-closed, "
+                           f"NOT applying unmasked correction)")
+            result = data.copy()
+
         result = np.moveaxis(np.clip(result, 0.0, 1.0), -1, 0)
         _save_fits(result, hdr, output_path)
         elapsed = int(time.time() - t0)
         logger.info(f"[seti_astro] background_neutralize done in {elapsed}s: {output_path}")
-        return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed}
+        return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed,
+                "rect_xywh": list(rect)}
     except Exception as e:
         elapsed = int(time.time() - t0)
         logger.error(f"[seti_astro] background_neutralize exception: {e}")
         return {"ok": False, "error": str(e), "elapsed_s": elapsed}
+
+
+def background_neutralize_raw(input_path: str | Path, output_path: str | Path,
+                               mode: str = "scale") -> dict:
+    """
+    Linear-stage, UNMASKED background neutralization -- deliberately the
+    opposite design choice from background_neutralize() above. Calls the
+    same SASpro background_neutralize_rgb() with an auto-detected patch, but
+    applies its correction to the whole frame uniformly, with none of the
+    signal-preserving mask that function's post-stretch sibling needs.
+
+    Exists for #623 (NGC 7000, 2026-09-05): a whole-frame linear-stage color
+    defect that a signal-preserving mask can't reach, because the defect
+    spans nebula-covered pixels, not just literal background. The masked
+    wrapper's own M 42 post-mortem (2026-09-04) is why it carries the mask;
+    a re-test against M 42's real data on the current, correct native LP
+    curve found that corruption does not reproduce there, and a 67-target
+    survey found this unmasked version fixes real cases the masked one
+    cannot (NGC 7000, NGC 4244, NGC 4038 among them) -- but also that it is
+    not universally the better choice (masked wins ~36% of decisive cases
+    in that survey). Callers should not use this as a blind replacement for
+    background_neutralize() -- see _background_neutralize_race() below,
+    which runs both (plus a no-op baseline) and picks conservatively.
+    """
+    t0 = time.time()
+    try:
+        from setiastro.saspro.backgroundneutral import (
+            background_neutralize_rgb, auto_rect_50x50)
+        data, hdr = _load_fits(input_path)
+        if data.ndim == 3 and data.shape[0] in (1, 3):
+            data = np.moveaxis(data, 0, -1)
+        if data.ndim != 3 or data.shape[2] != 3:
+            raise ValueError("Background neutralize requires a 3-channel RGB image")
+        rect = auto_rect_50x50(data)
+        vendor_mode = _background_neutralize_vendor_mode(mode)
+        result = background_neutralize_rgb(data, rect_xywh=rect, mode=vendor_mode)
+        result = np.moveaxis(np.clip(result, 0.0, 1.0), -1, 0)
+        _save_fits(result, hdr, output_path)
+        elapsed = int(time.time() - t0)
+        logger.info(f"[seti_astro] background_neutralize_raw done in {elapsed}s: "
+                    f"{output_path} (rect={rect})")
+        return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed,
+                "rect_xywh": list(rect)}
+    except Exception as e:
+        elapsed = int(time.time() - t0)
+        logger.error(f"[seti_astro] background_neutralize_raw exception: {e}")
+        return {"ok": False, "error": str(e), "elapsed_s": elapsed}
+
+
+_RACE_PREFER_BASELINE_MAX_DIST = 0.15
+_RACE_PREFER_LESS_INVASIVE_MARGIN = 0.10
+
+
+def _background_neutralize_race(input_path: str | Path, output_path: str | Path,
+                                 lp: bool) -> dict:
+    """
+    Three-way candidate race for #623's linear-stage color defect: baseline
+    (no neutralization -- today's unmodified spcc() path), masked
+    (background_neutralize(), the existing post-stretch function run early
+    instead), and raw/unmasked (background_neutralize_raw() above) -- each
+    run through sssc_calibrate() independently and compared on its OWN
+    result, since a 67-target survey (2026-09-05/06) found the pre-SSSC
+    state cannot predict which candidate will win after the real SSSC pass.
+
+    Selection is deliberately conservative (Henry, 2026-09-06), not simply
+    "closest signal-region G/R to 1.0": that metric correctly caught NGC
+    7000's catastrophic failure, but chromatic neutrality is not the same
+    claim as astrophysical correctness -- a real nebula, reflection region,
+    or galaxy core can legitimately be non-neutral. Candidates must first
+    pass the same sanity gate spcc() already applies (reject a candidate
+    that moved sharply away from neutral); among survivors, prefer the
+    LEAST INVASIVE one when the difference is small: baseline outright if
+    it's already close to neutral, otherwise masked over unmasked within a
+    small margin, otherwise whichever survivor is actually closer to
+    neutral. These thresholds are a first, reasonable default, not
+    independently validated the way the underlying win/loss survey is --
+    all three candidates' diagnostics are recorded (not just the winner) so
+    real production runs can inform revisiting them.
+
+    Returns a dict shaped like sssc_calibrate()'s own return (ok, stage,
+    n_stars, residual_rms, gains, session_id, ...) for whichever candidate
+    won, so spcc()'s existing Stage-1/2/3 policy logic downstream of this
+    call needs no changes -- plus a "race" sub-dict with every candidate's
+    own before/after signal G/R, ok status, reason the winner was chosen,
+    and durable file paths. ok=False (no candidate survived the sanity
+    gate) tells spcc() to fall through to its existing PI-fallback path,
+    unchanged.
+
+    Validation-period requirement (Henry, 2026-09-06, condition 3 on #623):
+    ALL THREE candidates' real pixel outputs are kept, not just the winner's
+    scalar diagnostics -- so real production runs can be inspected side by
+    side later to learn whether baseline can ever safely be dropped. These
+    are named, non-hidden files next to output_path (not cleaned up here);
+    a retention/pruning policy is deliberately out of scope until the
+    validation period this exists for is actually over.
+    """
+    out_dir = Path(output_path).parent
+    stem = Path(output_path).stem
+    candidates: dict[str, dict] = {}
+
+    def _try(name: str, prepped_path: Path) -> None:
+        calibrated_path = out_dir / f"{stem}_race_{name}_calibrated.fit"
+        before = _signal_gr_ratio(prepped_path)
+        res = sssc_calibrate(prepped_path, calibrated_path, lp=lp, native_lp=True)
+        entry = {"prepped_path": prepped_path, "calibrated_path": calibrated_path,
+                  "before": before, "sssc": res}
+        if res.get("ok"):
+            after = _signal_gr_ratio(calibrated_path)
+            entry["after"] = after
+            entry["passes_gate"] = not (
+                before and after and abs(after - 1.0) > abs(before - 1.0) + 0.5 and after > 1.6)
+        else:
+            entry["after"] = None
+            entry["passes_gate"] = False
+        candidates[name] = entry
+
+    _try("baseline", Path(input_path))
+
+    masked_prepped = out_dir / f"{stem}_race_masked_prepped.fit"
+    if background_neutralize(input_path, masked_prepped).get("ok"):
+        _try("masked", masked_prepped)
+    else:
+        candidates["masked"] = {"sssc": {"ok": False, "error": "neutralize_prep_failed"},
+                                  "passes_gate": False, "after": None}
+
+    raw_prepped = out_dir / f"{stem}_race_raw_prepped.fit"
+    if background_neutralize_raw(input_path, raw_prepped).get("ok"):
+        _try("raw", raw_prepped)
+    else:
+        candidates["raw"] = {"sssc": {"ok": False, "error": "neutralize_prep_failed"},
+                               "passes_gate": False, "after": None}
+
+    survivors = {n: c for n, c in candidates.items() if c.get("passes_gate")}
+    diag = {n: {"ok": c["sssc"].get("ok"), "before": c.get("before"), "after": c.get("after"),
+                "passes_gate": c.get("passes_gate"),
+                "prepped_path": str(c["prepped_path"]) if c.get("prepped_path") else None,
+                "calibrated_path": str(c["calibrated_path"]) if c.get("calibrated_path") else None}
+            for n, c in candidates.items()}
+
+    def _dist(name: str) -> float | None:
+        after = candidates[name].get("after")
+        return None if after is None else abs(after - 1.0)
+
+    winner = None
+    reason = ""
+    if "baseline" in survivors and (_dist("baseline") or 0.0) <= _RACE_PREFER_BASELINE_MAX_DIST:
+        winner, reason = "baseline", "already near-neutral, least invasive"
+    elif "masked" in survivors and "raw" in survivors:
+        dm, dr = _dist("masked"), _dist("raw")
+        if dm is not None and dr is not None and abs(dm - dr) < _RACE_PREFER_LESS_INVASIVE_MARGIN:
+            winner, reason = "masked", f"within {_RACE_PREFER_LESS_INVASIVE_MARGIN} of raw, less invasive"
+        elif dm is not None and (dr is None or dm <= dr):
+            winner, reason = "masked", "closer to neutral than raw"
+        else:
+            winner, reason = "raw", "closer to neutral than masked"
+    elif "masked" in survivors:
+        winner, reason = "masked", "only neutralized survivor"
+    elif "raw" in survivors:
+        winner, reason = "raw", "only neutralized survivor"
+    elif "baseline" in survivors:
+        winner, reason = "baseline", "only survivor (neither neutralization passed the sanity gate)"
+
+    # Validation-period requirement (Henry, condition 3 on #623): every
+    # candidate's real prepped/calibrated FITS files are left on disk next
+    # to output_path (named f"{stem}_race_<name>_{prepped,calibrated}.fit"
+    # above), including the losers -- deliberately not cleaned up here, so
+    # a real run can be inspected side by side later. Only output_path
+    # itself is the pipeline's actual next-step input.
+
+    if winner is None:
+        logger.warning(f"[seti_astro] background_neutralize_race: no candidate survived "
+                        f"the sanity gate ({diag})")
+        return {"ok": False, "error": "race_no_survivor", "race": diag}
+
+    logger.info(f"[seti_astro] background_neutralize_race winner={winner} ({reason}) {diag}")
+    won = candidates[winner]
+    # Every candidate's SSSC call already wrote a real calibrated result to its
+    # own durable path -- copy the winner forward rather than re-running SSSC
+    # a second time, which would risk a different result off the
+    # self-improving session cache (sssc_calibrate()'s own docstring). The
+    # candidate's own file at calibrated_path is intentionally left in place
+    # (see validation-period note above), so this is a copy, not a move.
+    import shutil as _sh
+    _sh.copy2(str(won["calibrated_path"]), str(output_path))
+    result = dict(won["sssc"])
+    result["output_path"] = str(output_path)
+    result["race"] = {"winner": winner, "reason": reason, "candidates": diag}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# SSSC background-equalization race, exposed as reviewable candidates
+#
+# _background_neutralize_race() above already runs baseline/masked/raw and
+# silently picks one winner for the FORCED, non-experiment color_calibration
+# path. These three thin wrappers reuse the exact same primitives
+# (background_neutralize / background_neutralize_raw / sssc_calibrate) but
+# each returns its OWN result instead of racing to a winner, so Experiment
+# Mode / manual review can present them as real, separate color_calibration
+# candidates — including background_neutralize's/background_neutralize_raw's
+# auto-detected sample patch (rect_xywh) for generate_preview_stf() to draw,
+# per Henry's 2026-09-12 request to see where that sample was taken from.
+# ---------------------------------------------------------------------------
+
+def sssc_race_baseline(input_path: str | Path, output_path: str | Path,
+                        lp: bool = False) -> dict:
+    """SSSC with no background pre-equalization — the race's baseline candidate."""
+    return sssc_calibrate(input_path, output_path, lp=lp, native_lp=True)
+
+
+def sssc_race_masked(input_path: str | Path, output_path: str | Path,
+                      lp: bool = False) -> dict:
+    """SSSC after masked (signal-preserving) background equalization.
+
+    Returns rect_xywh — the auto-detected 50x50 sample patch
+    background_neutralize() equalized from — so the preview can show it.
+    """
+    out_dir = Path(output_path).parent
+    prepped = out_dir / f"{Path(output_path).stem}_masked_prepped.fit"
+    prep = background_neutralize(input_path, prepped)
+    if not prep.get("ok"):
+        return {"ok": False, "error": f"neutralize_prep_failed: {prep.get('error')}"}
+    result = sssc_calibrate(prepped, output_path, lp=lp, native_lp=True)
+    result["rect_xywh"] = prep.get("rect_xywh")
+    return result
+
+
+def sssc_race_raw(input_path: str | Path, output_path: str | Path,
+                   lp: bool = False) -> dict:
+    """SSSC after unmasked (whole-frame) background equalization.
+
+    Returns rect_xywh — the auto-detected 50x50 sample patch
+    background_neutralize_raw() equalized from — so the preview can show it.
+    """
+    out_dir = Path(output_path).parent
+    prepped = out_dir / f"{Path(output_path).stem}_raw_prepped.fit"
+    prep = background_neutralize_raw(input_path, prepped)
+    if not prep.get("ok"):
+        return {"ok": False, "error": f"neutralize_prep_failed: {prep.get('error')}"}
+    result = sssc_calibrate(prepped, output_path, lp=lp, native_lp=True)
+    result["rect_xywh"] = prep.get("rect_xywh")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2632,36 +3102,202 @@ def bxt_star_correct(input_path: str | Path, output_path: str | Path,
 
     Uses BXT's AI model with auto PSF detection. sharpen_stars=0, sharpen_nonstellar=0
     are set explicitly to suppress any enhancement — pure geometric correction only.
+
+    Runs on the RunPod GPU endpoint first (seconds), falls back to the local
+    RC-Astro CLI (CPU, slower but the same tool/output characteristics) if the
+    GPU path is unavailable or fails. See rcastro_gpu.py.
     """
-    from nas_server.pixinsight import run_postprocess   # noqa: PLC0415
-    t0 = time.time()
+    from nas_server.rcastro_gpu import run_rcastro   # noqa: PLC0415
+    result = run_rcastro(
+        "bxt", input_path, output_path,
+        args={"--correct-only": "", "--sharpen-stars": "0", "--sharpen-nonstellar": "0"},
+    )
+    if not result.get("ok"):
+        logger.warning(f"[seti_astro] bxt_star_correct failed: {result.get('error')}")
+    else:
+        _preserve_celestial_wcs(input_path, output_path)  # RC-Astro drops WCS
+        logger.info(f"[seti_astro] bxt_star_correct done in {result['elapsed_s']}s")
+    return result
+
+
+def _detect_and_fix_flip(input_path: str | Path, output_path: str | Path,
+                         label: str, margin: float = 0.1
+                         ) -> Literal["corrected", "no_flip", "untrusted"]:
+    """Detect and correct a vertical row-order flip in `output_path` relative
+    to `input_path`, IN PLACE. Used for both BXT (`bxt_deconvolve`) and NXT
+    (`denoise_nxt`) -- an earlier NXT-specific fix (#583) unconditionally
+    flipped every raw NXT output based on one same-day observation
+    characterized as "always flips, deterministic" -- real live evidence the
+    same day (2026-09-04, after #590's deploy-path fix let genuine live runs
+    finally execute) directly contradicted that: NXT's raw output was NOT
+    flipped relative to input on 3/3 fresh real calls, and the unconditional
+    flip had been actively introducing a flip where none existed. Detection,
+    not a blind always-flip, is the correct approach for either tool. BXT's
+    full-deconvolve mode (--sharpen-stars/--sharpen-nonstellar, used by
+    bxt_deconvolve) flips only SOMETIMES -- confirmed 2026-09-03 on real
+    same-day runs: M 66 (1568x1048), M 81 (1741x962), and M 42 (3861x2308)
+    all came back flipped (same-orientation corr ~0, flipped corr 0.85-0.99),
+    while M 57 (480x480, smaller and square) did not (same-orientation corr
+    0.93, flipped corr 0.51). Size/tiling-dependent is the working theory
+    (large images likely hit an internal tiling path in the vendor binary)
+    but isn't confirmed -- detect-and-correct per call is the robust
+    response to a condition we can observe but not fully explain.
+
+    This is also very likely why the deconvolution undershoot guard
+    (_bxt_undershoot_check) has been vetoing so often: comparing a
+    correctly-oriented input against a flipped output cell-by-cell produces
+    enormous spurious "holes" purely from misalignment, not genuine ringing
+    -- the vetoed blob sizes today (197-3345 cells) dwarf the guard's own
+    catastrophic calibration reference (86 cells, IC 1805 2026-07-07).
+
+    Detection: whole-frame correlation on the mean-of-channels image, same
+    orientation vs vertically flipped. Flips only when the flipped
+    correlation clearly wins (by `margin`), not on a marginal/ambiguous
+    signal -- real examples show a wide separation either way (same-cases:
+    0.93 vs 0.51; flipped-cases: ~0.0-0.01 vs 0.85-0.99), so a coin-flip
+    result should be treated as "leave it alone", not a forced guess.
+
+    Real live-run investigation (2026-09-03) found this silently did
+    nothing on the very first deployment despite working correctly when
+    re-run against the same on-disk files moments later: `output_path`'s
+    mtime exactly matched the GPU download's own "done" log line, with no
+    later write from this function -- a genuine write-then-immediate-read
+    race on the network-mounted (SMB/CIFS) NAS volume, most plausibly
+    surfacing as a transient shape/read inconsistency this function used
+    to treat as "nothing to fix" rather than "not ready yet". `input_path`
+    is always an older, already-settled file -- only `output_path` (the
+    just-written RC-Astro result) needs the retry.
+
+    A first fix (#586) retried on shape-match alone and was confirmed STILL
+    ineffective live (#588, 2026-09-03): M 66/M 81/M 42 all reproduced the
+    identical pre-fix veto/flip signature after #586 deployed, with none of
+    this function's three log lines firing -- it silently took the normal
+    "no flip found" path on stale/torn content that happened to already
+    report the right shape. The real fix for that is upstream (`rcastro_gpu.
+    run_rcastro_gpu`/`run_rcastro_local` now publish atomically -- download
+    or CLI-write to a unique temp sibling, then rename onto `output_path`,
+    so no name a concurrent reader can open ever shows a partial state).
+    The settle loop below is the defense-in-depth Henry asked for on top of
+    that: shape match alone is not proof of stability (a stale CIFS read can
+    report a plausible shape), and two reads returning identical bytes is
+    not proof either (a caching client can hand back the same stale block
+    twice) -- only two *consecutive* identical reads AND a correlation result
+    that actually looks like one of the two known-real patterns (same-
+    orientation ~0.93/0.51, flipped ~0.0-0.01/0.85-0.99) counts as trustworthy.
+    An implausible result (neither orientation correlates meaningfully) is
+    treated as "not trustworthy yet", not "no flip", and retries the whole
+    settle cycle once before giving up loudly.
+
+    Returns one of three OUTCOMES, not a bool -- Henry's explicit direction
+    on #588 is that an untrusted read must fail closed rather than be
+    indistinguishable from a genuine no-flip result to the caller:
+      - "corrected": a flip was detected and fixed in place.
+      - "no_flip": the output settled to a trustworthy read and is already
+        correctly oriented -- safe for the caller to use as-is.
+      - "untrusted": could not obtain a trustworthy read (never settled, or
+        settled but implausible in both orientations, or a read/parse
+        exception) -- the caller MUST NOT treat this the same as "no_flip";
+        `bxt_deconvolve` discards the output entirely on this outcome
+        rather than let a downstream quality guard evaluate an unverified
+        frame.
+    """
+    import time as _time
+    import numpy as _np
+    from astropy.io import fits as _fits
+
+    settle_attempts = 6
+    settle_interval_s = 0.3
+    min_plausible_corr = 0.2
+    settle_rounds = 2
+
     try:
-        result = run_postprocess(
-            target="bxt_star_correct",
-            input_fits=str(input_path),
-            output_path=str(output_path),
-            # Enable BXT in correct-only mode
-            bxt=True,
-            bxt_correct_only=True,
-            bxt_auto_psf=True,
-            bxt_stars=0.0,
-            bxt_nonstellar=0.0,
-            bxt_adjust_halos=0.0,
-            # Disable all other processing
-            gradient_correction=False, color_calibration=False, bgn=False,
-            spcc=False, mlt=False, tgv=False, nxt=False,
-            ht=False, scnr=False, cms=False,
+        a = _fits.getdata(str(input_path), memmap=False).astype(_np.float64)
+        for settle_round in range(settle_rounds):
+            b = None
+            prev: _np.ndarray | None = None
+            last_exc: Exception | None = None
+            for attempt in range(settle_attempts):
+                try:
+                    candidate = _fits.getdata(str(output_path), memmap=False).astype(_np.float64)
+                    if candidate.shape != a.shape:
+                        last_exc = ValueError(
+                            f"shape mismatch on attempt {attempt}: {candidate.shape} != {a.shape}"
+                        )
+                        prev = None
+                    elif prev is not None and _np.array_equal(candidate, prev):
+                        # Two CONSECUTIVE identical reads, not just one read
+                        # that happens to match shape -- a single read can't
+                        # distinguish "final" from "torn but shape-correct".
+                        b = candidate
+                        break
+                    else:
+                        prev = candidate
+                except Exception as exc:  # noqa: BLE001 -- retry, don't classify
+                    last_exc = exc
+                    prev = None
+                _time.sleep(settle_interval_s)
+            if b is None:
+                logger.warning(
+                    f"[seti_astro] {label}: output_path never settled to two consecutive "
+                    f"identical reads after {settle_attempts} attempts ({last_exc}) "
+                    f"— UNTRUSTED, caller must not use this output"
+                )
+                return "untrusted"
+
+            a2 = a.mean(axis=0) if a.ndim == 3 else a
+            b2 = b.mean(axis=0) if b.ndim == 3 else b
+            a2 = a2 - a2.mean()
+            b2 = b2 - b2.mean()
+            denom = (_np.linalg.norm(a2) * _np.linalg.norm(b2))
+            if denom == 0:
+                logger.warning(
+                    f"[seti_astro] {label}: input or settled output has zero variance "
+                    f"(degenerate data) — UNTRUSTED, caller must not use this output"
+                )
+                return "untrusted"
+            corr_same = float(_np.sum(a2 * b2) / denom)
+            b_flip = _np.flip(b2, axis=0)
+            denom_flip = (_np.linalg.norm(a2) * _np.linalg.norm(b_flip))
+            corr_flip = float(_np.sum(a2 * b_flip) / denom_flip) if denom_flip else 0.0
+
+            if max(corr_same, corr_flip) < min_plausible_corr:
+                # Byte-stable across two reads but neither orientation
+                # correlates meaningfully with the input -- not a real "no
+                # flip" result (both known-real cases have a clear winner);
+                # most likely a caching client handing back the same stale
+                # block on both reads. Retry the whole settle cycle once
+                # (forces fresh file handles) before giving up loudly.
+                logger.warning(
+                    f"[seti_astro] {label}: settled read is implausible "
+                    f"(same={corr_same:.3f}, flip={corr_flip:.3f}, neither "
+                    f"clears {min_plausible_corr}) on settle round "
+                    f"{settle_round + 1}/{settle_rounds} — "
+                    f"{'retrying' if settle_round < settle_rounds - 1 else 'giving up'}"
+                )
+                continue
+
+            if corr_flip > corr_same + margin:
+                with _fits.open(str(output_path), mode="update", memmap=False) as h:
+                    h[0].data = _np.flip(h[0].data, axis=-2)
+                    h.flush()
+                logger.warning(
+                    f"[seti_astro] {label}: detected and corrected a vertical "
+                    f"row-order flip (same-orientation corr={corr_same:.3f}, "
+                    f"flipped corr={corr_flip:.3f})"
+                )
+                return "corrected"
+            return "no_flip"
+
+        logger.warning(
+            f"[seti_astro] {label}: output never became trustworthy after "
+            f"{settle_rounds} full settle rounds — UNTRUSTED, caller must "
+            f"not use this output."
         )
-        elapsed = int(time.time() - t0)
-        if not result.get("ok"):
-            logger.warning(f"[seti_astro] bxt_star_correct: PI returned not-ok: {result.get('error')}")
-            return {"ok": False, "error": result.get("error", "BXT correct-only failed"), "elapsed_s": elapsed}
-        logger.info(f"[seti_astro] bxt_star_correct done in {elapsed}s")
-        return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed}
+        return "untrusted"
     except Exception as e:
-        elapsed = int(time.time() - t0)
-        logger.error(f"[seti_astro] bxt_star_correct exception: {e}")
-        return {"ok": False, "error": str(e), "elapsed_s": elapsed}
+        logger.warning(f"[seti_astro] {label}: flip detection failed ({e}) "
+                       f"— UNTRUSTED, caller must not use this output")
+        return "untrusted"
 
 
 def bxt_deconvolve(input_path: str | Path, output_path: str | Path,
@@ -2677,39 +3313,41 @@ def bxt_deconvolve(input_path: str | Path, output_path: str | Path,
     linear preview but rings stars into halos that turn catastrophic after stretch +
     star removal (NGC 6914).
 
-    Falls back to cc_sharpen_inprocess when PixInsight/BXT is unavailable or fails, so
-    a worker without PI still produces a sharpened result. Accepts the ontology's
-    stellar_amount/nonstellar_amount and maps them onto BXT's stars/nonstellar.
+    Runs on the RunPod GPU endpoint first (seconds), falls back to the local
+    RC-Astro CLI (CPU) if the GPU path is unavailable or fails, and falls back
+    to cc_sharpen_inprocess as the last resort so a worker with neither GPU
+    access nor a local rc-astro install still produces a sharpened result.
+    Accepts the ontology's stellar_amount/nonstellar_amount and maps them
+    onto BXT's stars/nonstellar.
     """
-    from nas_server.pixinsight import run_postprocess   # noqa: PLC0415
-    t0 = time.time()
+    from nas_server.rcastro_gpu import run_rcastro   # noqa: PLC0415
     if stellar_amount is not None:
         bxt_stars = float(stellar_amount)
     if nonstellar_amount is not None:
         bxt_nonstellar = float(nonstellar_amount)
+    args = {"--sharpen-stars": str(bxt_stars), "--sharpen-nonstellar": str(bxt_nonstellar)}
+    if not bxt_auto_psf:
+        args["--no-auto-nonstellar-psf"] = ""
+        args["--nonstellar-diameter"] = str(bxt_psf)
     try:
-        result = run_postprocess(
-            target="bxt_deconvolve",
-            input_fits=str(input_path),
-            output_path=str(output_path),
-            bxt=True,
-            bxt_correct_only=False,
-            bxt_auto_psf=bxt_auto_psf,
-            bxt_psf=bxt_psf,
-            bxt_stars=bxt_stars,
-            bxt_nonstellar=bxt_nonstellar,
-            bxt_adjust_halos=0.0,
-            gradient_correction=False, color_calibration=False, bgn=False,
-            spcc=False, mlt=False, tgv=False, nxt=False,
-            ht=False, scnr=False, cms=False,
-        )
-        elapsed = int(time.time() - t0)
+        result = run_rcastro("bxt", input_path, output_path, args=args)
         if result.get("ok") and Path(output_path).exists():
-            _preserve_celestial_wcs(input_path, output_path)  # PI drops WCS → preview flip
-            logger.info(f"[seti_astro] bxt_deconvolve done in {elapsed}s")
-            return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed}
-        logger.warning(f"[seti_astro] bxt_deconvolve PI not-ok "
-                       f"({result.get('error')}) — falling back to cc_sharpen_inprocess")
+            flip_outcome = _detect_and_fix_flip(input_path, output_path, "bxt_deconvolve")
+            if flip_outcome != "untrusted":
+                _preserve_celestial_wcs(input_path, output_path)  # RC-Astro drops WCS
+                logger.info(f"[seti_astro] bxt_deconvolve done in {result['elapsed_s']}s")
+                return result
+            # Fail closed (Henry's direction on #588): an output whose
+            # orientation could not be verified as trustworthy must never
+            # reach the downstream undershoot guard indistinguishable from a
+            # genuine no-flip result -- discard it and fall through to the
+            # same cc_sharpen_inprocess fallback already used when RC-Astro
+            # itself fails outright.
+            logger.warning(f"[seti_astro] bxt_deconvolve: output orientation unverifiable "
+                           f"— discarding this result, falling back to cc_sharpen_inprocess")
+        else:
+            logger.warning(f"[seti_astro] bxt_deconvolve not-ok "
+                           f"({result.get('error')}) — falling back to cc_sharpen_inprocess")
     except Exception as e:
         logger.warning(f"[seti_astro] bxt_deconvolve exception ({e}) — "
                        f"falling back to cc_sharpen_inprocess")
@@ -2717,6 +3355,127 @@ def bxt_deconvolve(input_path: str | Path, output_path: str | Path,
     _na = bxt_nonstellar if nonstellar_amount is None else float(nonstellar_amount)
     return cc_sharpen_inprocess(input_path, output_path,
                                 stellar_amount=_sa, nonstellar_amount=_na)
+
+
+def denoise_nxt(input_path: str | Path, output_path: str | Path,
+                nxt_denoise: float = 0.7, nxt_iterations: int = 2,
+                nxt_detail: float = 0.15, nxt_two_pass: bool = False,
+                **_kwargs) -> dict:
+    """
+    NoiseXTerminator denoise used by both the pre-stretch ``denoise_linear``
+    variants and the standard post-stretch ``noise_reduction`` step.  The
+    latter is deliberately a second NXT pass and is recorded under its own
+    nonlinear step name so the two operations remain distinguishable.
+
+    Runs on the RunPod GPU endpoint first, falls back to the local RC-Astro
+    CLI (CPU) if unavailable or it fails. No further fallback to Cosmic
+    Clarity here — a normal workflow that selected NXT should fail honestly
+    rather than silently substitute a different denoise engine's output.
+    Cosmic Clarity and other engines remain explicit Experiment Mode choices.
+
+    nxt_detail has no direct RC-Astro CLI equivalent (PI's NXT dialog and
+    RC-Astro's parameter set aren't 1:1) and is accepted but not mapped.
+    nxt_two_pass runs the tool twice in sequence at the same settings,
+    matching PI's own "run NXT twice" variant.
+
+    Orientation (2026-09-04 revision): earlier code (#583) unconditionally
+    flipped every raw NXT output, based on a single 2026-09-03 observation
+    characterized as "NXT always flips, deterministic every call". Real
+    live evidence the same day (#590's deploy-path fix finally letting
+    genuine live runs execute) directly contradicts that: calling RC-Astro
+    NXT fresh against real M 66/M 81/M 42 deconvolution outputs shows its
+    raw output is NOT flipped relative to input (same-orientation corr
+    0.986-0.999) -- the unconditional flip was actively introducing a flip
+    where none existed on 2 of 3 real pipeline runs that same day. NXT gets
+    the same detection-based treatment as BXT (`_detect_and_fix_flip`)
+    instead of a blind always-flip, both passes independently.
+    """
+    from nas_server.rcastro_gpu import run_rcastro   # noqa: PLC0415
+    args = {"--denoise": str(nxt_denoise), "--iterations": str(nxt_iterations)}
+    result = run_rcastro("nxt", input_path, output_path, args=args)
+    if result.get("ok"):
+        outcome = _detect_and_fix_flip(input_path, output_path, "denoise_nxt")
+        if outcome == "untrusted":
+            return {"ok": False,
+                   "error": "denoise_nxt: output orientation could not be verified as "
+                            "trustworthy -- no fallback engine for this step by design",
+                   "elapsed_s": result.get("elapsed_s", 0)}
+    if result.get("ok") and nxt_two_pass:
+        # Write the second pass to a scratch file in the same directory (so the
+        # final replace is an atomic same-filesystem rename) rather than feeding
+        # output_path back into itself -- a CLI/GPU tool that opens or truncates
+        # its own output before later failing would otherwise destroy the valid
+        # first-pass result while this code still reports it as "kept".
+        out = Path(output_path)
+        second_output = out.with_name(f"{out.stem}.nxt2pass_tmp{out.suffix}")
+        second = run_rcastro("nxt", output_path, second_output, args=args)
+        if not second.get("ok"):
+            logger.warning(f"[seti_astro] denoise_nxt two-pass second pass failed: "
+                           f"{second.get('error')} — keeping first-pass output")
+            second_output.unlink(missing_ok=True)
+        else:
+            second_outcome = _detect_and_fix_flip(output_path, second_output,
+                                                   "denoise_nxt second pass")
+            if second_outcome == "untrusted":
+                logger.warning("[seti_astro] denoise_nxt two-pass second pass orientation "
+                               "unverifiable — keeping first-pass output")
+                second_output.unlink(missing_ok=True)
+            else:
+                second_output.replace(out)
+                result = {**second, "output_path": str(out)}
+    if result.get("ok"):
+        _preserve_celestial_wcs(input_path, output_path)  # RC-Astro drops WCS
+        logger.info(f"[seti_astro] denoise_nxt done in {result['elapsed_s']}s")
+    else:
+        logger.warning(f"[seti_astro] denoise_nxt failed: {result.get('error')}")
+    return result
+
+
+def star_removal_starxt(input_path: str | Path, output_path: str | Path,
+                        **_kwargs) -> dict:
+    """
+    StarXTerminator star removal — single output (starless only, no stars
+    sidecar). The ontology's "pi_starxt" experiment variant for the
+    star_removal step (default engine is DarkStar/SASpro via
+    remove_stars_inprocess; this is the selectable alternative).
+
+    Runs on the RunPod GPU endpoint first, falls back to the local RC-Astro
+    CLI (CPU) if unavailable or it fails.
+    """
+    from nas_server.rcastro_gpu import run_rcastro   # noqa: PLC0415
+    result = run_rcastro("sxt", input_path, output_path, args={})
+    if result.get("ok"):
+        _preserve_celestial_wcs(input_path, output_path)  # RC-Astro drops WCS
+        logger.info(f"[seti_astro] star_removal_starxt done in {result['elapsed_s']}s")
+    else:
+        logger.warning(f"[seti_astro] star_removal_starxt failed: {result.get('error')}")
+    return result
+
+
+def sxt_star_split(input_path: str | Path, output_path: str | Path,
+                   stars_output_path: str | Path, **_kwargs) -> dict:
+    """
+    StarXTerminator star split — separates an image into a starless
+    background (output_path) and a stars-only sidecar (stars_output_path),
+    via RC-Astro's --stars flag. Used by auto_process.py's star_split step,
+    ahead of its existing DarkStar (SASpro) fallback if this fails.
+
+    Runs on the RunPod GPU endpoint first, falls back to the local RC-Astro
+    CLI (CPU) if unavailable or it fails.
+    """
+    from nas_server.rcastro_gpu import run_rcastro   # noqa: PLC0415
+    result = run_rcastro("sxt", input_path, output_path, args={"--stars": ""},
+                         stars_output_path=stars_output_path)
+    if result.get("ok") and not Path(stars_output_path).exists():
+        return {"ok": False, "error": "starless output written but stars sidecar missing",
+               "elapsed_s": result.get("elapsed_s", 0)}
+    if result.get("ok"):
+        _preserve_celestial_wcs(input_path, output_path)  # RC-Astro drops WCS
+        _preserve_celestial_wcs(input_path, stars_output_path)  # sidecar too
+        logger.info(f"[seti_astro] sxt_star_split done in {result['elapsed_s']}s")
+    else:
+        logger.warning(f"[seti_astro] sxt_star_split failed: {result.get('error')}")
+    return result
 
 
 def cc_denoise_inprocess(input_path: str | Path, output_path: str | Path,
@@ -3629,6 +4388,58 @@ def remove_stars_split(
         return {"ok": False, "error": str(e), "elapsed_s": elapsed}
 
 
+def _star_stretch_transfer(img: np.ndarray, factor: float) -> np.ndarray:
+    """SetiAstro Star Stretch v2.6 transfer used by the import fallback."""
+    f = 3.0 ** factor
+    return np.clip(img * f / ((f - 1.0) * img + 1.0), 0.0, 1.0)
+
+
+def color_sat_boost(
+    input_path: str | Path,
+    output_path: str | Path,
+    saturation_multiplier: float = 1.2,
+) -> dict:
+    """Apply SASpro's uniform RGB saturation multiplier to a whole frame.
+
+    ``saturation_multiplier`` uses SASpro semantics: 1.0 leaves chroma
+    unchanged.  It is deliberately distinct from PixInsight's
+    ``color_sat_boost`` HS-delta parameter.
+    """
+    t0 = time.time()
+    try:
+        from astropy.io import fits as _fits
+        from setiastro.saspro.star_stretch import _saturation_boost
+
+        with _fits.open(str(input_path)) as hdul:
+            hdr = hdul[0].header.copy()
+            data = hdul[0].data.astype(np.float32)
+        if data.ndim == 3 and data.shape[0] == 3:
+            image = np.moveaxis(data, 0, -1).astype(np.float32)
+        elif data.ndim == 3 and data.shape[-1] == 3:
+            image = data.astype(np.float32)
+        else:
+            raise ValueError("color_sat_boost requires a three-channel RGB FITS")
+
+        out = _saturation_boost(np.clip(image, 0.0, 1.0), float(saturation_multiplier))
+        _save_fits(np.moveaxis(out, -1, 0), hdr, output_path)
+        elapsed = int(time.time() - t0)
+        logger.info(
+            "[seti_astro] color_sat_boost %.2fx done in %ss: %s",
+            saturation_multiplier, elapsed, output_path,
+        )
+        return {
+            "ok": True,
+            "output_path": str(output_path),
+            "elapsed_s": elapsed,
+            "backend": "saspro",
+            "method": "uniform_saturation_multiplier",
+        }
+    except Exception as e:
+        elapsed = int(time.time() - t0)
+        logger.error(f"[seti_astro] color_sat_boost exception: {e}")
+        return {"ok": False, "error": str(e), "elapsed_s": elapsed}
+
+
 def star_stretch(
     input_path: str | Path,
     output_path: str | Path,
@@ -3654,8 +4465,7 @@ def star_stretch(
             from setiastro.saspro.legacy.numba_utils import applyPixelMath_numba
         except Exception:
             def applyPixelMath_numba(img: np.ndarray, factor: float) -> np.ndarray:
-                f = 3.0 ** factor
-                return np.clip(img * f / (img * f + 1.0), 0.0, 1.0)
+                return _star_stretch_transfer(img, factor)
 
         data, hdr = _load_fits(input_path)
         if data.ndim == 3 and data.shape[0] in (1, 3):
@@ -4139,64 +4949,101 @@ def _preserve_celestial_wcs(src_path: str | Path, dst_path: str | Path) -> bool:
         return False
 
 
+def _measure_calibration_residual(fits_path: str | Path, lp: bool) -> float | None:
+    """Same yardstick SSSC's own Stage fit uses, so a PI-calibrated result and
+    a stashed SSSC candidate can be compared on equal footing (2026-09-02
+    evidence, SSSC_vs_SPCC_CC_AB_Comparison note): gather_calibration_stars
+    -> enrich_for_sssc -> setiastro.saspro.sssc._solve_system_response. This
+    is the one proven measurement path from that evidence -- callers must
+    reuse it, not re-derive a residual a different way. Returns None (never
+    raises) when the image can't be measured -- callers must treat that as
+    "can't compare," not as a bad score."""
+    try:
+        from nas_server import xp_stars
+        from setiastro.saspro import sssc as _sssc_mod
+        wl_grid = _sssc_mod._WL_GRID
+        curves = xp_stars.SSSC_CURVES_LP if lp else xp_stars.SSSC_CURVES_BROADBAND
+        T_R, T_G, T_B = xp_stars.load_throughput_curves(curves, wl_grid)
+        gres = xp_stars.gather_calibration_stars(fits_path, max_n=300, radius_arcsec=10.0)
+        if not gres.get("ok") or not gres.get("stars"):
+            return None
+        enriched = xp_stars.enrich_for_sssc(gres["stars"], wl_grid, T_R, T_G, T_B)
+        if not enriched:
+            return None
+        sr = _sssc_mod._solve_system_response(
+            enriched, wl_grid, T_R, T_G, T_B,
+            session_id=f"spcc-stage2-compare-{Path(fits_path).stem}")
+        return float(sr.residual_rms)
+    except Exception as e:
+        logger.warning(f"[seti_astro] residual measurement failed for {fits_path} ({e})")
+        return None
+
+
 def spcc(
     input_path: str | Path,
     output_path: str | Path,
     spcc_lp_filter: bool = False,
     target: str = "",
-    allow_sssc: bool = False,
+    allow_sssc: bool = True,
     **_kwargs,
 ) -> dict:
-    """Run PixInsight SPCC with automatic fallback to ColorCalibration if SPCC fails.
+    """Color calibration policy (2026-09-02): SSSC first, PI (SPCC for
+    broadband, ColorCalibration for LP -- SPCC's broadband white reference is
+    wrong for dual-narrowband, never attempt it there) as a second opinion
+    only when SSSC's own solve lands at **Stage 2**. A real 17-target,
+    same-methodology evidence set (SSSC_vs_SPCC_CC_AB_Comparison_2026_09_02
+    phone note) found SSSC tied PI in every Stage-1/Stage-3 result with zero
+    exceptions (13/17 targets) -- no second opinion is worth spending there.
+    Every real divergence happened at Stage 2, and even there SSSC never
+    catastrophically lost (worst case ~5% worse; best cases 3-8x better).
 
-    SPCC can fail transiently (Gaia DB query bailing under VM load) even with a
-    valid WCS + catalog, so we retry once before degrading. When SPCC ultimately
-    fails we drop a `.spcc_failed` sentinel in the run dir — the stretch step reads
-    it and switches to an UNLINKED (per-channel) stretch to neutralise the green
-    cast that SPCC would otherwise have removed. A successful SPCC clears it.
+    Trigger is Stage, not a raw RMS threshold, deliberately: RMS tracks how
+    hard a target inherently is (some legitimately-agreeing targets sit at a
+    higher RMS than some Stage-2 divergences), Stage tracks whether SSSC had
+    enough calibration stars to trust -- that's what actually predicted
+    reliability in the evidence.
+
+    allow_sssc=False restores plain PI-only behavior (kept for explicit
+    PI-only diagnostics/tests, not the default policy).
     """
-    from nas_server.pixinsight import run_postprocess
-    from nas_server.config import settings as _cfg_settings
     t0 = time.time()
-
     _sentinel = Path(output_path).parent / ".spcc_failed"
 
-    # LP / dual-band data: SSSC only when the caller opts in (1.16.0). SSSC solves
-    # the system response from Gaia-XP star spectra — spectrally faithful, which is
-    # what the NBN/palette branch needs (workflow 1.9.0). But on the STANDARD chain
-    # that faithfulness renders dual-band nebulae green-teal (M 42 bright-nebula
-    # G/R 1.21 vs PI CC's 0.71 = the Henry-approved 8.2 look), so the standard
-    # chain passes allow_sssc=False and goes straight to the PI SPCC/CC path.
-    # Any SSSC failure still falls through to the legacy PI path unchanged.
-    # (Drizzle gate removed 2026-07-03: the 'drizzle photometry bias' was actually
-    # NEBULOSITY contamination of star backgrounds — fixed at the root by the
-    # per-star local-annulus photometry in xp_stars.measure_stars_rgb. Henry
-    # approved the fixed SSSC colour on drizzled M 42 side-by-side vs SPCC.)
-    if spcc_lp_filter and allow_sssc:
-        logger.info("[seti_astro] LP data — attempting SSSC calibration before SPCC")
-        _sres = sssc_calibrate(input_path, output_path, lp=True)
-        if _sres.get("ok"):
-            # SANITY GATE (2026-07-02, SH2-101 post-mortem): in dense fields the XP
-            # matcher can pair detected stars with WRONG catalog stars (the WCS axis/
-            # offset mismatch) yet still pass the RMS gate — SSSC then solves garbage
-            # gains (SH2-101: signal G/R 1.43→3.01, R halved → green nebula, final 3.5).
-            # A real calibration never pushes the signal colour ratio sharply AWAY from
-            # neutral. Measure signal-region G/R before/after; reject on a big move away.
-            try:
-                _rb = _signal_gr_ratio(input_path)
-                _ra = _signal_gr_ratio(output_path)
-                if _rb and _ra and abs(_ra - 1.0) > abs(_rb - 1.0) + 0.5 and _ra > 1.6:
-                    logger.warning(f"[seti_astro] SSSC sanity gate REJECT: signal G/R "
-                                   f"{_rb:.2f}→{_ra:.2f} (moved away from neutral) — "
-                                   "discarding SSSC, falling back to SPCC/CC")
-                    _sres = {"ok": False, "error": f"sanity_gate G/R {_rb:.2f}->{_ra:.2f}"}
-                    try:
-                        (Path(output_path).parent / ".sssc_applied").unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            except Exception as _sg:
-                logger.warning(f"[seti_astro] SSSC sanity gate check failed ({_sg}) — accepting")
-        if _sres.get("ok"):
+    if not allow_sssc:
+        return _run_pi_color_calibration(input_path, output_path, spcc_lp_filter, target, t0)
+
+    logger.info(f"[seti_astro] attempting SSSC first (lp={spcc_lp_filter})")
+    if _bin_settings.get("background_neutralize_race_enabled", False):
+        _sres = _background_neutralize_race(input_path, output_path, lp=spcc_lp_filter)
+    else:
+        _sres = sssc_calibrate(input_path, output_path, lp=spcc_lp_filter, native_lp=True)
+    if _sres.get("ok"):
+        # SANITY GATE (2026-07-02, SH2-101 post-mortem): in dense fields the XP
+        # matcher can pair detected stars with WRONG catalog stars (the WCS axis/
+        # offset mismatch) yet still pass the RMS gate — SSSC then solves garbage
+        # gains (SH2-101: signal G/R 1.43→3.01, R halved → green nebula, final 3.5).
+        # A real calibration never pushes the signal colour ratio sharply AWAY from
+        # neutral. Measure signal-region G/R before/after; reject on a big move away.
+        # Unchanged from the pre-2026-09-02 LP-only gate, now applied regardless of
+        # filter type since wrong-star-matching isn't an LP-specific failure mode.
+        try:
+            _rb = _signal_gr_ratio(input_path)
+            _ra = _signal_gr_ratio(output_path)
+            if _rb and _ra and abs(_ra - 1.0) > abs(_rb - 1.0) + 0.5 and _ra > 1.6:
+                logger.warning(f"[seti_astro] SSSC sanity gate REJECT: signal G/R "
+                               f"{_rb:.2f}→{_ra:.2f} (moved away from neutral) — "
+                               "discarding SSSC, falling back to PI")
+                _sres = {"ok": False, "error": f"sanity_gate G/R {_rb:.2f}->{_ra:.2f}"}
+                try:
+                    (Path(output_path).parent / ".sssc_applied").unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception as _sg:
+            logger.warning(f"[seti_astro] SSSC sanity gate check failed ({_sg}) — accepting")
+
+    if _sres.get("ok"):
+        stage = _sres.get("stage")
+        if stage in (1, 3):
             try:
                 _sentinel.unlink(missing_ok=True)
             except Exception:
@@ -4204,8 +5051,124 @@ def spcc(
             _preserve_celestial_wcs(input_path, output_path)
             _sres.update({"method": "sssc", "spcc_fell_back": False})
             return _sres
-        logger.warning(f"[seti_astro] SSSC failed ({_sres.get('error')}) — "
-                       "falling back to PI SPCC/CC path")
+
+        if stage == 2:
+            logger.info(f"[seti_astro] SSSC landed at Stage 2 (rms={_sres.get('residual_rms')}) "
+                        "— trying PI as a second opinion")
+            import shutil as _sh2
+            _sssc_copy = Path(output_path).parent / "_sssc_stage2_candidate.fit"
+            try:
+                _sh2.copy2(str(output_path), str(_sssc_copy))
+            except Exception as _ce:
+                logger.warning(f"[seti_astro] could not stash SSSC Stage-2 candidate ({_ce}) "
+                               "— applying it directly without a PI comparison")
+                try:
+                    _sentinel.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _preserve_celestial_wcs(input_path, output_path)
+                _sres.update({"method": "sssc_stage2_no_comparison", "spcc_fell_back": False})
+                return _sres
+
+            _sssc_rms = _measure_calibration_residual(_sssc_copy, spcc_lp_filter)
+            _pi_res = _run_pi_color_calibration(input_path, output_path, spcc_lp_filter, target, t0)
+            _pi_ok = bool(_pi_res.get("ok") and _pi_res.get("output_path"))
+
+            if not _pi_ok:
+                # PI unavailable/failed — apply the already sanity-gated SSSC
+                # result. Evidence: SSSC never catastrophically lost to PI in
+                # the 17-target sample (worst case ~5% worse), so this is a
+                # reasonable floor, not a guess — but flag it distinctly so a
+                # Stage-2-no-PI run is identifiable later if that assumption
+                # ever needs revisiting.
+                logger.info("[seti_astro] PI second opinion unavailable/failed "
+                            f"({_pi_res.get('error')}) — applying SSSC Stage-2 result")
+                try:
+                    _sh2.copy2(str(_sssc_copy), str(output_path))
+                except Exception as _re:
+                    logger.warning(f"[seti_astro] could not restore SSSC Stage-2 "
+                                   f"candidate after PI failure ({_re})")
+                    _sssc_copy.unlink(missing_ok=True)
+                    return _pi_res
+                _sssc_copy.unlink(missing_ok=True)
+                try:
+                    _sentinel.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _preserve_celestial_wcs(input_path, output_path)
+                elapsed = round(time.time() - t0, 1)
+                return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed,
+                        "method": "sssc_stage2_no_pi", "spcc_fell_back": False,
+                        "residual_rms": _sssc_rms, "stage": 2}
+
+            _pi_rms = _measure_calibration_residual(output_path, spcc_lp_filter)
+            _sssc_wins = _sssc_rms is not None and (_pi_rms is None or _sssc_rms <= _pi_rms)
+
+            if _sssc_wins:
+                logger.info(f"[seti_astro] Stage-2 comparison: SSSC rms={_sssc_rms} "
+                            f"<= PI rms={_pi_rms} — applying SSSC")
+                try:
+                    _sh2.copy2(str(_sssc_copy), str(output_path))
+                except Exception as _re:
+                    logger.warning(f"[seti_astro] could not restore winning SSSC "
+                                   f"Stage-2 candidate ({_re}) — keeping PI result instead")
+                    _sssc_copy.unlink(missing_ok=True)
+                    (Path(output_path).parent / ".sssc_applied").unlink(missing_ok=True)
+                    _pi_res.update({"stage2_comparison": {
+                        "sssc_rms": _sssc_rms, "pi_rms": _pi_rms,
+                        "winner": "pi_by_restore_failure"}})
+                    return _pi_res
+                _sssc_copy.unlink(missing_ok=True)
+                try:
+                    _sentinel.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                _preserve_celestial_wcs(input_path, output_path)
+                elapsed = round(time.time() - t0, 1)
+                return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed,
+                        "method": "sssc_stage2_won", "spcc_fell_back": False,
+                        "residual_rms": _sssc_rms, "stage": 2,
+                        "stage2_comparison": {"sssc_rms": _sssc_rms, "pi_rms": _pi_rms}}
+
+            # PI wins: output_path already holds PI's result. sssc_calibrate()
+            # unconditionally touched .sssc_applied during the Stage-2 attempt
+            # above (nas_server/seti_astro.py's own sssc_calibrate body) — a
+            # downstream SCNR decision (auto_process.py) reads that sentinel to
+            # tell whether SSSC calibrated the FINAL output. It didn't here, so
+            # the stale sentinel must be cleared or that decision is wrong.
+            logger.info(f"[seti_astro] Stage-2 comparison: PI rms={_pi_rms} "
+                        f"< SSSC rms={_sssc_rms} — keeping PI result")
+            _sssc_copy.unlink(missing_ok=True)
+            (Path(output_path).parent / ".sssc_applied").unlink(missing_ok=True)
+            _pi_res.update({"stage2_comparison": {"sssc_rms": _sssc_rms, "pi_rms": _pi_rms,
+                                                    "winner": "pi"}})
+            return _pi_res
+
+    logger.warning(f"[seti_astro] SSSC failed/rejected ({_sres.get('error')}) — "
+                   "falling back to PI SPCC/CC path")
+    return _run_pi_color_calibration(input_path, output_path, spcc_lp_filter, target, t0)
+
+
+def _run_pi_color_calibration(
+    input_path: str | Path,
+    output_path: str | Path,
+    spcc_lp_filter: bool,
+    target: str,
+    t0: float,
+) -> dict:
+    """Engine execution only: PI SPCC (broadband, retry-then-CC-fallback) or PI
+    ColorCalibration (LP, SPCC's broadband white reference is wrong for
+    dual-narrowband so it's never attempted there). Unchanged from the
+    pre-SSSC-first `spcc()` body -- moved into its own function so `spcc()`
+    itself can stay a policy layer (which engine(s) to run, which result to
+    keep) instead of growing engine internals into the policy. Every WCS-fix,
+    retry, and sentinel-flag behavior below has real historical-bug context
+    (see the inline comments) and is intentionally untouched by that split.
+    """
+    from nas_server.pixinsight import run_postprocess
+    from nas_server.config import settings as _cfg_settings
+
+    _sentinel = Path(output_path).parent / ".spcc_failed"
 
     # Allow worker settings to override the GAIA catalog path (e.g. laptop pointing at NAS)
     _gaia_db_path = _cfg_settings.get("gaia_db_path") or None

@@ -1,0 +1,13 @@
+[Unit]
+Description=Compute the SeeStar library's on-disk size for the home page stat card
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__REPO_ROOT__
+ExecStart=__VENV__/bin/python3.12 scripts/compute_archive_size.py
+# du over the SMB-mounted library takes tens of seconds under normal load;
+# generous headroom in case the NAS is busy with a stack/processing job.
+TimeoutStartSec=1800

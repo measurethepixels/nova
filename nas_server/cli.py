@@ -675,7 +675,7 @@ def cmd_learning(url, args):
             return
         print(f"  Learning priors for '{step}' ({n} experiments):")
         top = learned.get("variant")
-        conf = int(learned.get("confidence", 0) * 100)
+        conf = int(learned.get("historical_selection_rate", 0) * 100)
         if top:
             print(f"    Best variant: {top} ({conf}% win rate)")
         wr = priors.get("variant_win_rate", {})
@@ -696,7 +696,7 @@ def cmd_learning(url, args):
             ld = s.get("learned", {})
             n = ld.get("sample_count", 0)
             top = ld.get("variant", "?")
-            conf = int(ld.get("confidence", 0) * 100)
+            conf = int(ld.get("historical_selection_rate", 0) * 100)
             print(f"    {s['step']:<30} n={n:>4}  best={top} ({conf}%)")
 
 

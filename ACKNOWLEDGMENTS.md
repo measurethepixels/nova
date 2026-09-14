@@ -3,11 +3,14 @@
 NOVA doesn't do its own stacking, plate-solving, gradient removal, or most of
 its pixel-level processing. It orchestrates a small set of excellent
 astrophotography tools built by other people, and measures the results. None
-of the following projects are part of NOVA, none of their source is included
-in this repository, and each is distributed and licensed entirely on its own
-terms — you install and accept the license for each one yourself. This file
-exists because they deserve real credit, not just a line in a requirements
-table.
+of the following projects are part of NOVA, and each is distributed and
+licensed entirely on its own terms — you install and accept the license for
+each one yourself. This file exists because they deserve real credit, not
+just a line in a requirements table.
+
+With one noted exception (a redistributed PixInsight script, see the
+PixInsight section below), none of these projects' source is included in
+this repository.
 
 ## Siril
 
@@ -46,10 +49,24 @@ NOVA's free core.
 
 - **License:** proprietary, commercial EULA — see
   [pixinsight.com/license/pixinsight/EULA_en_US.html](https://pixinsight.com/license/pixinsight/EULA_en_US.html)
-- **How NOVA uses it:** NOVA generates PJSR (JavaScript) scripts and runs them
-  through PixInsight's own scripting engine — the documented, sanctioned
-  mechanism PixInsight provides for building external tools. NOVA does not
-  modify, reverse-engineer, or redistribute PixInsight itself.
+- **How NOVA uses it:** most PJSR (JavaScript) scripts NOVA runs through
+  PixInsight's own scripting engine are NOVA's own — the documented,
+  sanctioned mechanism PixInsight provides for building external tools. NOVA
+  does not modify, reverse-engineer, or redistribute the PixInsight
+  application itself.
+- **Redistributed PixInsight script (exception):** `nas_server/imageSolver_headless.js`
+  is a modified copy of PixInsight's own standard `ImageSolver.js` script
+  (with its `ImageSolverDialog` UI class stripped so it runs in headless
+  automation mode); a companion catalogs file,
+  `nas_server/astro_catalogs_headless.jsh` (a similarly stripped copy of
+  `AstronomicalCatalogs.jsh`), is tracked in this repository but not part of
+  the public export. Both originals are Copyright (C) 2012-2024 Andrés del
+  Pozo and Copyright (C) 2019-2024 Juan Conejero (PixInsight PTeam),
+  distributed by Pleiades Astrophoto under a permissive BSD-2-Clause-style
+  redistribution license embedded in each file's header (redistribution in
+  source or binary form is permitted provided the copyright notice and
+  disclaimer are retained; the license text is reproduced verbatim at the
+  top of both files). NOVA's copies retain that notice unmodified.
 
 ## Seti Astro Suite Pro (SASpro)
 
@@ -72,11 +89,14 @@ denoise, and several other operations NOVA's `seti_astro.py` calls directly.
 ## A note on integration style
 
 Three of these tools (Siril, ASTAP, GraXpert) are driven as external
-processes over their own CLI/script interfaces. PixInsight is driven through
-its own documented scripting engine. SASpro is used as an installed Python
-library, imported directly. In every case, the tool is a separate,
-independently obtained, independently licensed piece of software — nothing
-here vendors or redistributes another project's source code.
+processes over their own CLI/script interfaces. Most of NOVA's PixInsight
+integration is driven through its own documented scripting engine using
+NOVA-authored scripts, with one exception noted above (a redistributed,
+headless-adapted copy of PixInsight's own `ImageSolver.js`, under its own
+permissive terms). SASpro is used as an installed Python library, imported
+directly. Each tool is a separate, independently obtained, independently
+licensed piece of software; aside from that one noted PixInsight script,
+nothing here vendors or redistributes another project's source code.
 
 If you maintain one of these projects and think anything above should be
 described differently, please open an issue.

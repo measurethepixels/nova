@@ -497,8 +497,10 @@ STEP_DOCS = {
         "example": "nr",
         "what": "A second, post-stretch noise pass for residual grain the stretch "
                 "amplified that linear denoise couldn't pre-empt.",
-        "how": "NXT or Cosmic Clarity again, but gentler — the stretch has changed the "
-               "noise statistics, so this is touch-up, not the main event.",
+        "how": "A second, conservative <b>NoiseXTerminator (NXT)</b> pass. It uses the "
+               "remote RC-Astro GPU when enabled and the local RC-Astro CLI otherwise. "
+               "Cosmic Clarity and other denoisers remain explicit Experiment Mode "
+               "comparisons rather than production fallbacks.",
         "good": "Cleans up the last of the background grain without flattening the "
                 "detail the previous steps worked to reveal.",
         "wrong": "Easy to over-apply here because grain is most visible post-stretch — "

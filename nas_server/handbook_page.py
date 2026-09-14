@@ -5,7 +5,12 @@ from __future__ import annotations
 import html
 from collections.abc import Callable, Iterable
 
-from nas_server.handbook_contract import HandbookArticle, ProcessFamily, process_family_ids
+from nas_server.handbook_contract import (
+    ConceptArticle,
+    HandbookArticle,
+    ProcessFamily,
+    process_family_ids,
+)
 from nas_server.workflow_docs import (
     COMPARISON_SLIDER_CSS,
     COMPARISON_SLIDER_JS,
@@ -17,6 +22,66 @@ from nas_server.workflow_docs import (
 _TOOL_LABELS = {
     "nova": "NOVA", "pixinsight": "PixInsight", "siril": "Siril", "saspro": "SASpro",
 }
+
+_PROCESS_LABELS = {
+    ProcessFamily.SUBFRAME_INSPECTION: "Subframe Inspection, Scoring, and Culling",
+    ProcessFamily.REGISTRATION_ALIGNMENT: "Registration, Alignment, Coverage, and Mosaics",
+    ProcessFamily.STACKING_INTEGRATION: "Stacking, Integration, Weighting, and Rejection",
+    ProcessFamily.CROP_FRAMING: "Crop and Framing",
+    ProcessFamily.DECONVOLUTION: "Deconvolution and Linear Sharpening",
+    ProcessFamily.DENOISE: "Linear Denoise",
+    ProcessFamily.LINEAR_STAR_SPLIT: "Linear Star Split, Star-Layer Stretch, and Recombination",
+    ProcessFamily.STARLESS_FINISHING: "Nonlinear Star Removal and Starless Finishing",
+    ProcessFamily.LOCAL_CONTRAST: "Local Contrast Enhancement",
+    ProcessFamily.HDR_COMPRESSION: "HDR and Dynamic-Range Compression",
+    ProcessFamily.HDR_CORE_BLEND: "Bright-Core Selective HDR",
+    ProcessFamily.POST_STRETCH_DENOISE: "Post-Stretch Denoise",
+    ProcessFamily.DARK_STRUCTURE_ENHANCEMENT: "Dark-Structure Enhancement",
+    ProcessFamily.HALO_SUPPRESSION: "Bright-Star Halo Suppression",
+    ProcessFamily.NARROWBAND_DUAL_BAND_STRATEGY: "Narrowband and Dual-Band Color Strategy",
+}
+
+
+def _process_label(family: ProcessFamily) -> str:
+    return _PROCESS_LABELS.get(family, family.value.replace("_", " ").title())
+
+# Groups the flat process taxonomy into the lifecycle phases NOVA's own
+# "what NOVA can prove" diagram uses, so the index reads as phase tiles
+# (each internally still pipeline-ordered) instead of one long flat list.
+# Only the phases with real Handbook process-method content are tiled here;
+# Measure/Record/Review are separate site sections (scoring, /validation/,
+# manual review) with no ProcessFamily articles of their own yet.
+_PHASES = (
+    ("ingest", "Ingest", "Calibrate and inspect incoming subframes before they're trusted to stack."),
+    ("stack", "Stack", "Align frames to a common frame and integrate them into one image."),
+    ("process", "Process", "Refine the stacked image: color, structure, noise, and stretch."),
+)
+_PHASE_BY_FAMILY = {
+    ProcessFamily.PEDESTAL_REMOVAL: "ingest",
+    ProcessFamily.SUBFRAME_INSPECTION: "ingest",
+    ProcessFamily.REGISTRATION_ALIGNMENT: "stack",
+    ProcessFamily.STACKING_INTEGRATION: "stack",
+    # Crop operates on the already-stacked result (P08/#539), so it belongs with
+    # the post-stack "process" families even though it ships last among Group B's
+    # pre-stack families in pipeline order. Named explicitly rather than left to
+    # the "process" fallback -- this is the exact reconciliation #601 flagged as
+    # needed whenever Group B added a new ProcessFamily.
+    ProcessFamily.CROP_FRAMING: "process",
+    ProcessFamily.COSMETIC_CORRECTION: "process",
+    ProcessFamily.BACKGROUND_EXTRACTION: "process",
+    ProcessFamily.COLOR_CALIBRATION: "process",
+    ProcessFamily.DECONVOLUTION: "process",
+    ProcessFamily.DENOISE: "process",
+    ProcessFamily.STAR_CORRECTION: "process",
+    ProcessFamily.LINEAR_STAR_SPLIT: "process",
+    ProcessFamily.STRETCH: "process",
+    ProcessFamily.STARLESS_FINISHING: "process",
+}
+
+
+def _phase_id(family: ProcessFamily) -> str:
+    return _PHASE_BY_FAMILY.get(family, "process")
+
 
 PageShell = Callable[[str, str], str]
 
@@ -43,6 +108,7 @@ def _default_shell(title: str, body: str) -> str:
 def render_handbook_index(
     articles: Iterable[HandbookArticle],
     *,
+    concepts: Iterable[ConceptArticle] = (),
     page_shell: PageShell | None = None,
     handbook_base_url: str = "",
 ) -> str:
@@ -54,27 +120,96 @@ def render_handbook_index(
     # value, so the index reads in the sequence NOVA actually runs it.
     _pipeline_order = process_family_ids()
     values = sorted(articles, key=lambda article: _pipeline_order.index(article.process_family.value))
-    cards = "".join(
-        '<article class="hb-card">'
-        f'<h2><a href="{link_prefix}{html.escape(article.article_id)}.html">'
-        f'{html.escape(article.process_family.value.replace("_", " ").title())}</a></h2>'
-        f'<p>{html.escape(article.purpose)}</p>'
-        f'<span>revision {article.revision} · {len(article.tool_guidance)} tool paths</span>'
-        "</article>"
-        for article in values
+
+    def _card(article: HandbookArticle) -> str:
+        return (
+            '<article class="hb-card">'
+            f'<h2><a href="{link_prefix}{html.escape(article.article_id)}.html">'
+            f'{html.escape(_process_label(article.process_family))}</a></h2>'
+            f'<p>{html.escape(article.purpose)}</p>'
+            f'<span>revision {article.revision} · {len(article.tool_guidance)} tool paths</span>'
+            "</article>"
+        )
+
+    by_phase: dict[str, list[HandbookArticle]] = {phase_id: [] for phase_id, _, _ in _PHASES}
+    for article in values:
+        by_phase.setdefault(_phase_id(article.process_family), []).append(article)
+
+    phase_tiles = "".join(
+        '<section class="hb-phase">'
+        f'<div class="hb-phase-head"><span class="hb-phase-num">{position}</span>'
+        f'<h2>{html.escape(label)}</h2></div>'
+        f'<p>{html.escape(description)}</p>'
+        f'<div class="hb-grid">{"".join(_card(a) for a in by_phase.get(phase_id, ()))}</div>'
+        '</section>'
+        for position, (phase_id, label, description) in enumerate(_PHASES, start=1)
+        if by_phase.get(phase_id)
     )
-    if not cards:
-        cards = '<p class="empty">Handbook articles are being sourced and reviewed.</p>'
+    if not phase_tiles:
+        phase_tiles = '<p class="empty">Handbook articles are being sourced and reviewed.</p>'
     count = len(values)
     method_word = "method" if count == 1 else "methods"
+    concept_values = sorted(concepts, key=lambda concept: concept.title.casefold())
+    foundation_cards = "".join(
+        '<article class="hb-card hb-foundation-card">'
+        f'<h2><a href="{link_prefix}{html.escape(concept.concept_id)}.html">'
+        f'{html.escape(concept.title)}</a></h2>'
+        f'<p>{html.escape(concept.summary)}</p>'
+        f'<span>revision {concept.revision} · {len(concept.claims)} claims</span>'
+        '</article>'
+        for concept in concept_values
+    )
+    foundations = (
+        '<section class="hb-foundations"><h2>Foundations</h2>'
+        '<p>Methodology, measurement, evidence, and shared vocabulary.</p>'
+        f'<div class="hb-grid">{foundation_cards}</div></section>'
+        if foundation_cards else ""
+    )
     body = (
         '<header class="hb-head"><h1>NOVA Processing Handbook</h1>'
         f'<p>A growing process-first reference. {count} {method_word} published now, with '
         'explicit sources, equivalence, measurements, and validation history; additional '
         'chapters will appear when their evidence is ready.</p></header>'
-        f'<div class="hb-grid">{cards}</div>'
+        f'{foundations}<section><h2>Processing methods</h2>'
+        f'<div class="hb-phases">{phase_tiles}</div></section>'
     )
     return (page_shell or _default_shell)("NOVA Processing Handbook", body)
+
+
+def render_concept_article(
+    article: ConceptArticle,
+    *,
+    page_shell: PageShell | None = None,
+    handbook_base_url: str = "",
+) -> str:
+    """Render a methodology concept without pretending it is a process family."""
+
+    link_base = html.escape(handbook_base_url.strip("/"), quote=True)
+    index_url = f"{link_base}/index.html" if link_base else "index.html"
+    sections = "".join(
+        f'<section id="{html.escape(section.section_id, quote=True)}">'
+        f'<h2>{html.escape(section.title)}</h2>'
+        + "".join(f'<p>{html.escape(paragraph)}</p>' for paragraph in section.body)
+        + "</section>"
+        for section in article.sections
+    )
+    claims = "".join(
+        '<li class="hb-claim">'
+        f'<p>{html.escape(claim.text)}</p><span>{html.escape(claim.origin.value)}'
+        + (" · human-validated" if claim.human_validated else "")
+        + (" · recommended" if claim.recommended else "")
+        + (f' · {html.escape(claim.applicability_bound)}' if claim.applicability_bound else "")
+        + f' · {html.escape(claim.contradiction_status)}</span></li>'
+        for claim in article.claims
+    )
+    body = (
+        f'<p><a href="{index_url}">← Handbook</a></p>'
+        f'<header class="hb-head"><h1>{html.escape(article.title)}</h1>'
+        f'<p>{html.escape(article.subtitle)}</p><span>schema {article.schema_version} · '
+        f'revision {article.revision}</span></header><p>{html.escape(article.summary)}</p>'
+        f'{sections}<section><h2>Auditable claims</h2><ol>{claims}</ol></section>'
+    )
+    return (page_shell or _default_shell)(f"{article.title} — NOVA Handbook", body)
 
 
 def render_handbook_article(
@@ -173,7 +308,7 @@ def render_handbook_article(
         source_rows.append(
             f"<li>{title_html} — {html.escape(source.provenance.value)}</li>"
         )
-    title = article.process_family.value.replace("_", " ").title()
+    title = _process_label(article.process_family)
     if article.validation_event_ids:
         validation = (
             '<strong class="hb-validation hb-validated">Jeff-validated evidence:</strong>'
@@ -228,5 +363,14 @@ HANDBOOK_CSS = """
 .hb-controls{display:grid;grid-template-columns:minmax(10rem,1fr) 2fr;gap:.35rem 1rem}
 .hb-controls dt{font-weight:700}.hb-controls dd{margin:0}.empty{color:var(--text2,var(--mute))}
 .hb-validation{color:var(--gold,#d2a528)}.hb-validated{color:#43c97b}
+.hb-foundations{margin-bottom:2rem;padding-bottom:1rem;border-bottom:1px solid var(--border)}
+.hb-foundation-card{border-color:var(--gold,#d2a528)}.hb-claim span{color:var(--text2,var(--mute));font-size:.85rem}
+.hb-phases{display:flex;flex-direction:column;gap:1.75rem}
+.hb-phase{border:1px solid var(--border);border-radius:12px;padding:1.25rem;background:var(--bg1,transparent)}
+.hb-phase>p{margin:0 0 1rem;color:var(--text2,var(--mute))}
+.hb-phase-head{display:flex;align-items:center;gap:.6rem;margin-bottom:.15rem}
+.hb-phase-head h2{margin:0}
+.hb-phase-num{display:inline-flex;align-items:center;justify-content:center;width:1.8rem;height:1.8rem;
+  border-radius:50%;background:var(--gold,#d2a528);color:#111;font-weight:700;flex:none}
 @media(max-width:720px){.hb-two{grid-template-columns:1fr}.hb-matrix{font-size:.8rem}}
 """ + TAB_CSS

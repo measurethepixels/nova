@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats, mad_std
+from nas_server.image_analysis_runner import ImageAnalysisError, analyze
 
 log = logging.getLogger(__name__)
 
@@ -20,10 +21,9 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-
-def analyze(fits_path: str) -> dict:
+def _analyze_direct(fits_path: str) -> dict:
     """
-    Read a FITS file and return a comprehensive statistics dict.
+    Read and analyze a FITS file in the disposable worker process.
 
     Returns
     -------
@@ -53,7 +53,7 @@ def analyze(fits_path: str) -> dict:
     stats["stars"]       = _stars(stats["psf"])
     stats["spatial_freq"] = _spatial_freq(data)
 
-    log.info(f"[analyzer] {path.name}: "
+    log.info(f"[analyzer-worker] {path.name}: "
              f"SNR={stats['noise']['snr']:.1f} "
              f"gradient={stats['background']['gradient_severity']:.2f} "
              f"fwhm={stats['psf']['fwhm_median']:.2f}px "

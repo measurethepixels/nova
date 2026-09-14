@@ -289,14 +289,10 @@ def score_and_cull_frames(
     fwhm_mad = float(np.median(np.abs(fwhm_arr - fwhm_median))) * 1.4826 if len(fwhm_arr) else 0.0
 
     # Project what will be kept at the requested threshold (informational only)
-    sorted_by_score = sorted(scores, key=lambda s: s["composite"])
-    n_pct_reject = int(len(sorted_by_score) * bottom_pct)
-    pct_reject_ids = {id(s) for s in sorted_by_score[:n_pct_reject]}
-    projected_rej = sum(
-        1 for s in scores
-        if s["stars"] < min_stars or s["ecc"] > 0.66 or id(s) in pct_reject_ids
+    from nas_server.frame_quality import projected_cull_counts
+    projected_kept, projected_rej = projected_cull_counts(
+        scores, bottom_pct, min_stars, ecc_threshold=0.66,
     )
-    projected_kept = len(scores) - projected_rej
 
     telegram.send(
         f"✅ <b>Measurements done</b>: <code>{target_name}</code>\n"

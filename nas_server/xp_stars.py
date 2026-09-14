@@ -45,15 +45,24 @@ _SYNTH_MAG_ZP = 25.0            # arbitrary but FIXED zero point for synthetic B
 # curves get wrong (QE shape, band-width error) lands in the solved R(λ) and
 # per-channel gains — that is the whole point of SSSC.
 # SeeStar S50 = Sony IMX462 OSC behind a UV/IR cut. Its LP filter is the
-# internal dual-band (Ha 20nm + OIII 30nm); the closest shipped curve set is
-# Sony CMOS Bayer × Optolong L-eNhance (Ha 10nm + OIII/Hb ~24nm — the width
-# mismatch is constant over stellar continua, absorbed by the solved gains).
+# internal dual-band (Ha 20nm + OIII 30nm). Real M 42 A/B test (2026-09-04,
+# issue #593): manually ran SSSC through the SASpro GUI on the SAME
+# background-extraction-stage FITS file with each shipped dual-band curve set
+# in turn, linked Statistical Stretch after both. Optolong L-eNhance (Ha 10nm
+# + OIII/Hb ~24nm) produced a muted, brownish result -- and is what this
+# pipeline used to ship, matching the dominant-green production bug. Optolong
+# L-eXtreme (much narrower, ~3nm each line) produced a clean, correct warm
+# pink-red Orion Nebula with no cast. Neither curve is a literal bandwidth
+# match for the SeeStar's own (wider) filter -- L-eXtreme is empirically
+# validated on real data, not a theoretically closer physical fit; the reason
+# it outperforms L-eNhance here isn't fully understood. See #593 for the full
+# trace (both screen-captured comparison runs referenced there).
 SSSC_CURVES_BROADBAND = ("SONY_COLOR_SENSOR_R-UVIRCUT",
                          "SONY_COLOR_SENSOR_G-UVIRCUT",
                          "SONY_COLOR_SENSOR_B-UVIRCUT")
-SSSC_CURVES_LP = ("SONY_CMOS_R-UVIRCUT_/_OPT._L-ENHANCE",
-                  "SONY_CMOS_G-UVIRCUT_/_OPT._L-ENHANCE",
-                  "SONY_CMOS_B-UVIRCUT_/_OPT._L-ENHANCE")
+SSSC_CURVES_LP = ("SONY_CMOS_R-UVIRCUT_/_OPT._L-EXTREME",
+                  "SONY_CMOS_G-UVIRCUT_/_OPT._L-EXTREME",
+                  "SONY_CMOS_B-UVIRCUT_/_OPT._L-EXTREME")
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +134,32 @@ def load_throughput_curves(extnames, wl_grid_ang: np.ndarray) -> list[np.ndarray
             tp = d["THROUGHPUT"].astype(np.float64)
             out.append(np.interp(wl_grid_ang, wl, tp, left=0.0, right=0.0))
     return out
+
+
+# Native SeeStar S50 LP filter transmission, converted from the PAN entry
+# ("SeeStarS50-LP") in a real PixInsight filters.xspd, not a commercial-filter
+# proxy (2026-09-04, issue #593 phase 2). Combined with the plain broadband
+# SSSC_CURVES_BROADBAND R/G/B curves the SAME way SASpro's own SSSC GUI
+# combines a base filter with its LP/Cut 1 slot: T_sys_c(lambda) =
+# T_base_c(lambda) * LP(lambda) (sssc.py's fetch_stars, T_sys_R = T_R * LP).
+# Peak 0.989 @ 495nm, verified 2026-09-04 against the supplied file
+# (sha256 d9029fd6cc453bc23f8b0ebb1c208056f13c00c9d3a051683107205916c26c7d).
+NATIVE_LP_CURVE_PATH = Path(__file__).parent / "filter_curves" / "seestar_s50_lp_pixinsight.fits"
+NATIVE_LP_EXTNAME = "ZWO SeeStar S50 LP"
+
+
+def load_native_seestar_lp_curve(wl_grid_ang: np.ndarray) -> np.ndarray:
+    """Load the native SeeStar S50 LP transmission curve, interpolated onto
+    an Angstrom wavelength grid (zero outside the tabulated 400-700nm range,
+    matching SASpro's own LP1/LP2 interpolation: np.interp(..., left=0,
+    right=0))."""
+    from astropy.io import fits
+
+    with fits.open(str(NATIVE_LP_CURVE_PATH), memmap=False) as hdul:
+        d = hdul[NATIVE_LP_EXTNAME].data
+        wl = d["WAVELENGTH"].astype(np.float64)  # already Angstrom
+        tp = d["THROUGHPUT"].astype(np.float64)
+    return np.interp(wl_grid_ang, wl, tp, left=0.0, right=0.0)
 
 
 # ---------------------------------------------------------------------------

@@ -17,13 +17,23 @@ Step-specific metrics and auto-reject rules:
     REJECT: fwhm_after > fwhm_before × 1.15
   deconvolution:
     fwhm_before/after, fwhm_delta_pct, ringing_score
-    REJECT: fwhm_after > fwhm_before  OR  ringing_score > 1.35
+    REJECT: fwhm_after > fwhm_before  OR  ringing_score > 1.35 sigma
   background_extraction:
     gradient_severity_before/after, nebulosity_leakage_score
-    REJECT: nebulosity_leakage_score > 0.25
+    REJECT: removed signal is >1.5x stronger on the object than in the sky
   stretch:
     bg_level_before/after, p95_before/after, dynamic_range_ratio
     REJECT: clip_hi_pct > 0.05
+  color_calibration:
+    color_b_over_r_before/after, color_g_over_r_before/after
+    (B/R, G/R in the brightest 3% of pixels by luminance -- the target's own
+    rendered color, not sky neutrality). Informational only, no REJECT rule:
+    unlike denoise/deconv this step's job is to change color, so a shift
+    alone isn't a failure signal -- the value is making each candidate's own
+    ratio visible for comparison against its peers. Real motivating case:
+    M51 2026-09-12, an SSSC candidate crushed B/R to 0.56 while three
+    independent candidates all agreed at ~1.0, invisible in a stretched
+    preview but unmistakable as a number.
 
 analytically_failed: bool — top-level flag; set by auto-reject rules above.
 All metric values are JSON-serializable floats or None.
@@ -39,6 +49,7 @@ _STEP_DENOISE = {"denoise_linear", "denoise_nonlinear"}
 _STEP_DECONV  = {"deconvolution"}
 _STEP_BG      = {"background_extraction"}
 _STEP_STRETCH = {"stretch"}
+_STEP_COLOR   = {"color_calibration"}
 
 
 def _load_fits_mono(path: Path) -> np.ndarray:
@@ -49,6 +60,41 @@ def _load_fits_mono(path: Path) -> np.ndarray:
     if raw.ndim == 3:
         return np.ascontiguousarray(np.mean(np.transpose(raw, (1, 2, 0)), axis=2))
     return np.ascontiguousarray(raw)
+
+
+def _load_fits_color(path: Path) -> "np.ndarray | None":
+    """Load FITS as float32 (H,W,3); None if not a real 3-channel image."""
+    from astropy.io import fits as _fits
+    with _fits.open(str(path)) as hdul:
+        raw = hdul[0].data.astype(np.float32)
+    if raw.ndim == 3 and raw.shape[0] == 3:
+        return np.ascontiguousarray(np.transpose(raw, (1, 2, 0)))
+    if raw.ndim == 3 and raw.shape[2] == 3:
+        return np.ascontiguousarray(raw)
+    return None
+
+
+def _bright_region_color_ratios(data: np.ndarray, percentile: float = 97.0) -> "tuple[float, float] | tuple[None, None]":
+    """B/R and G/R in the brightest `100-percentile`% of pixels by luminance.
+
+    Real motivating case (M51, 2026-09-12): a color_calibration candidate
+    (SSSC) crushed B/R to 0.56 in the target's own bright structure while
+    three independent candidates (SPCC, PI, no-calibration control) all
+    agreed at ~1.0 -- invisible by eye in a stretched preview, unmistakable
+    as a number. Bright-region rather than whole-frame or sky-only, because
+    the failure mode this exists to catch is about the TARGET's own
+    rendered color, not sky neutrality (a separate, already-measured thing).
+    """
+    lum = 0.2126 * data[..., 0] + 0.7152 * data[..., 1] + 0.0722 * data[..., 2]
+    threshold = np.percentile(lum, percentile)
+    mask = lum >= threshold
+    if not mask.any():
+        return None, None
+    bright = data[mask]
+    r = float(bright[:, 0].mean())
+    if r <= 1e-9:
+        return None, None
+    return float(bright[:, 2].mean() / r), float(bright[:, 1].mean() / r)
 
 
 def _bg_stats(data: np.ndarray):
@@ -126,8 +172,14 @@ def _fwhm_snr(data: np.ndarray):
 
 def _ringing_score(data_sub: np.ndarray, sky_std: float) -> float | None:
     """
-    Ringing score: median ratio of local-ring brightness vs. star centre.
-    High values (> 1.35) indicate deconvolution overshoot / ringing artefacts.
+    Measure star-ring contrast in units of local sky noise.
+
+    Only high-SNR, point-like detections participate.  For each one, compare
+    the median of the expected ringing annulus with the immediately adjacent
+    outer annulus.  This deliberately does *not* divide by the star core:
+    doing so hides a perceptually obvious halo around a bright star and lets
+    marginal detections dominate the aggregate.  The median across the
+    brightest usable stars keeps one contaminated cutout from vetoing a frame.
     """
     try:
         import sep
@@ -143,13 +195,20 @@ def _ringing_score(data_sub: np.ndarray, sky_std: float) -> float | None:
         if len(objs) == 0:
             return None
         h, w = data_sub.shape
-        ratios = []
+        contrasts = []
         r_inner = max(1.5, median_fwhm * 1.5)
         r_outer = r_inner + max(2.0, median_fwhm * 0.8)
-        for obj in objs[:200]:
+        r_reference = r_outer + max(2.0, median_fwhm * 0.8)
+        # SEP's extraction order is not a brightness guarantee.  Rank before
+        # limiting so faint threshold detections cannot crowd out real stars.
+        ranked = sorted(objs, key=lambda obj: float(obj["peak"]), reverse=True)
+        for obj in ranked:
             cx, cy = float(obj["x"]), float(obj["y"])
+            peak_snr = float(obj["peak"]) / sky_std
+            if peak_snr < 20.0:
+                continue
             # Build a small cutout
-            pad = int(r_outer) + 2
+            pad = int(np.ceil(r_reference)) + 2
             x0 = max(0, int(cx) - pad);  x1 = min(w, int(cx) + pad + 1)
             y0 = max(0, int(cy) - pad);  y1 = min(h, int(cy) + pad + 1)
             cut = data_sub[y0:y1, x0:x1]
@@ -157,26 +216,21 @@ def _ringing_score(data_sub: np.ndarray, sky_std: float) -> float | None:
                 continue
             ys, xs = np.mgrid[y0:y1, x0:x1]
             dist = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
-            centre_mask = dist <= r_inner * 0.5
-            ring_mask   = (dist >= r_inner) & (dist <= r_outer)
-            if centre_mask.sum() < 3 or ring_mask.sum() < 5:
+            ring_mask = (dist >= r_inner) & (dist <= r_outer)
+            reference_mask = (dist > r_outer) & (dist <= r_reference)
+            if ring_mask.sum() < 5 or reference_mask.sum() < 5:
                 continue
-            centre_val = float(np.mean(cut[centre_mask[y0:y1, x0:x1] if False else
-                                          (dist[: , :] <= r_inner * 0.5)[
-                                              :cut.shape[0], :cut.shape[1]]]))
-            # Recompute with local dist
-            local_dist = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
-            c_mask = local_dist <= r_inner * 0.5
-            r_mask = (local_dist >= r_inner) & (local_dist <= r_outer)
-            if c_mask.sum() < 3 or r_mask.sum() < 5:
-                continue
-            centre_val = float(np.mean(cut[c_mask]))
-            ring_val   = float(np.mean(np.abs(cut[r_mask])))
-            if centre_val > 1e-9:
-                ratios.append(ring_val / centre_val)
-        if not ratios:
+            ring_level = float(np.median(cut[ring_mask]))
+            reference_level = float(np.median(cut[reference_mask]))
+            # Deconvolution's characteristic failure here is an undershoot:
+            # a dark annulus outside the bright PSF.  Ordinary positive PSF
+            # wings must not be mistaken for that defect.
+            contrasts.append(max(0.0, reference_level - ring_level) / sky_std)
+            if len(contrasts) >= 25:
+                break
+        if len(contrasts) < 5:
             return None
-        return float(np.median(ratios))
+        return float(np.median(contrasts))
     except Exception as e:
         log.debug(f"[step_assessor] ringing_score failed: {e}")
         return None
@@ -195,23 +249,44 @@ def _gradient_severity(data: np.ndarray) -> float | None:
 
 def _nebulosity_leakage(before: np.ndarray, after: np.ndarray) -> float | None:
     """
-    FFT low-frequency power fraction of the difference image.
-    High values indicate that background extraction removed real nebulosity.
+    Ratio of removed-signal magnitude on astronomical structure versus sky.
+
+    A background model is expected to be smooth, so whole-frame low-frequency
+    power cannot distinguish a good gradient correction from removed nebulosity.
+    Instead, derive an object mask from significant positive structure in the
+    pre-extraction image and compare ``abs(after - before)`` inside and outside
+    that mask.  Values above one mean the change is concentrated on the object;
+    values below one mean it is concentrated in the sky.
+
+    Return ``None`` when a trustworthy object/sky split cannot be formed.  The
+    assessor deliberately fails open in that case rather than rejecting a real
+    candidate on ambiguous evidence.
     """
     try:
-        diff = (after - before).astype(np.float32)
-        F = np.fft.fft2(diff)
-        Fshift = np.fft.fftshift(F)
-        power = np.abs(Fshift) ** 2
-        h, w = power.shape
-        cy, cx = h // 2, w // 2
-        low_r = min(h, w) // 8  # inner 12.5% of frequency space = low freq
-        ys, xs = np.ogrid[:h, :w]
-        low_mask = (ys - cy) ** 2 + (xs - cx) ** 2 <= low_r ** 2
-        total = power.sum()
-        if total < 1e-30:
+        removed = np.abs(after.astype(np.float32) - before.astype(np.float32))
+        if float(np.max(removed)) < 1e-15:
             return 0.0
-        return float(power[low_mask].sum() / total)
+
+        _, data_sub, _, sky_std = _bg_stats(before)
+        object_mask = data_sub > (2.5 * sky_std)
+
+        # Include the faint outskirts around detected structure instead of
+        # measuring only bright cores.  scipy is already a processing runtime
+        # dependency and this operation is linear in the image size.
+        from scipy.ndimage import binary_dilation, binary_opening
+        object_mask = binary_opening(object_mask, iterations=2)
+        object_mask = binary_dilation(object_mask, iterations=4)
+
+        coverage = float(np.mean(object_mask))
+        if coverage < 0.002 or coverage > 0.60:
+            return None
+
+        object_change = float(np.mean(removed[object_mask]))
+        sky_change = float(np.mean(removed[~object_mask]))
+        scale = max(float(np.max(removed)), 1e-15)
+        if sky_change <= scale * 1e-9:
+            return 1_000_000.0 if object_change > scale * 1e-9 else 0.0
+        return object_change / sky_change
     except Exception as e:
         log.debug(f"[step_assessor] nebulosity_leakage failed: {e}")
         return None
@@ -262,6 +337,10 @@ def assess_step(input_fits: "Path | str",
         "p95_before":               None,
         "p95_after":                None,
         "dynamic_range_ratio":      None,
+        "color_b_over_r_before":    None,
+        "color_g_over_r_before":    None,
+        "color_b_over_r_after":     None,
+        "color_g_over_r_after":     None,
         # Summary
         "analytically_failed": False,
     }
@@ -345,9 +424,10 @@ def assess_step(input_fits: "Path | str",
             result["gradient_severity_after"]  = _gradient_severity(after)
             result["nebulosity_leakage_score"] = _nebulosity_leakage(before, after)
             if (result["nebulosity_leakage_score"] is not None
-                    and result["nebulosity_leakage_score"] > 0.25):
+                    and result["nebulosity_leakage_score"] > 1.5):
                 result["analytically_failed"] = True
-                log.info(f"[step_assessor] REJECT {step}: nebulosity_leakage={result['nebulosity_leakage_score']:.3f} > 0.25")
+                log.info(f"[step_assessor] REJECT {step}: object/sky removed-signal "
+                         f"ratio={result['nebulosity_leakage_score']:.3f} > 1.5")
 
         elif step in _STEP_STRETCH:
             try:
@@ -365,6 +445,27 @@ def assess_step(input_fits: "Path | str",
             if result["clip_hi_pct"] is not None and result["clip_hi_pct"] > 0.05:
                 result["analytically_failed"] = True
                 log.info(f"[step_assessor] REJECT {step}: clip_hi_pct={result['clip_hi_pct']:.4f} > 0.05")
+
+        elif step in _STEP_COLOR:
+            # Informational only -- color_calibration's whole job is to change
+            # color, so a before/after shift is not itself a failure signal the
+            # way it is for denoise/deconv. The value here is making each
+            # candidate's own target-region color ratio visible for comparison
+            # ACROSS candidates (in the evaluator prompt and manual-review
+            # collage), not an auto-reject rule for any single one.
+            try:
+                color_before = _load_fits_color(input_fits)
+                color_after  = _load_fits_color(output_fits)
+                if color_before is not None:
+                    b_r, g_r = _bright_region_color_ratios(color_before)
+                    result["color_b_over_r_before"] = b_r
+                    result["color_g_over_r_before"] = g_r
+                if color_after is not None:
+                    b_r, g_r = _bright_region_color_ratios(color_after)
+                    result["color_b_over_r_after"] = b_r
+                    result["color_g_over_r_after"] = g_r
+            except Exception as e:
+                log.debug(f"[step_assessor] color ratio measurement failed: {e}")
 
         log.info(
             f"[step_assessor] {step} bg_σ_ratio={result['bg_sigma_ratio']} "
