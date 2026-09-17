@@ -56,6 +56,10 @@ def _metrics_table(metrics: dict) -> str:
         ("nebulosity_leakage_score", "nebulosity leak"),
         ("gradient_severity_after",  "gradient sev."),
         ("dynamic_range_ratio",      "dyn. range ratio"),
+        ("color_b_over_r_after",     "B/R"),
+        ("color_g_over_r_after",     "G/R"),
+        ("color_b_over_r_before",    "B/R (input)"),
+        ("color_g_over_r_before",    "G/R (input)"),
     ]
     rows = []
     for key, label in SHOW:

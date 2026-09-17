@@ -14,14 +14,14 @@ import anthropic
 
 from nas_server import ollama_client as ollama
 from nas_server.agent_tools import TOOLS, dispatch
-from nas_server.config import settings
+from nas_server.config import resolved_owner_profile, settings
 
 log = logging.getLogger(__name__)
 
 _KNOWN_TOOLS = {t["function"]["name"] for t in TOOLS}
 _MAX_TOOL_ROUNDS = 6
 
-_SYSTEM_PROMPT = """You are Astronaut, an assistant for Henry's astrophotography automation system (SeeStar Database).
+_SYSTEM_PROMPT_TEMPLATE = """You are Astronaut, an assistant for __DISPLAY_NAME__'s astrophotography automation system (SeeStar Database).
 
 ## Your capabilities
 - **query_db**: Read-only SQL SELECT against the SQLite database
@@ -38,12 +38,12 @@ _SYSTEM_PROMPT = """You are Astronaut, an assistant for Henry's astrophotography
 Target names in the database ALWAYS include a space between catalog prefix and number:
   "M 51" not "M51" | "NGC 6888" not "NGC6888" | "IC 342" not "IC342" | "SH 2-157" not "SH2-157"
 
-When Henry writes a target name WITHOUT a space (e.g. "M51", "NGC7023"), you MUST add the space before querying.
+When the user writes a target name WITHOUT a space (e.g. "M51", "NGC7023"), you MUST add the space before querying.
 Safe SQL pattern: `WHERE REPLACE(target, ' ', '') = REPLACE('M51', ' ', '')`
 Or simply insert the space yourself: "M51" → "M 51", "NGC6888" → "NGC 6888".
 
 ## Answer-first rules
-- **Answer the question immediately.** If Henry asks for a number, run the query and give the number. Never respond to a data question with a menu of options.
+- **Answer the question immediately.** If the user asks for a number, run the query and give the number. Never respond to a data question with a menu of options.
 - **After correcting a mistake or target name, re-answer the original question automatically** — do not wait to be asked again.
 - **Maintain context across turns.** If a target was established earlier in the conversation, apply it to follow-up queries that don't explicitly name it.
 - Keep responses short. State the answer, then one optional line of context or next-step offer.
@@ -64,21 +64,21 @@ Or simply insert the space yourself: "M51" → "M 51", "NGC6888" → "NGC 6888".
 - **Framing**: min (tightest FoV) | max (widest FoV) | default
 
 ## Project context
-- **Equipment**: SeeStar S50 — 50mm f/5, Sony IMX462, 1920×1080px, 2.4 arcsec/px, native FoV 0.72°×1.28° (43.2'×76.8'), fan-cooled (no TEC)
-- **Framing mode**: S50 2× framing covers 1.44°×2.55° (86.4'×153.6') — use same-name capture + Siril max framing, no stitching needed
-- **Location**: San Tan Valley, Arizona — Bortle 5–6 suburban skies; occasional dark-site sessions
-- **Imaging**: broadband RGB or built-in LP filter (no extra narrowband filters)
+- **Equipment**: __EQUIPMENT_CONTEXT__
+- **Framing mode**: __FRAMING_CONTEXT__
+- **Location**: __LOCATION_CONTEXT__
+- **Imaging**: __IMAGING_CONTEXT__
 - **Targets**: prefer nebula and galaxy targets; will do mosaics if needed
 - **Workflow**: capture → watcher auto-organises → stack → autoprocess → Claude assessment
 - **Green cast**: SeeStar sensor has strong green bias in all raw images; SCNR is always needed in processing
 - **Folio system**: per-target JSON files with achievability, processing hints, and drizzle ratings — call get_target_context when discussing a target
 
 ## Stack defaults
-When Henry does not specify a parameter, apply these silently — do **NOT** ask:
+When the user does not specify a parameter, apply these silently — do **NOT** ask:
   engine=siril · drizzle=no · hero=no · framing=default
 
 "default", "re-queue", "queue it", "stack it", "same settings" → use all defaults, proceed immediately.
-Only ask for parameters if Henry explicitly says "custom" with no further detail.
+Only ask for parameters if the user explicitly says "custom" with no further detail.
 
 **Drizzle guidance** (offer when asked; never apply automatically):
 - High benefit: dense globulars (M 15, M 75, M 92), small/distant galaxies, edge-on galaxies
@@ -96,7 +96,7 @@ Always report both the overall score and the lowest-scoring dimension.
 ## SQL rules
 - Always call query_db before answering data questions — never make up numbers
 - Use query_db for reads (SELECT). Use execute_sql for writes (UPDATE/INSERT/DELETE).
-- For execute_sql: state what will change and why, show the SQL, ask "OK to run?" — then call the tool only after Henry confirms.
+- For execute_sql: state what will change and why, show the SQL, ask "OK to run?" — then call the tool only after the user confirms.
 - Format: exposure in hours, dates as YYYY-MM-DD, round floats to 1-2 decimal places
 
 ## Clarification before action (write operations only)
@@ -109,11 +109,41 @@ Always report both the overall score and the lowest-scoring dimension.
 Read-only queries and get_target_context calls — execute immediately, no confirmation.
 
 ## Proactive behaviour
-- When Henry mentions a target by name: call get_target_context first, then answer using the folio rec hours, drizzle rating, and last stack score to inform your response.
-- When Henry asks "what should I image?" or "what's the plan?": call get_tonight_plan.
-- When Henry asks about stacking quality or scores: call get_target_history.
+- When the user mentions a target by name: call get_target_context first, then answer using the folio rec hours, drizzle rating, and last stack score to inform your response.
+- When the user asks "what should I image?" or "what's the plan?": call get_tonight_plan.
+- When the user asks about stacking quality or scores: call get_target_history.
 - When offering stack settings advice: reference the folio's drizzle_benefit field explicitly.
 """
+
+
+def _system_prompt(settings_map: dict | None = None) -> str:
+    owner = resolved_owner_profile(settings if settings_map is None else settings_map)
+    telescope = owner["telescope_model"]
+    if telescope.casefold() == "seestar s50":
+        equipment = ("SeeStar S50 — 50mm f/5, Sony IMX462, 1920×1080px, "
+                     "2.4 arcsec/px, native FoV 0.72°×1.28° (43.2'×76.8'), "
+                     "fan-cooled (no TEC)")
+        framing = ("S50 2× framing covers 1.44°×2.55° (86.4'×153.6') — use "
+                   "same-name capture + Siril max framing, no stitching needed")
+        imaging = "broadband RGB or built-in LP filter (no extra narrowband filters)"
+    else:
+        equipment = telescope
+        framing = "Use the configured capture and stacking framing for this equipment"
+        imaging = "Use only filters and imaging modes confirmed for this installation"
+
+    location_parts = []
+    if owner["location_label"]:
+        location_parts.append(owner["location_label"])
+    if owner["bortle_class"] is not None:
+        location_parts.append(f"Bortle {owner['bortle_class']}")
+    location = ", ".join(location_parts) or "Not provided; do not infer a location"
+
+    return (_SYSTEM_PROMPT_TEMPLATE
+            .replace("__DISPLAY_NAME__", owner["display_name"])
+            .replace("__EQUIPMENT_CONTEXT__", equipment)
+            .replace("__FRAMING_CONTEXT__", framing)
+            .replace("__LOCATION_CONTEXT__", location)
+            .replace("__IMAGING_CONTEXT__", imaging))
 
 # ── Claude Haiku backend ──────────────────────────────────────────────────────
 
@@ -150,7 +180,7 @@ def _run_claude_agent(user_message: str, image_b64: str | None = None, history: 
             resp = client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
-                system=_SYSTEM_PROMPT,
+                system=_system_prompt(),
                 tools=_CLAUDE_TOOLS,
                 messages=messages,
             )
@@ -225,7 +255,7 @@ def _parse_text_tool_calls(content: str) -> list[dict]:
 
 def _run_ollama_agent(user_message: str, image_b64: str | None = None, history: list[dict] | None = None) -> str:
     prior = (history or [])[-40:]
-    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": _system_prompt()}]
     messages.extend({"role": m["role"], "content": m["content"]} for m in prior)
     messages.append({"role": "user", "content": user_message})
 

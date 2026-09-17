@@ -22,6 +22,27 @@ from nas_server.database import get_targets_for_planner, update_target_coords
 
 log = logging.getLogger(__name__)
 
+
+def _owner_narrative_context(settings_map: dict) -> str:
+    """Build private planner context from the configured operator profile."""
+    from nas_server.config import resolved_owner_profile
+
+    owner = resolved_owner_profile(settings_map)
+    facts = []
+    if owner["location_label"]:
+        facts.append(owner["location_label"])
+    if owner["bortle_class"] is not None:
+        facts.append(f"Bortle {owner['bortle_class']}")
+    telescope = owner["telescope_model"]
+    if telescope.casefold() == "seestar s50":
+        facts.append("SeeStar S50 smart telescope with LP filter available")
+    else:
+        facts.append(f"{telescope} telescope")
+    return (
+        f"You are an astrophotography assistant for {owner['display_name']} "
+        f"({', '.join(facts)})."
+    )
+
 # ---------------------------------------------------------------------------
 # Persistent disk cache for _seasonal_scarcity
 # Computing scarcity for 140+ targets takes ~36s on cold start.
@@ -1001,8 +1022,7 @@ def get_narrative(results: list[dict], date_from: str, date_to: str,
         date_label = date_from if date_from == date_to else f"{date_from} to {date_to}"
 
         prompt = (
-            f"You are an astrophotography assistant for Henry (Chandler AZ, Bortle 6, "
-            f"SeeStar S50 smart telescope with LP filter available).\n\n"
+            f"{_owner_narrative_context(settings)}\n\n"
             f"Date: {date_label}\n\n"
             f"Tonight's imaging schedule (in order):\n{table}\n\n"
             f"Write 3-4 sentences describing this specific schedule in sequence — explain "

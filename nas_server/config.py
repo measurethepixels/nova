@@ -60,6 +60,15 @@ class SettingsDeprecationWarning(UserWarning):
     """Visible warning for a supported legacy settings key."""
 
 
+DEFAULT_OWNER_PROFILE: dict[str, Any] = {
+    "display_name": "NOVA Operator",
+    "location_label": "",
+    "bortle_class": None,
+    "telescope_model": "SeeStar S50",
+    "show_location_publicly": False,
+}
+
+
 @dataclass(frozen=True)
 class SettingsModel:
     api_host: str = "0.0.0.0"
@@ -128,6 +137,7 @@ class SettingsModel:
     auto_process_workflow: str = "seestar_broadband"
     manual_review_enabled: bool = False
     experiment_operational_fallback: dict[str, Any] | None = None
+    owner_profile: dict[str, Any] | None = None
     target_priors_enabled: bool = False
     background_neutralize_race_enabled: bool = False
     canonical_framing_auto: bool = True
@@ -149,6 +159,7 @@ class SettingsModel:
     runpod_cpu_registry_auth_id: str = ""
     runpod_cpu_pod_port: int = 8002
     runpod_cpu_pod_vcpu_count: int = 0
+    runpod_cpu_pod_disk_gb: int = 0
     runpod_cpu_dispatch_enabled: bool = False
     runpod_cpu_availability_first: bool = True
     runpod_cpu_pod_tier: str = ""
@@ -310,6 +321,7 @@ _INTEGER_RANGES = {
     "worker_port": (1, 65535),
     "runpod_cpu_pod_port": (1, 65535),
     "runpod_cpu_pod_vcpu_count": (0, 128),
+    "runpod_cpu_pod_disk_gb": (0, 500),
     "telegram_api_id": (0, None),
 }
 _FLOAT_RANGES = {
@@ -337,13 +349,34 @@ def _validate_field(key: str, value: Any) -> Any:
         return _require_horizon(key, value)
     if key == "remote_workers":
         return _require_remote_workers(key, value)
-    if key == "experiment_operational_fallback":
+    if key in {"experiment_operational_fallback", "owner_profile"}:
         if value is not None and not isinstance(value, dict):
             raise _type_error(key, "an object or null", value)
         return value
     if key in PATH_FIELDS:
         return _require_path(key, value)
     return _require_string(key, value)
+
+
+def resolved_owner_profile(
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the small public/operator profile with anonymous safe defaults."""
+    runtime = settings if source is None else source
+    raw = runtime.get("owner_profile") if isinstance(runtime, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    profile = dict(DEFAULT_OWNER_PROFILE)
+
+    for key in ("display_name", "location_label", "telescope_model"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            profile[key] = value.strip()
+
+    bortle = raw.get("bortle_class")
+    if isinstance(bortle, int) and not isinstance(bortle, bool) and 1 <= bortle <= 9:
+        profile["bortle_class"] = bortle
+    profile["show_location_publicly"] = raw.get("show_location_publicly") is True
+    return profile
 
 
 def validate_settings(
