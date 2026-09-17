@@ -57,6 +57,7 @@
   "manual_review_enabled": false,
   "experiment_operational_fallback": null,
   "owner_profile": null,
+  "reclaim_qcow2_after_stack": false,
   "target_priors_enabled": false,
   "background_neutralize_race_enabled": false,
   "canonical_framing_auto": true,

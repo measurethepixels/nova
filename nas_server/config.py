@@ -138,6 +138,7 @@ class SettingsModel:
     manual_review_enabled: bool = False
     experiment_operational_fallback: dict[str, Any] | None = None
     owner_profile: dict[str, Any] | None = None
+    reclaim_qcow2_after_stack: bool = False
     target_priors_enabled: bool = False
     background_neutralize_race_enabled: bool = False
     canonical_framing_auto: bool = True
@@ -306,6 +307,7 @@ _BOOLEAN_FIELDS = frozenset(
         "relay_watcher_enabled",
         "stretch_auto_optimize",
         "stretch_vision_tiebreak",
+        "reclaim_qcow2_after_stack",
     }
 )
 _INTEGER_RANGES = {
