@@ -5,6 +5,23 @@ import math
 
 CONTRACT_VERSION = "compatibility-descriptor/1.0.0"
 PROFILE_VERSION = "compatibility-profile/1.0.0"
+# image_scale is a continuous plate-solve measurement (arcsec/px), not a
+# discrete/categorical field like code_version or state -- two independent
+# solves of the identical physical setup are never bit-identical (real
+# repro, M 100, 2026-09-16: 2.3734748547053717 vs 2.373575905047216 across
+# two runs minutes apart, ~0.005% apart, yet exact-equality flagged this as
+# "drift:image_scale" and permanently blocked the target-prior inheritance
+# loop). 2% relative tolerance comfortably covers real repeat-solve noise
+# (observed ~50x smaller) while still catching a genuine hardware/config
+# change such as 2x drizzle.
+_IMAGE_SCALE_REL_TOL = 0.02
+
+
+def _image_scale_matches(a, b) -> bool:
+    try:
+        return math.isclose(float(a), float(b), rel_tol=_IMAGE_SCALE_REL_TOL)
+    except (TypeError, ValueError):
+        return a == b
 DESCRIPTOR_FIELDS = (
     "target", "data_kind", "morphology", "filter", "integration", "noise",
     "star_density", "background", "dynamic_range", "image_scale", "state", "mosaic",
@@ -89,6 +106,9 @@ def compatibility(left_run_id: str, right_run_id: str, claim_kind: str,
                 if not valid:
                     causes.append("invalid:image_scale_transform")
                 continue
+            elif field == "image_scale":
+                if not _image_scale_matches(left[field], right[field]):
+                    causes.append(f"drift:{field}")
             elif left[field] != right[field]: causes.append(f"drift:{field}")
     return {"compatible": not causes, "claim_kind": claim_kind,
             "split_causes": causes, "common_image_scale_unit": common_image_scale_unit,
@@ -114,6 +134,9 @@ def compatibility_with_descriptor(experiment_run_id: str, current: dict,
         for field in required:
             if historical.get(field) is None or current.get(field) is None:
                 causes.append(f"unknown:{field}")
+            elif field == "image_scale":
+                if not _image_scale_matches(historical[field], current[field]):
+                    causes.append(f"drift:{field}")
             elif historical[field] != current[field]:
                 causes.append(f"drift:{field}")
     return {"compatible": not causes, "claim_kind": claim_kind,

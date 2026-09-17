@@ -56,7 +56,7 @@ def status_for(installed, latest, recommended, previous="UNKNOWN"):
         return "UNKNOWN"
     if installed == latest:
         return "CURRENT"
-    if re.fullmatch(r"\d+(\.\d+)+", installed) and re.fullmatch(r"\d+(\.\d+)+", latest):
+    if re.fullmatch(r"\d+(\.\d+)*", installed) and re.fullmatch(r"\d+(\.\d+)*", latest):
         old = tuple(map(int, installed.split(".")))
         new = tuple(map(int, latest.split(".")))
         return "UPDATE_AVAILABLE" if new > old else "VALIDATION_REQUIRED"
@@ -163,24 +163,85 @@ def inventory(root: Path, settings: dict):
     probes["NOVA filter definitions"] = ("reference_data", reference_probe)
     probes["RC-Astro worker image"] = (
         "deployed_worker", lambda: worker_image_probe(root))
-    for name in ("BlurXTerminator", "NoiseXTerminator", "StarXTerminator"):
-        def model_probe(name=name):
-            files = sorted((Path.home() / ".config/RC-Astro").glob(name + ".*.onnx"))
-            if not files:
-                return {"result": "unknown", "source": "local RC-Astro model files",
-                        "detail": "No installed model files found."}
-            hashes = {}
-            for path in files:
-                digest = hashlib.sha256()
-                with path.open("rb") as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                hashes[path.name] = digest.hexdigest()
-            return {"result": "ok", "source": "local RC-Astro model files, SHA256",
-                    "installed": ", ".join(hashes), "metadata": {"sha256": hashes},
-                    "detail": "Installed files; does not identify the model chosen by a processing run."}
+    for name, key in RCASTRO_PRODUCT_KEYS.items():
+        def model_probe(name=name, key=key):
+            return model_freshness_probe(name, key)
         probes[name] = ("ai_model", model_probe)
     return probes
+
+
+RCASTRO_PRODUCT_KEYS = {"BlurXTerminator": "bxt", "NoiseXTerminator": "nxt", "StarXTerminator": "sxt"}
+
+
+def _local_model_hashes(name: str) -> dict[str, str]:
+    files = sorted((Path.home() / ".config/RC-Astro").glob(name + ".*.onnx"))
+    hashes = {}
+    for path in files:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        hashes[path.name] = digest.hexdigest()
+    return hashes
+
+
+def model_freshness_probe(name: str, key: str) -> dict:
+    """RC-Astro's own CLI is the authoritative source for which ML model
+    generation is licensed/selected for a product -- SHA256 of local files
+    is installation-integrity evidence, not a freshness signal on its own
+    (RC-Astro's own model filenames already encode sub-revisions exactly,
+    e.g. NoiseXTerminator.3.1.onnx alongside NoiseXTerminator.3.onnx, so an
+    exact filename/version match is meaningful). Henry, 2026-09-16: don't
+    silently treat "hash found, can't compare" as CURRENT -- that hides
+    real freshness information RC-Astro actually exposes via `--json`."""
+    hashes = _local_model_hashes(name)
+    installed_versions = {path[len(name) + 1:-len(".onnx")] for path in hashes}
+
+    try:
+        # Unlike `rc-astro --json update`'s newline-delimited events, a
+        # per-product query (`rc-astro <key> --json`) prints one
+        # pretty-printed JSON object -- parse it as a whole, not per line.
+        product = json.loads(command(["rc-astro", key, "--json"]))
+        if product.get("key") != key:
+            raise ValueError(f"unexpected product key in rc-astro {key} --json response")
+        cli_version = str(product["mlVersion"])
+        cli_source = f"rc-astro {key} --json"
+    except Exception:
+        cli_version, cli_source = None, None
+
+    if not hashes:
+        return {"result": "unknown", "source": "local RC-Astro model files",
+                "detail": "No installed model files found."}
+
+    if cli_version is None:
+        # RC-Astro CLI query failed/unavailable -- real installed evidence,
+        # but no freshness comparison is possible. status_for() correctly
+        # reports this as UNKNOWN (latest is absent), not CURRENT.
+        return {"result": "ok", "source": "local RC-Astro model files, SHA256",
+                "installed": ", ".join(sorted(hashes)), "metadata": {"sha256": hashes},
+                "detail": "Installed files; RC-Astro CLI query unavailable, "
+                          "freshness not verified."}
+
+    if cli_version in installed_versions:
+        installed = latest = cli_version
+        detail = "Installed model matches RC-Astro's licensed/selected ML version."
+    else:
+        # RC-Astro's licensed/selected mlVersion has no matching local file.
+        # The local directory intentionally retains multiple generations
+        # (issue 2026-09-16, ChatGPT review on PR #791), so the numerically
+        # highest local filename is not evidence of which generation
+        # production dispatch actually uses -- that would be an inferred
+        # guess flowing straight into target-prior's compatibility identity,
+        # not a verified fact. Fail closed instead: report installed=None,
+        # which status_for() already correctly resolves to UNKNOWN.
+        installed = None
+        latest = cli_version
+        detail = ("RC-Astro's licensed/selected ML version has no matching local "
+                  "file; which locally-retained generation (if any) is actually "
+                  "used cannot be established (run 'rc-astro download-models').")
+    return {"result": "ok", "source": f"{cli_source}; local RC-Astro model files, SHA256",
+            "installed": installed, "latest": latest, "metadata": {"sha256": hashes},
+            "detail": detail}
 
 
 def worker_image_probe(root: Path):
@@ -238,8 +299,7 @@ CARD_CSS = """
 .eh-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem}
 .eh-name{font-weight:700;color:var(--text);word-break:break-word}
 .eh-badge{flex:none;display:inline-block;padding:.15rem .55rem;border-radius:999px;font-size:.72rem;font-weight:700;letter-spacing:.02em;white-space:nowrap}
-.eh-badge.current,.eh-badge.approved_update{background:rgba(63,185,80,.15);color:#3fb950}
-.eh-badge.update_available{background:rgba(88,166,255,.15);color:#58a6ff}
+.eh-badge.current,.eh-badge.approved_update,.eh-badge.update_available{background:rgba(63,185,80,.15);color:#3fb950}
 .eh-badge.validation_required{background:rgba(210,165,40,.18);color:#d2a528}
 .eh-badge.hold{background:rgba(139,148,158,.2);color:#c9d1d9}
 .eh-badge.check_failed{background:rgba(248,81,73,.18);color:#f85149}

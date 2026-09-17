@@ -212,6 +212,17 @@ def _generate_preview(fits_path: Path, jpg_path: Path, linked: bool = True) -> b
     return seti_astro.generate_preview_stf(fits_path, jpg_path)
 
 
+def _generate_preview_nl(fits_path: Path, jpg_path: Path) -> bool:
+    """Generate JPEG preview for already-stretched (non-linear) candidate data --
+    no extra STF re-stretch. Mirrors auto_process.py's own linear/non-linear
+    preview split (_generate_preview vs _generate_preview_nl); without this,
+    review previews for steps like curves/clahe/dark_enhance re-stretch data
+    that's already been stretched, washing the sky to flat grey noise instead
+    of the real black background (Henry, 2026-09-16, M 100/curves review)."""
+    from nas_server import seti_astro
+    return seti_astro.generate_preview_nonlinear(fits_path, jpg_path)
+
+
 def _generate_linear_composite(fits_path: Path, jpg_path: Path, *,
                                 linked: bool = False,
                                 rect_xywh: "tuple[int, int, int, int] | None" = None) -> bool:
@@ -1926,7 +1937,7 @@ def run_experiment(
                     rect_xywh=(run_result.get("rect_xywh")
                                if step == "color_calibration" else None))
             else:
-                _generate_preview(out_fits, staged_preview)
+                _generate_preview_nl(out_fits, staged_preview)
             if staged_preview.exists():
                 os.replace(staged_preview, jpg_path)
                 preview = register_preview(

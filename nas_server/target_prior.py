@@ -19,6 +19,25 @@ def get_experiment_evidence_for_target(*args, **kwargs):
     return retrieve(*args, **kwargs)
 
 
+def _read_environment_components():
+    """Lazy boundary keeps this policy module settings-free on import."""
+    components = {}
+    try:
+        from nas_server.database import get_conn
+        with get_conn() as conn:
+            for row in conn.execute(
+                "SELECT name,installed,status,stale FROM environment_components "
+                "WHERE name IN ('NOVA','RC-Astro CLI','BlurXTerminator')"
+            ):
+                components[row["name"]] = (
+                    row["installed"]
+                    if row["status"] in ("CURRENT", "UPDATE_AVAILABLE", "APPROVED_UPDATE")
+                    and not row["stale"] else None)
+    except Exception:
+        pass
+    return components
+
+
 def build_current_context(target: str, object_type: str, input_fits: str | Path) -> dict:
     """Build the transient comparison side from observed runtime facts only."""
     ontology_version = None
@@ -37,18 +56,7 @@ def build_current_context(target: str, object_type: str, input_fits: str | Path)
         image_scale = float(math.sqrt(abs(float(__import__("numpy").linalg.det(matrix)))) * 3600.0)
     except Exception:
         pass
-    components = {}
-    try:
-        from nas_server.database import get_conn
-        with get_conn() as conn:
-            for row in conn.execute(
-                "SELECT name,installed,status,stale FROM environment_components "
-                "WHERE name IN ('NOVA','RC-Astro CLI','BlurXTerminator')"
-            ):
-                components[row["name"]] = (
-                    row["installed"] if row["status"] == "ok" and not row["stale"] else None)
-    except Exception:
-        pass
+    components = _read_environment_components()
     return {
         "target": target, "data_kind": "fits", "morphology": object_type,
         "state": "linear", "code_version": components.get("NOVA") or workflow_version(),
@@ -81,7 +89,6 @@ def derive_param_prior(target, step, object_type, ontology_defaults,
     eligible = [
         experiment for experiment in experiments
         if experiment.get("winner")
-        and experiment["winner"].get("overall_score") is not None
         and len(experiment.get("variants", [])) >= 2
     ]
     if not eligible:

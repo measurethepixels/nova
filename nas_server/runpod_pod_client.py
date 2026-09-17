@@ -270,6 +270,14 @@ def create_pod(
         raise RunPodPodClientError(
             "runpod_cpu_pod_vcpu_count must be a power-of-two integer from 2 through 128"
         )
+    disk_gb = settings.get("runpod_cpu_pod_disk_gb", 0)
+    if isinstance(disk_gb, bool) or not isinstance(disk_gb, int) or not 1 <= disk_gb <= 500:
+        raise RunPodPodClientError(
+            "runpod_cpu_pod_disk_gb must be an integer from 1 through 500 -- the worker's "
+            "own low_local_disk check requires 20GB free after the image/venv load, so "
+            "this must never rely on RunPod's own platform default (issue #781: a pod "
+            "created with no explicit disk size failed every real dispatch)"
+        )
     selected_tier = (
         _select_available_cpu_tier(api_key, vcpu_count)
         if availability_first else tier
@@ -281,6 +289,7 @@ def create_pod(
         "registry": registry_auth_id,
         "name": name,
         "ports": [f"{port}/http"],
+        "disk": disk_gb,
     }
     if normalized_env:
         payload["env"] = normalized_env

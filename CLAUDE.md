@@ -139,6 +139,45 @@ ASTAP + GraXpert + Seti Astro Suite Pro) has no PixInsight dependency and is the
 safer default until that's confirmed. If you do run the PixInsight steps on
 1.9.4+, watch for PJSR script failures in the logs and report back.
 
+### 3a. Owner-profile interview (proposal, then approval)
+
+After environment and capability discovery, ask the operator these short
+questions. Every answer may use the generic default, and location is explicitly
+optional:
+
+1. What display name should NOVA use? (Default: `NOVA Operator`.)
+2. Is there a human-readable location label to use in private planning context?
+   The operator may skip this; do not infer it from coordinates.
+3. What telescope model is this installation built around? (Default:
+   `SeeStar S50`.)
+4. If known, what is the site's Bortle class? (Optional.)
+5. May the location label appear on the story page? (Default: no.)
+
+Turn the answers into a **proposed**, not yet applied, settings delta:
+
+```json
+{
+  "owner_profile": {
+    "display_name": "NOVA Operator",
+    "location_label": "",
+    "bortle_class": null,
+    "telescope_model": "SeeStar S50",
+    "show_location_publicly": false
+  }
+}
+```
+
+Present that delta to the operator with a plain-English impact summary:
+`display_name`, `telescope_model`, and (only when publication is approved)
+`location_label` affect story-page copy; display name, location, Bortle class,
+and telescope model provide private planner-narration and local-agent context.
+`observer_lat` and `observer_lon` remain the separate inputs for astronomy math.
+
+Only write the approved delta to `settings.json` after a separate, explicit human
+approval. Do not silently apply interview answers. Drafting personalized story or
+handbook prose is a later, separate, skippable phase; this interview only enables
+straightforward field substitution in existing consumers.
+
 ## 4. The config contract
 
 Everything machine- or person-specific lives in **`settings.json`** (path given to
