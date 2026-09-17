@@ -1402,13 +1402,26 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         except Exception:
             pass
         # Reclaim qcow2 blocks immediately after cleanup so NAS Volume 2 shrinks
-        # without waiting for the weekly fstrim.timer
-        try:
-            import subprocess as _sp
-            _sp.run(["sudo", "fstrim", "-v", "/"], capture_output=True, timeout=120)
-            logger.info("[stack] fstrim / complete — qcow2 blocks reclaimed")
-        except Exception as _fe:
-            logger.warning(f"[stack] fstrim failed (non-fatal): {_fe}")
+        # without waiting for the weekly fstrim.timer. This is a VM-disk-specific
+        # optimization (real for this project's own qcow2-backed VM), not a
+        # general pipeline requirement -- unconditionally invoking `sudo fstrim /`
+        # is inappropriate on a portable/public install that may have no
+        # passwordless sudo at all (real repro: clean-machine Codespace test,
+        # 2026-09-15/16 -- also caught that the prior version never checked the
+        # real exit code, so a failed fstrim silently logged as "complete").
+        from nas_server.config import settings
+        if settings.get("reclaim_qcow2_after_stack", False):
+            try:
+                import subprocess as _sp
+                _result = _sp.run(["sudo", "fstrim", "-v", "/"], capture_output=True,
+                                  timeout=120, text=True)
+                if _result.returncode == 0:
+                    logger.info("[stack] fstrim / complete — qcow2 blocks reclaimed")
+                else:
+                    logger.warning(f"[stack] fstrim / failed (non-fatal): "
+                                   f"exit {_result.returncode}: {_result.stderr.strip()}")
+            except Exception as _fe:
+                logger.warning(f"[stack] fstrim failed (non-fatal): {_fe}")
 
 
 def _run_imagemm_engine(target_name: str, work_dir: Path, frame_count: int,

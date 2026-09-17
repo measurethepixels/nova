@@ -1078,8 +1078,8 @@ def home_page() -> str:
                       f'<td>{score}</td>'
                       f'<td><a href="/report/{target}">runs</a></td></tr>')
 
-    first = stats.get("first_date", "")[:10]
-    last = stats.get("last_date", "")[:10]
+    first = (stats.get("first_date") or "")[:10]
+    last = (stats.get("last_date") or "")[:10]
     # End at today rather than the last capture. The quiet stretch is real
     # information, and the weather layer explains its context without claiming
     # that weather caused every missed night.

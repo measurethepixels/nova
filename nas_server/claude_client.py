@@ -977,8 +977,8 @@ def write_story_entry(target: str, data: dict) -> str | None:
         return None
 
     obj_type = (data.get("object_type") or "deep sky object").replace("_", " ")
-    first = data.get("first_date", "")[:10]
-    last = data.get("last_date", "")[:10]
+    first = (data.get("first_date") or "")[:10]
+    last = (data.get("last_date") or "")[:10]
     sessions = data.get("session_count") or 1
     subs = data.get("total_subs") or 0
     hours = round(data.get("total_hours") or 0, 1)
