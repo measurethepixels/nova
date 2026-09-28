@@ -17,6 +17,17 @@ from nas_server.image_analysis_runner import ImageAnalysisError, analyze
 
 log = logging.getLogger(__name__)
 
+# The densest successful SEP result in the frozen Image Atlas Milestone 0
+# checkpoints is M 31 at 22,451 accepted sources.  Keep ample headroom while
+# bounding the JSON payload carried across the crash-isolated worker boundary.
+PSF_SOURCE_LIMIT = 50_000
+# 224px cores plus a 32px margin remain below both SEP's pixel-stack and
+# sub-object/deblending capacity on the spent M42 dense-field checkpoint.
+SEP_TILE_CORE = 224
+SEP_TILE_MARGIN = 32
+SEP_THRESHOLD_MULTIPLIERS = (3.0, 5.0, 8.0, 12.0)
+PSF_MAX_ECCENTRICITY = 0.90
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -274,7 +285,7 @@ def _psf(data: np.ndarray, bg: dict) -> dict:
     try:
         import sep
     except ImportError:
-        return _psf_fallback()
+        return _psf_fallback("unavailable", "sep_not_installed")
 
     lum = _luminance(data).astype(np.float64)
     sky_mean = bg["sky_mean"]
@@ -286,14 +297,13 @@ def _psf(data: np.ndarray, bg: dict) -> dict:
         bkg = sep.Background(lum_c)
         lum_sub = lum_c - bkg.back()
 
-        threshold = 3.0 * bkg.globalrms
-        objects = sep.extract(lum_sub, threshold, minarea=9)
+        objects = _extract_sep_sources(lum_sub, float(bkg.globalrms), sep)
     except Exception as e:
         log.debug(f"[analyzer] SEP extraction failed: {e}")
-        return _psf_fallback()
+        return _psf_fallback("unavailable", type(e).__name__)
 
     if len(objects) == 0:
-        return _psf_fallback()
+        return _psf_fallback("supported-empty")
 
     # FWHM ≈ 2 * sqrt(2 * ln2) * sigma ≈ 2.355 * mean(a, b)
     fwhm_vals = 2.355 * 0.5 * (objects["a"] + objects["b"])
@@ -304,13 +314,14 @@ def _psf(data: np.ndarray, bg: dict) -> dict:
     edge_mask = (
         (objects["x"] > 50) & (objects["x"] < w - 50) &
         (objects["y"] > 50) & (objects["y"] < h - 50) &
+        np.isfinite(fwhm_vals) & np.isfinite(ecc_vals) &
         (fwhm_vals > 1.0) & (fwhm_vals < 30.0)
     )
     fwhm_clean = fwhm_vals[edge_mask]
     ecc_clean  = ecc_vals[edge_mask]
 
     if len(fwhm_clean) == 0:
-        return _psf_fallback()
+        return _psf_fallback("supported-empty")
 
     fwhm_med = float(np.median(fwhm_clean))
     fwhm_p90 = float(np.percentile(fwhm_clean, 90))
@@ -322,6 +333,19 @@ def _psf(data: np.ndarray, bg: dict) -> dict:
     # 2.55 was a stale estimate. See reference-s50-pixel-scale memory.
     psf_arcsec = fwhm_med * 2.37
 
+    clean_indices = np.flatnonzero(edge_mask)
+    source_indices = clean_indices[:PSF_SOURCE_LIMIT]
+    sources = [
+        {
+            "x": float(objects["x"][index]),
+            "y": float(objects["y"][index]),
+            "fwhm": float(fwhm_vals[index]),
+            "eccentricity": float(ecc_vals[index]),
+            "edge_valid": True,
+        }
+        for index in source_indices
+    ]
+
     return {
         "star_count":    int(len(fwhm_clean)),
         "fwhm_median":   fwhm_med,
@@ -330,10 +354,89 @@ def _psf(data: np.ndarray, bg: dict) -> dict:
         "eccentricity":  ecc_med,
         "psf_arcsec":    psf_arcsec,
         "psf_diameter":  psf_arcsec,   # alias — used directly as BXT nonstellar_psf_diameter
+        "sources":       sources,
+        "sources_truncated": len(clean_indices) > PSF_SOURCE_LIMIT,
+        "extraction_status": "supported-sources",
+        "extraction_reason": None,
     }
 
 
-def _psf_fallback() -> dict:
+def _is_pixstack_overflow(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return ("pixel buffer" in message or "pixstack" in message
+            or "deblending overflow" in message or "sub-objects" in message)
+
+
+def _compact_object_mask(objects) -> np.ndarray:
+    fwhm = 2.355 * 0.5 * (objects["a"] + objects["b"])
+    eccentricity = np.sqrt(
+        np.maximum(0.0, 1.0 - (objects["b"] / np.maximum(objects["a"], 1e-6)) ** 2))
+    return (np.isfinite(fwhm) & np.isfinite(eccentricity)
+            & (fwhm > 1.0) & (fwhm < 30.0)
+            & (eccentricity <= PSF_MAX_ECCENTRICITY))
+
+
+def _extract_sep_sources(lum_sub: np.ndarray, rms: float, sep_module):
+    """Extract normally, falling back to bounded tiles only on SEP stack overflow."""
+    try:
+        return sep_module.extract(lum_sub, SEP_THRESHOLD_MULTIPLIERS[0] * rms, minarea=9)
+    except Exception as exc:
+        if not _is_pixstack_overflow(exc):
+            raise
+
+    height, width = lum_sub.shape
+    batches = []
+    for core_y in range(0, height, SEP_TILE_CORE):
+        for core_x in range(0, width, SEP_TILE_CORE):
+            y0, y1 = max(0, core_y - SEP_TILE_MARGIN), min(
+                height, core_y + SEP_TILE_CORE + SEP_TILE_MARGIN)
+            x0, x1 = max(0, core_x - SEP_TILE_MARGIN), min(
+                width, core_x + SEP_TILE_CORE + SEP_TILE_MARGIN)
+            tile = np.ascontiguousarray(lum_sub[y0:y1, x0:x1])
+            objects = None
+            last_error = None
+            for multiplier in SEP_THRESHOLD_MULTIPLIERS:
+                try:
+                    candidate = sep_module.extract(tile, multiplier * rms, minarea=9)
+                    if not len(candidate):
+                        objects = candidate
+                        break
+                    compact = _compact_object_mask(candidate)
+                    if compact.any():
+                        objects = candidate[compact]
+                        break
+                    # A successful giant/diffuse detection is not compact-source
+                    # evidence. Raise the threshold within the same bounded tile.
+                    objects = candidate[:0]
+                except Exception as exc:
+                    last_error = exc
+                    if not _is_pixstack_overflow(exc):
+                        raise
+            if objects is None:
+                raise RuntimeError("SEP tile extraction exhausted bounded thresholds") from last_error
+            if not len(objects):
+                continue
+            objects = objects.copy()
+            objects["x"] += x0
+            objects["y"] += y0
+            # Each centroid belongs to exactly one non-overlapping core.  The
+            # margin supplies complete pixels for boundary sources without
+            # allowing duplicate ownership in adjacent tiles.
+            owned = (
+                (objects["x"] >= core_x)
+                & (objects["x"] < min(core_x + SEP_TILE_CORE, width))
+                & (objects["y"] >= core_y)
+                & (objects["y"] < min(core_y + SEP_TILE_CORE, height))
+            )
+            batches.append(objects[owned])
+    if not batches:
+        return np.empty(0, dtype=[("x", "f8"), ("y", "f8"),
+                                  ("a", "f8"), ("b", "f8")])
+    return np.concatenate(batches)
+
+
+def _psf_fallback(extraction_status: str = "unavailable",
+                  extraction_reason: str | None = None) -> dict:
     return {
         "star_count":   0,
         "fwhm_median":  4.0,
@@ -342,6 +445,10 @@ def _psf_fallback() -> dict:
         "eccentricity": 0.2,
         "psf_arcsec":   10.2,
         "psf_diameter": 10.2,
+        "sources": [],
+        "sources_truncated": False,
+        "extraction_status": extraction_status,
+        "extraction_reason": extraction_reason,
     }
 
 

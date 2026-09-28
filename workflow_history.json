@@ -1,5 +1,5 @@
 {
-  "current": "1.26.0",
+  "current": "1.28.0",
   "semver_policy": {
     "major": "scoring model or step add/remove; scores no longer comparable across versions (resets the critique baseline)",
     "minor": "param/threshold/gate tuning that changes output but keeps comparability",
@@ -1288,6 +1288,58 @@
           "from": "live endpoint on the existing pre-2.6.6 image",
           "to": "unchanged; 2.6.6 image built but not validated or cut over",
           "reason": "Do not overstate the local ML5 promotion as remote deployment evidence."
+        }
+      ]
+    },
+    {
+      "version": "1.27.0",
+      "date": "2026-09-24",
+      "bump": "minor",
+      "summary": "Step halo-suppression correctives down one discrete level and record accepted corrective provenance truthfully.",
+      "rationale": "Final-review halo correctives previously dropped the step for every non-zero reduction request because reduction_level is discrete rather than a scalar multiplier. The corrected path changes shipped output while preserving the existing step sequence and scoring model, so runs remain comparable and require a minor version boundary.",
+      "critiques_evaluated": [
+        "20260722_063635_seestar_broadband"
+      ],
+      "changes": [
+        {
+          "file": "nas_server/auto_process.py",
+          "param": "halo_suppression final corrective",
+          "from": "drop the step for any corrective factor",
+          "to": "decrement reduction_level by one for 0 < factor < 1; drop only at level 0 or factor 0",
+          "reason": "Honor the final review's reduce-only request without removing halo suppression entirely."
+        },
+        {
+          "file": "nas_server/auto_process.py",
+          "param": "accepted corrective provenance",
+          "from": "steps_applied and step_records continued to describe the original step",
+          "to": "corrective label plus corrective_applied record with action, from/to, and physics grades",
+          "reason": "Make the run record describe the image that was actually shipped."
+        }
+      ]
+    },
+    {
+      "version": "1.28.0",
+      "date": "2026-09-24",
+      "bump": "minor",
+      "summary": "Make the channel-crush guard repair only genuine hard black-clips using robust sky statistics.",
+      "rationale": "The mean-gap detector mistook unequal bright tails for crushed channels and added colour casts to otherwise neutral skies. Requiring a materially elevated black-floor fraction and targeting the non-clipped channels' median changes shipped output while preserving the workflow and scoring model, so runs remain comparable and require a minor version boundary.",
+      "critiques_evaluated": [
+        "20260904_040731_seestar_galaxy"
+      ],
+      "changes": [
+        {
+          "file": "nas_server/auto_process.py",
+          "param": "_guard_channel_crush detection",
+          "from": "more than 2x gap between per-channel sky means",
+          "to": "at least 20% of sky pixels at the normalized black floor and at least 15 percentage points more clipping than either other channel",
+          "reason": "Distinguish a genuine hard clip from M 81-like unequal bright tails with near-neutral sky medians."
+        },
+        {
+          "file": "nas_server/auto_process.py",
+          "param": "_guard_channel_crush lift target",
+          "from": "brightest channel sky mean",
+          "to": "median sky level of the non-clipped channels, with a 15% neutral-sky tolerance",
+          "reason": "Repair IC 434-like clipping without lifting an already-neutral channel or overshooting the robust sky level."
         }
       ]
     }

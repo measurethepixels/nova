@@ -70,7 +70,14 @@ def build_current_context(target: str, object_type: str, input_fits: str | Path)
 
 def derive_param_prior(target, step, object_type, ontology_defaults,
                        current_context: dict | None = None) -> dict:
-    """Derive one bounded prior from the newest compatible same-target experiment."""
+    """Derive one bounded prior from the newest compatible same-target experiment.
+
+    action is one of: "none" (no eligible evidence), "reject" (evidence
+    exists but is incompatible, or maps to nothing usable), "adapt"/"inherit"
+    (numeric nudge within the same engine), or "engine_inherit" (the winner
+    used a different declared engine entirely -- caller decides whether/how
+    to act on `variant_id`; this function never dispatches anything itself).
+    """
     baseline = {
         key: spec.get("default") if isinstance(spec, dict) else spec
         for key, spec in ontology_defaults.items()
@@ -118,6 +125,26 @@ def derive_param_prior(target, step, object_type, ontology_defaults,
     prior = {_ALIASES.get(k, k): v for k, v in parent["winner"].get("params", {}).items()}
     prior = {k: v for k, v in prior.items() if k in baseline and isinstance(v, (int, float))}
     if not prior:
+        # The winner used a genuinely different engine (e.g. SyQon Parallax's
+        # mode/alpha/level vs BXT's stellar_amount/nonstellar_amount) rather
+        # than a different setting of the SAME engine. Translating one
+        # engine's params onto another's sliders would inject meaningless
+        # numbers -- the honest inheritance is "run that engine", not "guess
+        # its numbers". Real case: M 100 2026-09-17, exprun_93afd6bd...,
+        # parallax_natural_light beat every BXT variant (7.5 vs 5.5) with
+        # params {"mode":"natural","alpha":0.3,"level":3} that map onto
+        # nothing in baseline. "none" is excluded -- inheriting "skip this
+        # step entirely" is a bigger behavior change than an engine swap and
+        # is out of scope here.
+        winner_variant_id = parent["winner"].get("variant_id")
+        if winner_variant_id and winner_variant_id != "none":
+            return {"applied": False, "action": "engine_inherit",
+                    "reason": f"Selected newest compatible experiment "
+                              f"{parent.get('experiment_run_id')}: winner used a different "
+                              f"engine ({winner_variant_id}) with no numeric params "
+                              f"mappable onto the current baseline.",
+                    "variant_id": winner_variant_id,
+                    "params": empty, "evidence": provenance}
         return {"applied": False, "action": "reject", "reason": "Winner has no valid mapped parameters.",
                 "params": empty, "evidence": provenance}
     for rejected in parent.get("rejected", []):

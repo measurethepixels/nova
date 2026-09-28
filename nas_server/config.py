@@ -127,6 +127,8 @@ class SettingsModel:
     relay_dir: str = ""
     codex_relay_dispatcher_enabled: bool = False
     claude_relay_dispatcher_enabled: bool = False
+    chatgpt_sheet_fallback_enabled: bool = False
+    chatgpt_sheet_fallback_spreadsheet_id: str = ""
     auto_assess: bool = True
     stretch_auto_optimize: bool = True
     stretch_vision_tiebreak: bool = False
@@ -140,6 +142,15 @@ class SettingsModel:
     owner_profile: dict[str, Any] | None = None
     reclaim_qcow2_after_stack: bool = False
     target_priors_enabled: bool = False
+    # Separate flag: derive_param_prior() can recommend a different DECLARED
+    # ENGINE (e.g. SyQon Parallax over BXT) when same-target experiment
+    # evidence shows it won and its params don't map onto the current
+    # engine's numeric sliders. That's real paid GPU dispatch from the
+    # unattended nominal pipeline, so it stays off by default even when
+    # target_priors_enabled is on, until the ml-tools spend/circuit-breaker
+    # gap (issue #800) is closed and verified live -- see issue #694 and
+    # the pre-Atlas target-memory gate plan, 2026-09-18.
+    target_prior_engine_inherit_enabled: bool = False
     background_neutralize_race_enabled: bool = False
     canonical_framing_auto: bool = True
     exclude_alignment_outliers: bool = True
@@ -168,6 +179,8 @@ class SettingsModel:
     runpod_cpu_dispatch_estimate_usd: float = 0.0
     runpod_rcastro_gpu_fallback_estimate_usd: float = 0.0
     runpod_rcastro_gpu_rate_usd_per_second: float = 0.0
+    runpod_ml_tools_gpu_fallback_estimate_usd: float = 0.10
+    runpod_ml_tools_gpu_rate_usd_per_second: float = 0.000306
     runpod_cpu_expected_image_version: str = ""
     runpod_reconciliation_state_path: str = ""
     runpod_s3_access_key_id: str = ""
@@ -292,6 +305,7 @@ _BOOLEAN_FIELDS = frozenset(
         "auto_process_enabled",
         "canonical_framing_auto",
         "claude_relay_dispatcher_enabled",
+        "chatgpt_sheet_fallback_enabled",
         "codex_relay_dispatcher_enabled",
         "cosmic_clarity_enabled",
         "cosmic_clarity_gpu",
@@ -299,6 +313,7 @@ _BOOLEAN_FIELDS = frozenset(
         "experiment_gpu_parallel_enabled",
         "manual_review_enabled",
         "target_priors_enabled",
+        "target_prior_engine_inherit_enabled",
         "background_neutralize_race_enabled",
         "ml_tools_gpu_enabled",
         "rcastro_gpu_enabled",
@@ -335,6 +350,8 @@ _FLOAT_RANGES = {
     "runpod_cpu_dispatch_estimate_usd": (0.0, None),
     "runpod_rcastro_gpu_fallback_estimate_usd": (0.0, None),
     "runpod_rcastro_gpu_rate_usd_per_second": (0.0, None),
+    "runpod_ml_tools_gpu_fallback_estimate_usd": (0.0, None),
+    "runpod_ml_tools_gpu_rate_usd_per_second": (0.0, None),
 }
 
 

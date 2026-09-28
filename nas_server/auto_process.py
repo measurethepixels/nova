@@ -680,6 +680,64 @@ _CORRECTIVE_ELIGIBLE_STEPS: frozenset = (
 )
 
 
+def _plan_corrective(step_name: str, factor: float, params: dict) -> dict:
+    """Return the reduce-only action for one final-review corrective."""
+    planned_params = dict(params)
+    if step_name == "halo_suppression":
+        level = planned_params.get("reduction_level")
+        if not isinstance(level, int) or isinstance(level, bool):
+            raise ValueError("halo_suppression corrective requires integer reduction_level")
+        if factor == 0.0 or level == 0:
+            return {"action": "dropped", "params": planned_params,
+                    "from": level, "to": None}
+        planned_params["reduction_level"] = level - 1
+        return {"action": "level_down", "params": planned_params,
+                "from": level, "to": level - 1}
+
+    reduce_key = _CORRECTIVE_REDUCE_KEY.get(step_name)
+    old_value = planned_params.get(reduce_key) if reduce_key else None
+    if factor == 0.0 or not isinstance(old_value, (int, float)):
+        return {"action": "dropped", "params": planned_params,
+                "from": old_value, "to": None}
+    new_value = type(old_value)(old_value * factor)
+    planned_params[reduce_key] = new_value
+    return {"action": "scaled", "params": planned_params, "key": reduce_key,
+            "from": old_value, "to": new_value}
+
+
+def _finalize_corrective_provenance(
+    step_name: str,
+    plan: dict,
+    physics_before: float,
+    physics_after: float,
+    steps_applied: list[str],
+    step_records: list[dict],
+) -> bool:
+    """Record an accepted corrective truthfully; leave provenance unchanged on reject."""
+    if physics_after + 0.05 < physics_before:
+        return False
+
+    if plan["action"] == "level_down":
+        detail = f"level {plan['from']}→{plan['to']}"
+    elif plan["action"] == "dropped":
+        detail = "dropped"
+    else:
+        detail = f"{plan['key']} {plan['from']}→{plan['to']}"
+    corrected_label = f"{step_name}[corrective: {detail}]"
+    for idx in range(len(steps_applied) - 1, -1, -1):
+        if steps_applied[idx].split("[", 1)[0] == step_name:
+            steps_applied[idx] = corrected_label
+            break
+    else:
+        steps_applied.append(corrected_label)
+    step_records.append({
+        "step": step_name, "type": "corrective_applied",
+        "action": plan["action"], "from": plan.get("from"), "to": plan.get("to"),
+        "physics_before": physics_before, "physics_after": physics_after,
+    })
+    return True
+
+
 def _physics_should_run(step_name: str, stats: dict | None,
                         object_type: str) -> tuple[bool, dict, str]:
     """Physics gate for optional/risky post-stretch steps (WS1).
@@ -778,7 +836,7 @@ def _physics_should_run(step_name: str, stats: dict | None,
         p = _params(_tp.compute_halo_suppress)
         # Dense star fields (Cygnus Milky-Way fields, globular clusters) have so many
         # overlapping stellar halos that an aggressive reduction_level eats real stars and
-        # darkens the field (NGC 6914). Cap at the gentlest level when the field is dense.
+        # darkens the field (NGC 6914). Cap dense fields at level 1; level 0 is minimal.
         _star_count = star.get("star_density", 0)
         if _is_cluster or _star_count > 1000:
             if int(p.get("reduction_level", 1)) > 1:
@@ -2066,27 +2124,22 @@ def _rescue_dead_channel(out_path: Path, target: str = "") -> bool:
 
 def _guard_channel_crush(out_path: Path, target: str = "") -> bool:
     """
-    Belt-and-suspenders guard against a downstream step leaving a per-channel colour
-    cast in the dark sky (e.g. IC 434 post-SCNR sky MEAN R=0.025 / G=0.004 / B=0.045 —
-    a strong magenta cast). After SPCC the sky background is neutral by construction, so
-    any per-channel divergence in the dark sky is a step artifact, not real colour.
+    Repair a channel with a genuine hard black-clip in the dark sky.
 
-    Detection uses the per-channel sky MEAN, not the median: a hard black-clip (SCNR's
-    green clip, an over-eager black point) drives the channel median to exactly 0 while
-    leaving a skewed MEAN — so a median-based test reads 0/0/0 and misses the very cast
-    it should catch (verified on IC 434's 1.2.0 final). When the channels diverge in the
-    dark sky regime (max mean > 2x min mean, in absolute terms small), lift the dimmer
-    channels UP to the brightest channel's sky mean — re-neutralising additively so we
-    never darken real signal (Henry is sensitive to faint-signal loss). Distinct from
-    _rescue_dead_channel, which fires only on the post-stretch lo<0.01/hi>0.04 collapse.
-    Returns True if a channel was lifted.
+    A mean gap is not evidence of clipping: bright tails can move channel means far
+    apart even when their robust sky levels are already neutral (the M 81 failure).
+    Instead, require at least 20% of one channel's sky samples to be at the normalized
+    black floor, and require that fraction to exceed both other channels by 15 percentage
+    points. Lift only that channel toward the median sky level of the non-clipped
+    channels. Distinct from _rescue_dead_channel, which fires only on the post-stretch
+    lo<0.01/hi>0.04 collapse. Returns True if a channel was lifted.
     """
     try:
         from astropy.io import fits as _af
         import numpy as np
         with _af.open(str(out_path), memmap=False) as _h:
             _d0 = _h[0].data
-        if _d0 is None or _d0.ndim != 3 or _d0.shape[0] < 3:
+        if _d0 is None or _d0.ndim != 3 or _d0.shape[0] != 3:
             return False
         d0 = _d0.astype(np.float32)
         mx = float(d0.max())
@@ -2097,11 +2150,19 @@ def _guard_channel_crush(out_path: Path, target: str = "") -> bool:
         sky = lum < np.percentile(lum, 40)
         if int(sky.sum()) < 100:
             return False
-        means = [float(r[sky].mean()), float(g[sky].mean()), float(b[sky].mean())]
-        lo_m, hi_m = min(means), max(means)
-        # Sky-regime per-channel cast: bright channel clearly above the dim one, but the
-        # whole sky still dark (not a bright/structured frame), and the gap is real.
-        if not (hi_m < 0.15 and hi_m > 2.0 * lo_m and (hi_m - lo_m) > 0.004):
+        channels = (r, g, b)
+        medians = [float(np.median(channel[sky])) for channel in channels]
+        clip_fractions = [
+            float(np.mean(channel[sky] <= 1e-4)) for channel in channels
+        ]
+        clipped = [
+            ci for ci, fraction in enumerate(clip_fractions)
+            if fraction >= 0.20
+            and fraction >= max(
+                clip_fractions[other] for other in range(3) if other != ci
+            ) + 0.15
+        ]
+        if not clipped:
             return False
     except Exception as e:
         log.debug(f"[autoprocess] {target}: channel-crush guard probe failed: {e}")
@@ -2113,24 +2174,36 @@ def _guard_channel_crush(out_path: Path, target: str = "") -> bool:
         lifted = []
         with _af.open(str(out_path), mode="update", memmap=False) as h:
             d = h[0].data.astype(np.float32)
-            if d.ndim != 3 or d.shape[0] < 3:
+            if d.ndim != 3 or d.shape[0] != 3:
                 return False
             mx2 = float(d.max())
             scaled = mx2 > 1.5
             if scaled:
                 d = d / mx2
-            for ci in range(3):
-                if means[ci] < hi_m - 0.001:
-                    ped = hi_m - means[ci]
-                    d[ci] = np.clip(d[ci] + ped, 0.0, 1.0)
-                    lifted.append(f"{names[ci]}+{ped:.4f}")
+            for ci in clipped:
+                other_medians = [
+                    medians[other] for other in range(3) if other not in clipped
+                ]
+                if not other_medians:
+                    continue
+                target_med = float(np.median(other_medians))
+                # A clipped tail alone is not enough to alter an already-neutral sky.
+                if target_med <= 0.0 or medians[ci] >= 0.85 * target_med:
+                    continue
+                ped = max(0.0, target_med - medians[ci])
+                if ped <= 0.0:
+                    continue
+                d[ci] = np.clip(d[ci] + ped, 0.0, 1.0)
+                lifted.append(f"{names[ci]}+{ped:.4f}")
             if not lifted:
                 return False
             h[0].data = (d * mx2 if scaled else d).astype(np.float32)
             h.flush()
-        log.info(f"[autoprocess] {target}: channel-crush guard — sky means "
-                 f"R={means[0]:.4f} G={means[1]:.4f} B={means[2]:.4f} cast → "
-                 f"neutralised to {hi_m:.4f} ({','.join(lifted)})")
+        log.info(f"[autoprocess] {target}: channel-crush guard — sky medians "
+                 f"R={medians[0]:.4f} G={medians[1]:.4f} B={medians[2]:.4f}; "
+                 f"clip fractions R={clip_fractions[0]:.3f} "
+                 f"G={clip_fractions[1]:.3f} B={clip_fractions[2]:.3f}; "
+                 f"lift {','.join(lifted)}")
         return True
     except Exception as e:
         log.warning(f"[autoprocess] {target}: channel-crush guard failed: {e}")
@@ -2945,6 +3018,8 @@ def auto_process(
     from nas_server import seti_astro
     from nas_server.claude_client import (
         assess_stacked_image,
+        annotate_vision_fallback,
+        assessment_failure_reason,
         recommend_processing_step,
         generate_critical_eval,
     )
@@ -3348,6 +3423,7 @@ def auto_process(
         #   final                 → assess_stacked_image (Sonnet), physics fallback
         scores: dict | None = None
         model_tag = "physics"
+        _vision_failure_reason: str | None = None
         if label == "final":
             _bl_step = _ASSESS_BASELINE_STEP.get(label)
             _bl_jpg = baseline_previews.get(_bl_step) if _bl_step else None
@@ -3377,10 +3453,13 @@ def auto_process(
                                               measured_bg=_meas_bg)
                 if scores:
                     model_tag = "claude-sonnet-5"
+                else:
+                    _vision_failure_reason = assessment_failure_reason() or "unknown error"
             except Exception as _fe:
                 log.warning(f"[autoprocess] {target}: final assess_stacked_image "
                             f"failed ({_fe}) — physics fallback")
                 scores = None
+                _vision_failure_reason = str(_fe)
         if not scores:
             try:
                 if label in ("post_stretch", "final") or _nonlinear:
@@ -3393,6 +3472,8 @@ def auto_process(
                     from nas_server.claude_client import grade_from_physics
                     from nas_server.image_analyzer import analyze as _an
                     scores = grade_from_physics(_an(str(current_path)), _meta())
+                if label == "final" and _vision_failure_reason:
+                    annotate_vision_fallback(scores, _vision_failure_reason)
                 log.info(f"[autoprocess] {target}: physics grade "
                          f"({label}, {scores.get('_source')}): "
                          f"overall={scores.get('overall')}/10")
@@ -3450,16 +3531,15 @@ def auto_process(
                 return None
 
             corr_starless = run_dir / f"auto_corrective_{c_step}.fit"
-            _rk = _CORRECTIVE_REDUCE_KEY.get(c_step)
-            _params = dict(rec.get("params") or {})
-            _drop = (c_factor == 0.0) or not (
-                _rk and isinstance(_params.get(_rk), (int, float)))
+            _plan = _plan_corrective(c_step, c_factor, rec.get("params") or {})
+            _params = _plan["params"]
+            _drop = _plan["action"] == "dropped"
             if _drop:
-                # No scalar strength knob (or factor 0): drop the step — corrected layer
-                # is just its saved input. Still strictly reduce-only.
+                # Factor 0, a discrete knob already at minimum, or no scalar strength
+                # knob: drop the step by restoring its saved input.
                 shutil.copy2(str(in_path), str(corr_starless))
                 log.info(f"[autoprocess] {target}: corrective — DROP {c_step} "
-                         f"(factor={c_factor:.2f}, no scalar knob or drop requested)")
+                         f"(factor={c_factor:.2f}, minimum/no knob or drop requested)")
             else:
                 _sd = ontology["processing_steps"].get(c_step, {})
                 _fnn = rec.get("fn_name") or _sd.get("seti_astro_fn")
@@ -3467,9 +3547,12 @@ def auto_process(
                 if _fn is None:
                     log.info(f"[autoprocess] {target}: corrective — no fn for {c_step}, skipped")
                     return None
-                _params[_rk] = type(_params[_rk])(_params[_rk] * c_factor)
-                log.info(f"[autoprocess] {target}: corrective — {c_step} {_rk} "
-                         f"×{c_factor:.2f} → {_params[_rk]}")
+                if _plan["action"] == "level_down":
+                    log.info(f"[autoprocess] {target}: corrective — {c_step} "
+                             f"level {_plan['from']}→{_plan['to']}")
+                else:
+                    log.info(f"[autoprocess] {target}: corrective — {c_step} "
+                             f"{_plan['key']} ×{c_factor:.2f} → {_plan['to']}")
                 _sig = set(inspect.signature(_fn).parameters)
                 _vp = {k: v for k, v in _params.items() if k in _sig}
                 _res = _fn(in_path, corr_starless, **_vp)
@@ -3518,9 +3601,14 @@ def auto_process(
             _n = _to_float(_corr_g.get("overall", 0))
             log.info(f"[autoprocess] {target}: corrective physics regrade "
                      f"orig={_o:.2f} → corrected={_n:.2f}")
-            if _n + 0.05 >= _o:  # no regression (small tolerance)
-                telegram.send(f"♻️ <b>corrective</b>: <code>{target}</code> — reduced "
-                              f"{c_step} ×{c_factor:.2f}, physics {_o:.1f}→{_n:.1f}, accepted")
+            if _finalize_corrective_provenance(
+                    c_step, _plan, _o, _n, steps_applied, step_records):
+                try:
+                    telegram.send(f"♻️ <b>corrective</b>: <code>{target}</code> — reduced "
+                                  f"{c_step} ×{c_factor:.2f}, physics "
+                                  f"{_o:.1f}→{_n:.1f}, accepted")
+                except Exception as _te:
+                    log.debug(f"[autoprocess] {target}: corrective notification failed: {_te}")
                 return corr_final
             log.info(f"[autoprocess] {target}: corrective regressed physics "
                      f"({_o:.2f}→{_n:.2f}) — keeping original")
@@ -3537,6 +3625,13 @@ def auto_process(
     _adaptive_linear: dict = {}
     _adaptive_nonlinear: dict = {}
     _adaptive_param_nudges: dict = {}  # {step_name: {param: value}} from linear plan
+    # Steps where force_variants[step] was filled in from LEARNED same-target
+    # experiment evidence (target_prior's engine_inherit), not from the
+    # workflow or extra_params. Distinguishes "Henry/workflow pinned this
+    # engine on purpose" (existing behavior: a failure skips the step) from
+    # "NOVA guessed based on history" (a failure should fall back to the
+    # step's normal default engine instead, not silently skip processing).
+    _engine_inherited_steps: set[str] = set()
     _skip_steps: set[str] = set()      # steps to skip (from nonlinear plan)
     force_variants = dict(force_variants)  # make mutable copy (was from wf.get)
 
@@ -5092,6 +5187,60 @@ def auto_process(
             steps_applied.append(step_name)
             continue
 
+        # ── learned engine inheritance ───────────────────────────────────
+        # Same-target experiment evidence can show a DIFFERENT declared
+        # engine winning this step (e.g. SyQon Parallax beating every BXT
+        # variant on a real M 100 run, 2026-09-17) — target_prior.py returns
+        # that as action="engine_inherit" rather than guessing numbers onto
+        # the wrong engine's sliders. Only fills a gap: an explicit
+        # workflow/extra_params pin already in force_variants always wins,
+        # and this never runs in experiment_mode/baseline/dry_run (matches
+        # _apply_configured_target_prior's own gate below). Kept behind its
+        # own flag, separate from target_priors_enabled's numeric nudging,
+        # because this dispatches real paid GPU calls from the unattended
+        # nominal pipeline — see issue #694 and the ml-tools spend/circuit-
+        # breaker gap (issue #800), which must close first.
+        if (settings.get("target_prior_engine_inherit_enabled", False)
+                and step_name == "deconvolution" and not experiment_mode
+                and not _baseline_run and step_name not in force_variants):
+            try:
+                from nas_server.target_prior import build_current_context, derive_param_prior
+                _engine_ctx = build_current_context(target, object_type, current_path)
+                _engine_decision = derive_param_prior(
+                    target, step_name, object_type, step_def.get("parameters", {}),
+                    current_context=_engine_ctx)
+                if _engine_decision.get("action") == "engine_inherit":
+                    _winner_id = _engine_decision.get("variant_id")
+                    _declared_ids = {v["id"] for v in step_def.get("experiment_variants", [])}
+                    if _winner_id in _declared_ids:
+                        force_variants[step_name] = _winner_id
+                        _engine_inherited_steps.add(step_name)
+                        _engine_exp_id = _engine_decision["evidence"].get("experiment_run_id")
+                        log.info(f"[autoprocess] {target}: {step_name} — engine inherited "
+                                 f"from experiment {_engine_exp_id}: {_winner_id}")
+                        telegram.send(f"🧬 <b>{step_name}</b>: <code>{target}</code> — "
+                                      f"engine auto-selected from prior experiment "
+                                      f"({_engine_exp_id}): <code>{_winner_id}</code>")
+                        try:
+                            from nas_server.database import log_adaptive_decisions
+                            log_adaptive_decisions([{
+                                "run_id": _adaptive_run_id, "target_name": target,
+                                "object_type": object_type, "phase": "linear",
+                                "step_name": step_name, "decision_type": "variant_fill",
+                                "chosen_value": json.dumps(_winner_id),
+                                "physics_suggestion": None,
+                                "rationale": f"engine_inherit: {_engine_decision['reason']} "
+                                            f"experiment={_engine_exp_id}",
+                            }])
+                        except Exception as _rec_exc:
+                            log.debug(f"[autoprocess] engine_inherit decision-log failed: {_rec_exc}")
+                    else:
+                        log.warning(f"[autoprocess] {target}: {step_name} — engine_inherit "
+                                    f"named undeclared variant {_winner_id!r}, ignoring")
+            except Exception as exc:
+                log.warning(f"[autoprocess] {target}: engine-inherit check failed "
+                            f"(continuing without it): {exc}")
+
         # ── force_variant: workflow specifies exact variant to use (e.g. quick_default) ──
         # Bypassed in experiment_mode (matches the crop saved-crop-reuse precedent
         # above) — a workflow-pinned default is exactly the kind of shortcut
@@ -5357,10 +5506,25 @@ def auto_process(
                                 )
                         except Exception as _vfve:
                             log.debug(f"[video] force_variant frame failed: {_vfve}")
+                    continue
+                elif step_name in _engine_inherited_steps:
+                    # A LEARNED engine choice failed (e.g. the RunPod Parallax
+                    # call errored/timed out). Unlike a workflow/extra_params
+                    # pin, a guess NOVA made from history shouldn't cost the
+                    # target its deconvolution step entirely -- fall back to
+                    # the step's normal default engine instead. No `continue`:
+                    # execution falls through to the standard dispatch path
+                    # below (current_path/steps_applied are untouched, since
+                    # only the success branch above ever mutates them).
+                    log.warning(f"[autoprocess] {target}: inherited engine {forced_variant_id} "
+                                f"failed — falling back to the step's default engine: "
+                                f"{fv_res.get('error','')}")
+                    force_variants.pop(step_name, None)
+                    _engine_inherited_steps.discard(step_name)
                 else:
                     log.warning(f"[autoprocess] {target}: force_variant {forced_variant_id} failed — "
                                 f"continuing with previous: {fv_res.get('error','')}")
-                continue
+                    continue
 
         # ── experiment mode: run all variants, let Claude pick winner ──
         # Must run BEFORE seti_astro_fn check — PI-only steps (e.g. color_calibration)
