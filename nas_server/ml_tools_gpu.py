@@ -11,6 +11,7 @@ import logging
 import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,16 @@ _REMOTE_OPERATIONS = frozenset(
         "syqon_parallax_star_reduce",
     }
 )
+
+
+def _work_key(operation_id: str) -> str:
+    return f"ml-tools:{operation_id}"
+
+
+def _spend_policy():
+    from nas_server import runpod_spend_policy  # noqa: PLC0415
+
+    return runpod_spend_policy
 
 
 def _settings() -> dict[str, Any]:
@@ -147,6 +158,7 @@ def _run_ml_tool_gpu(operation_id: str, input_path: str | Path,
     bucket = ""
     prefix = ""
     job_id: str | None = None
+    dispatch_attempted = False
     terminal = False
     reservation_token: str | None = None
     try:
@@ -163,6 +175,24 @@ def _run_ml_tool_gpu(operation_id: str, input_path: str | Path,
         bucket = workspace.bucket if workspace else settings.get("runpod_rcastro_volume_id", "")
         if not endpoint_id or not api_key or not bucket:
             return {"ok": False, "error": "RunPod ML-tools endpoint is not configured",
+                    "elapsed_s": 0}
+
+        policy = _spend_policy()
+        work_key = _work_key(operation_id)
+        if policy.is_work_blocked(work_key):
+            return {"ok": False,
+                    "error": f"circuit breaker open for {operation_id}; review required",
+                    "elapsed_s": 0}
+        admission = policy.check_admission(
+            session_start=datetime.now(timezone.utc),
+            operation=operation_id,
+            backend="ml_tools_gpu",
+            fallback_estimate_usd=settings.get(
+                "runpod_ml_tools_gpu_fallback_estimate_usd"),
+        )
+        if not admission.allowed:
+            return {"ok": False,
+                    "error": f"admission refused: {admission.violated_cap}",
                     "elapsed_s": 0}
 
         from nas_server.rcastro_gpu import _candidate6_reserve  # noqa: PLC0415
@@ -188,6 +218,7 @@ def _run_ml_tool_gpu(operation_id: str, input_path: str | Path,
         output_dir = workspace.output_dir_key(output_name) if workspace else f"{prefix}/out"
         base_url = f"https://api.runpod.ai/v2/{endpoint_id}"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        dispatch_attempted = True
         submission = _http_post(
             f"{base_url}/run", headers,
             {"input": {"input_path": input_key, "output_dir": output_dir,
@@ -213,6 +244,7 @@ def _run_ml_tool_gpu(operation_id: str, input_path: str | Path,
                 _record_candidate6_gpu_spend(
                     tool=operation_id, endpoint_id=endpoint_id, job_id=job_id,
                     terminal_body=body, engine="ml_tools")
+                _record_failure_best_effort(work_key, f"RunPod job {status}")
                 return {"ok": False, "error": f"RunPod job {status}: {body.get('output')}",
                         "elapsed_s": int(time.time() - started)}
             time.sleep(_POLL_INTERVAL_S)
@@ -222,15 +254,19 @@ def _run_ml_tool_gpu(operation_id: str, input_path: str | Path,
             _record_candidate6_gpu_spend(
                 tool=operation_id, endpoint_id=endpoint_id, job_id=job_id,
                 engine="ml_tools")
+            _record_failure_best_effort(work_key, "RunPod job timed out")
             return {"ok": False, "error": "RunPod job timed out (client-side deadline)",
                     "elapsed_s": int(time.time() - started)}
 
         output = completed.get("output") or {}
         if not output.get("ok"):
+            _record_failure_best_effort(
+                work_key, str(output.get("error", "worker reported failure")))
             return {"ok": False, "error": output.get("error", "worker reported failure"),
                     "elapsed_s": int(time.time() - started)}
         if workspace and not str(output.get("final_output", "")).startswith(
                 f"{output_dir}/"):
+            _record_failure_best_effort(work_key, "worker output escaped workspace")
             return {"ok": False, "error": "worker output escaped assigned workspace directory",
                     "elapsed_s": int(time.time() - started)}
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -239,24 +275,29 @@ def _run_ml_tool_gpu(operation_id: str, input_path: str | Path,
             lambda: client.download_file(
                 bucket, output["final_output"], str(destination)))
         if not destination.is_file() or destination.stat().st_size == 0:
+            _record_failure_best_effort(work_key, "downloaded output is missing or empty")
             return {"ok": False, "error": "downloaded output is missing or empty",
                     "elapsed_s": int(time.time() - started)}
         from nas_server.seti_astro import _preserve_celestial_wcs  # noqa: PLC0415
 
         if source is not None:
             _preserve_celestial_wcs(source, destination)
+        _clear_failure_best_effort(work_key)
         return {"ok": True, "output_path": str(destination),
                 "elapsed_s": int(time.time() - started), "execution": "runpod_gpu"}
     except Exception as exc:
-        if job_id is not None and not terminal:
-            _cancel(base_url, headers, job_id)
+        if dispatch_attempted and not terminal:
+            if job_id is not None:
+                _cancel(base_url, headers, job_id)
             try:
-                from nas_server.rcastro_gpu import _record_candidate6_gpu_spend  # noqa: PLC0415
-                _record_candidate6_gpu_spend(
-                    tool=operation_id, endpoint_id=endpoint_id, job_id=job_id,
-                    engine="ml_tools")
+                if job_id is not None:
+                    from nas_server.rcastro_gpu import _record_candidate6_gpu_spend  # noqa: PLC0415
+                    _record_candidate6_gpu_spend(
+                        tool=operation_id, endpoint_id=endpoint_id, job_id=job_id,
+                        engine="ml_tools")
             except Exception as spend_error:
                 logger.warning("[ml_tools_gpu] spend accounting failed: %s", spend_error)
+            _record_failure_best_effort(_work_key(operation_id), str(exc))
         return {"ok": False, "error": str(exc), "elapsed_s": int(time.time() - started)}
     finally:
         from nas_server.rcastro_gpu import _release_candidate6_reservation  # noqa: PLC0415
@@ -272,15 +313,32 @@ def _run_ml_tool_gpu(operation_id: str, input_path: str | Path,
 def _record_gpu_tool_call_best_effort(operation_id: str, result: dict) -> None:
     """Record one invocation without allowing telemetry to affect processing."""
     try:
+        elapsed_s = float(result.get("elapsed_s", 0.0))
+        rate = float(_settings().get("runpod_ml_tools_gpu_rate_usd_per_second", 0.0))
         _record_gpu_tool_call(
             tool=operation_id,
             backend="gpu",
             ok=bool(result.get("ok")),
-            elapsed_s=float(result.get("elapsed_s", 0.0)),
+            elapsed_s=elapsed_s,
+            cost_usd=elapsed_s * rate,
             error=result.get("error"),
         )
     except Exception as exc:
         logger.warning("[ml_tools_gpu] call recording failed: %s", exc)
+
+
+def _record_failure_best_effort(work_key: str, reason: str) -> None:
+    try:
+        _spend_policy().record_pod_failure(work_key, reason)
+    except Exception as exc:
+        logger.warning("[ml_tools_gpu] circuit-breaker recording failed: %s", exc)
+
+
+def _clear_failure_best_effort(work_key: str) -> None:
+    try:
+        _spend_policy().clear_retry_state(work_key)
+    except Exception as exc:
+        logger.warning("[ml_tools_gpu] circuit-breaker clearing failed: %s", exc)
 
 
 def _record_gpu_tool_call(**values) -> None:

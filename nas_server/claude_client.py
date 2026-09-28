@@ -3,12 +3,17 @@ import base64
 import json
 import logging
 import re
+import threading
 import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-5"
+
+_ASSESS_MAX_TOKENS = 4096
+_ASSESS_RETRY_MAX_TOKENS = 8192
+_assessment_state = threading.local()
 
 SYSTEM_PROMPT = (
     "You are an expert astrophotographer evaluating stacked astronomical images. "
@@ -140,6 +145,17 @@ def _parse_json(raw: str) -> dict:
     return obj
 
 
+def assessment_failure_reason() -> str | None:
+    """Return this thread's latest stacked-image assessment failure, if any."""
+    return getattr(_assessment_state, "failure_reason", None)
+
+
+def annotate_vision_fallback(scores: dict, reason: str) -> dict:
+    """Make a physics fallback's missing final vision review explicit."""
+    scores["vision_review"] = f"failed: {reason}"
+    return scores
+
+
 def _baseline_content(baseline_jpg: str | Path | None) -> list[dict]:
     """Return message content blocks for the baseline image, if provided."""
     if baseline_jpg is None:
@@ -255,7 +271,9 @@ def assess_stacked_image(
     Returns None if no API key configured.
     """
     from nas_server.config import settings
+    _assessment_state.failure_reason = None
     if not settings.get("anthropic_api_key"):
+        _assessment_state.failure_reason = "anthropic_api_key not set"
         return None
 
     obj_type = meta.get("object_type") or "deep sky object"
@@ -402,33 +420,65 @@ def assess_stacked_image(
         f"{corrective_schema}" "}"
     )
 
-    try:
-        response = _messages_create(
-            label="assess_stacked_image",
-            model=MODEL,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": _b64(jpeg_path),
-                }},
-                *_baseline_content(baseline_jpg),
-            ]}],
-        )
-        raw = _response_text(response)
-        scores = _parse_json(raw)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image", "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": _b64(jpeg_path),
+        }},
+        *_baseline_content(baseline_jpg),
+    ]}]
+
+    for attempt, max_tokens in enumerate(
+        (_ASSESS_MAX_TOKENS, _ASSESS_RETRY_MAX_TOKENS), start=1
+    ):
+        try:
+            response = _messages_create(
+                label="assess_stacked_image",
+                model=MODEL,
+                max_tokens=max_tokens,
+                system=SYSTEM_PROMPT,
+                messages=messages,
+            )
+        except Exception as e:
+            reason = str(e)
+            _assessment_state.failure_reason = reason
+            log.error(f"[claude] assess_stacked_image failed for {target}: {reason}")
+            return None
+
+        stop_reason = getattr(response, "stop_reason", None) or "unknown"
+        try:
+            raw = _response_text(response)
+            if stop_reason == "max_tokens":
+                reason = f"response truncated (stop_reason=max_tokens, cap={max_tokens})"
+                scores = None
+            else:
+                scores = _parse_json(raw)
+        except Exception as e:
+            reason = f"unparseable response (stop_reason={stop_reason}): {e}"
+            scores = None
+
+        if scores is None:
+            from nas_server import api_diagnostics as _diag
+            _diag.fail_last("assess_stacked_image", reason)
+            if attempt == 1:
+                log.warning(
+                    f"[claude] assess_stacked_image retrying for {target}: {reason}"
+                )
+                continue
+            _assessment_state.failure_reason = reason
+            log.error(f"[claude] assess_stacked_image failed for {target}: {reason}")
+            return None
+
         scores["raw_response"] = raw
         scores["input_tokens"] = response.usage.input_tokens
         scores["output_tokens"] = response.usage.output_tokens
         log.info(f"[claude] {target} assessment: overall={scores.get('overall')}/10 "
                  f"({response.usage.input_tokens}+{response.usage.output_tokens} tokens)")
         return scores
-    except Exception as e:
-        log.error(f"[claude] assess_stacked_image failed for {target}: {e}")
-        return None
+
+    return None
 
 
 def grade_from_physics(stats: dict, meta: dict | None = None) -> dict:
@@ -952,7 +1002,7 @@ def generate_critical_eval(
         resp = _messages_create(
             label="generate_critical_eval",
             model=MODEL_EVAL,  # Haiku — narrative prose for the devlog, not a grade
-            max_tokens=800,
+            max_tokens=4096,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": content}],
         )

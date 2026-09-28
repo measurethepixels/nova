@@ -113,6 +113,10 @@ def _candidate6_reserve(engine: str = "rcastro") -> tuple[str | None, str | None
             "rcastro": "NOVA_RUNPOD_RCASTRO_GPU_FALLBACK_ESTIMATE_USD",
             "ml_tools": "NOVA_RUNPOD_ML_TOOLS_GPU_FALLBACK_ESTIMATE_USD",
         }[engine]
+        if engine == "ml_tools" and estimate_name not in os.environ:
+            # VM-side ml_tools admission is authoritative. Older dispatched
+            # pods did not receive this optional reservation estimate.
+            return None, None
         estimate = float(os.environ[estimate_name])
         if not math.isfinite(estimate) or estimate <= 0:
             raise ValueError("GPU fallback estimate must be positive and finite")
@@ -157,6 +161,14 @@ def _record_candidate6_gpu_spend(
     submission.
     """
     if not os.environ.get("NOVA_RUNPOD_BUDGET_BASELINE", ""):
+        return
+    if engine == "ml_tools" and not (
+        os.environ.get("NOVA_RUNPOD_ML_TOOLS_GPU_RATE_USD_PER_SECOND")
+        and os.environ.get("NOVA_RUNPOD_ML_TOOLS_GPU_FALLBACK_ESTIMATE_USD")
+    ):
+        # ML-tools is admitted and recorded by its VM-side caller. Older CPU
+        # pod payloads only carry the RC-Astro reservation pair, so do not
+        # turn successful ML work into a KeyError after completion.
         return
     cost_usd: float | None = None
     try:

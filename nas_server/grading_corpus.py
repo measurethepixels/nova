@@ -52,6 +52,12 @@ def migrate(conn) -> None:
         presentation_sha256 TEXT NOT NULL, response_sha256 TEXT NOT NULL,
         status TEXT NOT NULL, ordinal REAL NOT NULL, confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
         defects_json TEXT NOT NULL, blind_to_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT(datetime('now')));
+      CREATE TABLE IF NOT EXISTS grading_cannot_judge (
+        cannot_judge_id TEXT PRIMARY KEY, operation_key TEXT NOT NULL UNIQUE,
+        anchor_id TEXT NOT NULL REFERENCES grading_anchors(anchor_id),
+        dimension TEXT NOT NULL, pass_id TEXT NOT NULL, epoch TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+        created_at TEXT NOT NULL DEFAULT(datetime('now')));
       CREATE TABLE IF NOT EXISTS grading_disagreements (
         disagreement_id TEXT PRIMARY KEY, operation_key TEXT NOT NULL UNIQUE,
         first_label_id TEXT NOT NULL REFERENCES grading_labels(label_id),
@@ -76,7 +82,7 @@ def migrate(conn) -> None:
         corpus_revision TEXT NOT NULL, report_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT(datetime('now')));
     """)
     for table in ("grading_corpus_imports", "grading_anchors", "grading_memberships",
-                  "grading_labels", "grading_disagreements", "grading_adjudications",
+                  "grading_labels", "grading_cannot_judge", "grading_disagreements", "grading_adjudications",
                   "grading_calibration_models", "grading_acceptance_runs"):
         conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_append_only BEFORE UPDATE ON {table}
                          BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END""")
@@ -176,6 +182,29 @@ def record_label(*, operation_key: str, anchor_id: str, dimension: str, label_ki
                       (disagreement_id,operation_key,first_label_id,second_label_id)
                       VALUES(?,?,?,?)""", (_id("disagreement_"), key, *pair))
         return label_id
+
+
+def record_cannot_judge(*, operation_key: str, anchor_id: str, dimension: str,
+                        pass_id: str, epoch: str, reason: str) -> str:
+    """Record a reasoned non-label, append-only and idempotent for identical input."""
+    if not reason.strip():
+        raise ValueError("cannot_judge requires a reason")
+    from nas_server.database import get_conn
+    with get_conn() as conn:
+        prior = conn.execute("SELECT * FROM grading_cannot_judge WHERE operation_key=?",
+                             (operation_key,)).fetchone()
+        if prior:
+            if (prior["anchor_id"], prior["dimension"], prior["pass_id"],
+                    prior["epoch"], prior["reason"]) != (
+                    anchor_id, dimension, pass_id, epoch, reason.strip()):
+                raise ValueError("contradictory cannot_judge resubmission")
+            return prior["cannot_judge_id"]
+        cannot_judge_id = _id("cannot_judge_")
+        conn.execute("""INSERT INTO grading_cannot_judge
+          (cannot_judge_id,operation_key,anchor_id,dimension,pass_id,epoch,reason)
+          VALUES(?,?,?,?,?,?,?)""", (cannot_judge_id, operation_key, anchor_id,
+                dimension, pass_id, epoch, reason.strip()))
+        return cannot_judge_id
 
 
 def adjudicate(*, operation_key: str, disagreement_id: str, label_id: str,

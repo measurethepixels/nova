@@ -61,6 +61,38 @@ It does not claim that the RC-Astro RunPod 2.6.6 image is live.
 
 ---
 
+## 1.28.0 — 2026-09-24 (minor)
+
+**Detect genuine channel black-clips with robust sky statistics.**
+
+The final channel-crush guard now requires at least 20% of a channel's normalized sky
+pixels at or below the black floor and a clip fraction at least 15 percentage points
+above both other channels. It no longer treats a gap between channel means as a clip, so
+M 81-like images with neutral medians but unequal bright tails remain unchanged.
+
+When a genuine clip is present, the guard lifts only the clipped channel to the median
+sky level of the non-clipped channels, and leaves it alone when its median is already
+within 15% of that target. Its log now records the per-channel medians, black-clip
+fractions, and applied lift. This changes output on the guard path without changing the
+workflow or scoring model, so comparisons remain valid and this is a minor bump.
+
+---
+
+## 1.27.0 — 2026-09-24 (minor)
+
+**Step halo-suppression correctives down one level and record accepted corrections.**
+
+For a final-review request with `0 < factor < 1`, `halo_suppression` now re-runs at
+`reduction_level - 1` instead of being removed merely because its strength is a
+discrete level. It is dropped only for factor 0 or when the recorded level is already
+0. The existing single-step, reduce-only physics regrade remains the acceptance gate.
+
+Accepted correctives now replace the original `steps_applied` label with a truthful
+corrective label and append a `corrective_applied` step record containing the action,
+from/to values, and before/after physics grades. Rejected correctives leave both the
+image and provenance unchanged. This changes output on the corrective path without
+changing the scoring model, so comparisons remain valid and this is a minor bump.
+
 ## 1.26.0 — 2026-08-31 (minor)
 
 **Record the promoted local BXT ML5 and SASpro 1.21.0 model stack in run provenance.**

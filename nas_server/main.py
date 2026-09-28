@@ -252,6 +252,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SeeStar NAS Server", lifespan=lifespan)
+from nas_server.grading_labeling_page import install_routes as _install_grading_pass_a_routes
+_install_grading_pass_a_routes(app)
+from nas_server.grading_adjudication_page import install_routes as _install_grading_adjudication_routes
+_install_grading_adjudication_routes(app)
 
 
 # ---------------------------------------------------------------------------

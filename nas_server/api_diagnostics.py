@@ -103,6 +103,22 @@ def record(label: str, model: str, backend: str, input_tokens: int,
     ))
 
 
+def fail_last(label: str, error: str) -> bool:
+    """Mark the most recent successful call for ``label`` as failed.
+
+    Transport success is not enough when a caller requires structured output.
+    JSON parsing happens after ``_messages_create`` records the HTTP response, so
+    structured callers use this hook to make their diagnostics truthful without
+    adding a second, synthetic call record.
+    """
+    for rec in reversed(_records()):
+        if rec.label == label and rec.ok:
+            rec.ok = False
+            rec.error = str(error)
+            return True
+    return False
+
+
 def collect(start: int = 0) -> list[CallRecord]:
     """Return records appended on this thread since index `start`."""
     return list(_records()[start:])
