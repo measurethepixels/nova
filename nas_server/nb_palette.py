@@ -67,3 +67,18 @@ def compose(ha: np.ndarray, oiii: np.ndarray, palette: str = "hoo",
     else:
         raise ValueError(f"unknown palette: {palette!r} (expected one of {PALETTES})")
     return np.stack([r, g, b], axis=-1).astype(np.float32)
+
+
+def compose_sho(sii: np.ndarray, ha: np.ndarray, oiii: np.ndarray) -> np.ndarray:
+    """Map three supported display channels to RGB without synthesizing or clipping.
+
+    Offline mono research helper only. Preserves input precision and does not
+    alter the existing two-channel production compositor.
+    """
+    channels = [np.asarray(channel) for channel in (sii, ha, oiii)]
+    if any(channel.ndim != 2 or channel.shape != channels[0].shape for channel in channels):
+        raise ValueError("SHO channels must be 2D with matching shapes")
+    if any(not np.all(np.isfinite(channel) & (channel >= 0) & (channel <= 1))
+           for channel in channels):
+        raise ValueError("SHO display channels must be finite and within [0, 1]")
+    return np.stack(channels, axis=-1)

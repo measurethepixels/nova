@@ -521,12 +521,23 @@ def _run_with_workspace(job: dict) -> dict:
     input_filename = input_key.rsplit("/", 1)[-1]
     local_input = local_proc / input_filename
     workspace.download(input_ref, local_input)
+    from nas_server.library_publication import content, _atomic_write
+    proof = job.get('input_proof')
+    if not isinstance(proof, dict):
+        raise ValueError('missing accepted input manifest')
+    from nas_server.library_publication import digest
+    if local_input.stat().st_size != proof['size'] or digest(local_input) != proof['sha256']:
+        raise ValueError('input transfer content mismatch')
+    proof = dict(proof, name=input_filename)
+    _atomic_write(local_proc / 'inputs.manifest.json', json.dumps({'files': [proof]}))
     log.info(f"[cpu_pod_worker] downloaded {input_key} "
              f"({local_input.stat().st_size / 1e6:.0f} MB)")
 
     # ------------------------------------------------------------------ #
     # Step 2 — redirect seestar_library_path to local pod disk            #
     # ------------------------------------------------------------------ #
+    from nas_server.library_publication import WORKER_PUBLICATION
+    publication_context = WORKER_PUBLICATION.set(True)
     original_lib = _cfg.settings.get("seestar_library_path")
     original_gaia_path = _cfg.settings.get("gaia_db_path")
     _cfg.settings["seestar_library_path"] = str(local_lib)
@@ -597,12 +608,6 @@ def _run_with_workspace(job: dict) -> dict:
         else:
             log.warning(f"[cpu_pod_worker] no runs/ dir found locally after processing")
 
-        for f in sorted(local_proc.glob("auto_final*")):
-            if f.is_file():
-                stage_name = f"{job_id}_final_{f.stem}"  # same suffix-doubling avoidance
-                ref = workspace.stage_input(f, name=stage_name)
-                output_refs[f.name] = ref.key
-
         if output_refs:
             log.info(f"[cpu_pod_worker] published {len(output_refs)} output file(s) "
                      f"to workspace {run_id}")
@@ -617,6 +622,7 @@ def _run_with_workspace(job: dict) -> dict:
         return result
 
     finally:
+        WORKER_PUBLICATION.reset(publication_context)
         if original_lib is not None:
             _cfg.settings["seestar_library_path"] = original_lib
         if original_gaia_path is not None:

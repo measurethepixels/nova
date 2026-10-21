@@ -18,6 +18,7 @@ import numpy as np
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body
 from astropy.time import Time
 
+from nas_server.claude_client import MODEL_EVAL
 from nas_server.database import get_targets_for_planner, update_target_coords
 
 log = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ def _owner_narrative_context(settings_map: dict) -> str:
 # Persistent disk cache for _seasonal_scarcity
 # Computing scarcity for 140+ targets takes ~36s on cold start.
 # We persist results to disk so service restarts stay fast (~12s warm).
-# Cache is keyed by "{year}_{ra}_{dec}_{lat}_{lon}_{elev}" — year prefix
-# ensures automatic invalidation when the calendar year changes.
+# Cache is keyed by "evening-v2_{year}_{ra}_{dec}_{lat}_{lon}_{elev}" — the
+# convention version and year invalidate older samples and past calendar years.
 # ---------------------------------------------------------------------------
 _SCARCITY_DISK_PATH = Path.home() / "seestar_database" / "seasonal_scarcity_cache.json"
 _scarcity_disk: dict = {}
@@ -207,8 +208,17 @@ def resolve_coords(target_name: str) -> tuple[float, float] | None:
 
 
 def _dark_times(date_str: str, location: EarthLocation) -> list[Time]:
-    """Return 30-min samples during nautical dark (sun alt < -12°) for one night."""
-    midnight = Time(date_str + "T06:00:00", scale="utc")  # UTC midnight-ish for Arizona
+    """Return nautical-dark samples for the Arizona evening named by date_str.
+
+    Arizona is UTC-7 year-round, so midnight after that evening is 07:00 UTC
+    on the following calendar day. Keep this aligned with _fmt_local() and
+    scheduler._slot_hhmm_to_utc(), which also use Arizona civil time.
+    """
+    evening = datetime.strptime(date_str, "%Y-%m-%d").date()
+    local_midnight = datetime.combine(
+        evening + timedelta(days=1), datetime.min.time(), tzinfo=_AZ_TZ,
+    )
+    midnight = Time(local_midnight.astimezone(timezone.utc))
     samples = [midnight + i * u.hour for i in np.arange(-8, 8, 0.5)]
     dark = []
     for t in samples:
@@ -232,7 +242,8 @@ def _seasonal_scarcity(ra: float, dec: float, lat: float, lon: float, elev: floa
     """
     Returns 0.0–1.0: fraction of the year this target is NOT usefully visible.
     1.0 = visible only 1 month/year (maximum scarcity), 0.0 = visible year-round.
-    Samples one night per month (15th, local midnight ±4h), checks max alt > 10°.
+    Samples one night per month (evening of the 15th, local midnight ±4h),
+    checks max alt > 10°.
 
     Results are persisted to _SCARCITY_DISK_PATH so cold service restarts are fast.
     The cache key includes the current year so results auto-invalidate on Jan 1.
@@ -243,7 +254,7 @@ def _seasonal_scarcity(ra: float, dec: float, lat: float, lon: float, elev: floa
     import astropy.units as _u
 
     year = _Time.now().datetime.year
-    disk_key = f"{year}_{ra}_{dec}_{lat}_{lon}_{elev}"
+    disk_key = f"evening-v2_{year}_{ra}_{dec}_{lat}_{lon}_{elev}"
     if disk_key in _scarcity_disk:
         return float(_scarcity_disk[disk_key])
 
@@ -252,8 +263,8 @@ def _seasonal_scarcity(ra: float, dec: float, lat: float, lon: float, elev: floa
     visible_months = 0
 
     for month in range(1, 13):
-        # Local midnight for the 15th ≈ 07:00 UTC (Arizona is UTC-7, no DST)
-        midnight_utc = _Time(f"{year}-{month:02d}-15T07:00:00", scale="utc")
+        # Midnight after the 15th evening is the 16th at 07:00 UTC in Arizona.
+        midnight_utc = _Time(f"{year}-{month:02d}-16T07:00:00", scale="utc")
         times = [midnight_utc + i * _u.hour for i in _np.arange(-4, 4.5, 0.5)]
         frame = _AltAz(obstime=times, location=location)
         alts = coord.transform_to(frame).alt.deg
@@ -292,6 +303,74 @@ def _filter_match_score(target_type: str, moon_illum: float) -> float:
         return 1.0 - 0.5 * moon_illum  # unknown type — moderate penalty
 
 
+def _is_broadband(target_type: str) -> bool:
+    """Use the same emission-first classification as the LP filter score."""
+    t = (target_type or "").lower()
+    if any(k in t for k in ("emission", "planetary", "supernova", "hii", "wolf-rayet", "remnant", "sharpless")):
+        return False
+    return any(k in t for k in ("galaxy", "cluster", "reflection", "asterism"))
+
+
+def _association_groups(targets: list[dict]) -> list[dict]:
+    """Collapse one-way field-mate links without changing integration accounting."""
+    from nas_server.folio_generator import _norm_name
+
+    by_name = {_norm_name(name): i for i, t in enumerate(targets)
+               for name in t.get("source_names", [t["target"]])}
+    parent = list(range(len(targets)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, target in enumerate(targets):
+        for association in target.get("source_associations", [target.get("association")]):
+            for name in (association or "").split(","):
+                j = by_name.get(_norm_name(name.strip()))
+                if j is not None:
+                    parent[root(i)] = root(j)
+
+    groups = {}
+    for i, target in enumerate(targets):
+        groups.setdefault(root(i), []).append(target)
+
+    def rank_name(raw_name, hours):
+        display_name = " ".join(raw_name.split())
+        name = display_name.upper()
+        if re.fullmatch(r"M\s*\d+", name):
+            tier = 0
+        elif re.fullmatch(r"(?:NGC|IC)\s*\d+", name):
+            tier = 1
+        else:
+            tier = 2
+        return (tier, raw_name != display_name, -hours, name, display_name)
+
+    collapsed = []
+    for members in groups.values():
+        candidate_names = [(name, m) for m in members
+                           for name in m.get("source_names", [m["target"]])]
+        canonical_name, canonical = min(
+            candidate_names, key=lambda pair: rank_name(pair[0], pair[1]["int_hours"]))
+        entry = dict(canonical)
+        # Keep the real DB name for exact-string lookups when every name in
+        # the best catalog tier needs whitespace cleanup for display.
+        entry["target"] = " ".join(canonical_name.split())
+        entry["lookup_target"] = canonical_name
+        entry["aliases"] = sorted({name for name, _ in candidate_names
+                                   if name != entry["target"]})
+        # Keep aliases only inside the grouping step. Planner identities and
+        # serialized results must contain the canonical target alone.
+        entry["association"] = ""
+        # Each field mate sees the same photons. Preserve the DB's max-based
+        # group_int_hours contract; never sum distinct associated targets.
+        entry["group_int_hours"] = max(m["group_int_hours"] for m in members)
+        entry["raw_hours"] = max(m.get("raw_hours", 0) for m in members)
+        collapsed.append(entry)
+    return collapsed
+
+
 def _freshness_score(days_since_last: float) -> float:
     """
     Encourages session rotation. 0.0 if imaged last night, 1.0 if 14+ days ago or never.
@@ -303,11 +382,17 @@ def _freshness_score(days_since_last: float) -> float:
 @lru_cache(maxsize=256)
 def _folio_info(target_name: str) -> dict:
     """
-    Return {angular_size_arcmin, rec_hours, panel_count} from the target folio.
+    Return {angular_size_arcmin, rec_hours, panel_count, total_rec_hours} from the target folio.
     Cached per target — reads the JSON file once per session.
     Defaults: angular_size_arcmin=None, rec_hours=6.0, panel_count=1.
+
+    total_rec_hours is rec_hours × panel_count, unless the folio sets
+    s50_achievability.recommended_total_hours: a whole-target goal measured from a real
+    stack (framing-mode captures spread time over the full field, so per-panel × panels
+    overstates the need).
     """
-    defaults = {"angular_size_arcmin": None, "rec_hours": 6.0, "panel_count": 1, "object_type": ""}
+    defaults = {"angular_size_arcmin": None, "rec_hours": 6.0, "panel_count": 1,
+                "total_rec_hours": 6.0, "object_type": ""}
     from nas_server.folio_generator import load_folio as _lf
     data = _lf(target_name)
     if not data:
@@ -315,8 +400,10 @@ def _folio_info(target_name: str) -> dict:
     try:
         size_str = (data.get("catalog") or {}).get("angular_size_arcmin", "")
         object_type = str((data.get("catalog") or {}).get("object_type", "") or "")
-        rec_h_raw = (data.get("s50_achievability") or {}).get("recommended_integration_hours")
+        achiev = data.get("s50_achievability") or {}
+        rec_h_raw = achiev.get("recommended_integration_hours")
         rec_h = float(rec_h_raw) if rec_h_raw is not None else 6.0
+        total_raw = achiev.get("recommended_total_hours")
         if size_str:
             # Strip parenthetical comments like "(full nebula; …)" before numeric parsing
             size_clean = str(size_str).split("(")[0].strip()
@@ -330,7 +417,9 @@ def _folio_info(target_name: str) -> dict:
         else:
             size_arcmin = None
             panel_count = 1
-        return {"angular_size_arcmin": size_arcmin, "rec_hours": rec_h, "panel_count": panel_count, "object_type": object_type}
+        total_rec_h = float(total_raw) if total_raw is not None else rec_h * panel_count
+        return {"angular_size_arcmin": size_arcmin, "rec_hours": rec_h, "panel_count": panel_count,
+                "total_rec_hours": total_rec_h, "object_type": object_type}
     except Exception:
         return defaults
 
@@ -359,7 +448,7 @@ def score_target(
     ra: float, dec: float,
     dark_times: list[Time],
     location: EarthLocation,
-    moon_positions: list[SkyCoord],
+    moon_positions: SkyCoord,
     moon_illum: float,
     int_hours: float,
     priority: int,
@@ -371,6 +460,9 @@ def score_target(
     days_since_last_obs: float = 999.0,
     processing_score: float = 0.5,
     processing_tag: str = "",
+    moon_illum_curve: list[float] | None = None,
+    moon_floor_illum: float = 0.50,
+    moon_floor_sep: float = 30.0,
 ) -> dict:
     if not dark_times:
         return None
@@ -421,7 +513,11 @@ def score_target(
     except Exception:
         transit_mst = transit_utc
 
-    moon_seps = [coord.separation(mp).deg for mp in moon_positions]
+    # Keep the Moon's topocentric GCRS frame as the left operand. Astropy then
+    # transforms the distant target into that frame; the reverse direction
+    # shifts the nearby Moon to a barycentric viewpoint.
+    moon_seps = np.atleast_1d(
+        moon_positions.separation(coord.transform_to(moon_positions.frame)).deg)
     min_moon_sep = float(np.min(moon_seps))
 
     # Altitude score: with custom horizon → time above it; without → max_alt based
@@ -451,11 +547,15 @@ def score_target(
     # is rarely populated, but folios have rich verbose type strings for all targets).
     fi            = _folio_info(target_name)
     panel_count   = fi["panel_count"]
-    scaled_rec_h  = fi["rec_hours"] * panel_count   # total hours needed for all panels
+    scaled_rec_h  = fi.get("total_rec_hours", fi["rec_hours"] * panel_count)   # all panels, or measured override
     angular_size_score = _angular_size_score(fi["angular_size_arcmin"])
     # Resolve effective type: DB value first, folio object_type as fallback
     effective_type = target_type or fi.get("object_type", "")
     filter_match_score = _filter_match_score(effective_type, moon_illum)
+    illums = moon_illum_curve if moon_illum_curve is not None else [moon_illum] * len(moon_seps)
+    moon_blocked = [bool(_is_broadband(effective_type) and illum > moon_floor_illum
+                         and sep < moon_floor_sep)
+                    for illum, sep in zip(illums, moon_seps)]
 
     # Integration score: uses folio-scaled rec_hours so a 6-panel mosaic at 5h collected
     # stays near 1.0 (barely started) rather than dropping to 0.5 like a finished panel.
@@ -546,6 +646,11 @@ def score_target(
         "transit_utc": transit_utc,
         "transit_mst": transit_mst,
         "min_moon_sep": round(min_moon_sep, 1),
+        "moon_sep_curve": [round(float(sep), 1) for sep in moon_seps],
+        "moon_blocked_curve": moon_blocked,
+        "exclusion_reason": (f"Broadband Moon floor: illumination > {moon_floor_illum:.0%} "
+                             f"and separation < {moon_floor_sep:g}° in blocked slots")
+                            if any(moon_blocked) else "",
         "moon_illum_pct": round(moon_illum * 100, 0),
         "int_hours": round(int_hours, 1),
         "altitude_score": round(altitude_score, 3),
@@ -563,13 +668,14 @@ def score_target(
         "window_score": round(window_score, 3),
         "completion_priority_score": round(completion_priority_score, 3),
         "completion_tag": completion_tag,
-        "completion_frac": round(completion_frac, 3),
+        "completion_frac": completion_frac,
+        "usable_hours": int_hours,
         "messier_gap_score": round(messier_gap_score, 3),
         "messier_gap": int(messier_gap_score > 0),
         "processing_score": round(processing_score, 3),
         "processing_tag": processing_tag,
         "panel_count": panel_count,
-        "scaled_rec_h": round(scaled_rec_h, 1),
+        "scaled_rec_h": scaled_rec_h,
         "catalog_score": round(cat_score, 3),
         "learn_score": round(learn_score, 3),
         "combined_score": round(combined, 3),
@@ -617,9 +723,14 @@ def compute_plan(
         log.warning("[planner] no dark hours found for date range")
         return []
 
-    # Pre-compute per-time moon positions once, converted to ICRS to match target coords.
-    # (get_body returns GCRS; comparing GCRS with ICRS triggers astropy warnings.)
-    moon_positions = [get_body("moon", t, location).transform_to("icrs") for t in all_dark]
+    # Vectorize across samples and preserve topocentric GCRS for separation.
+    sample_times = Time(all_dark)
+    moon_positions = get_body("moon", sample_times, location)
+    sun_positions = get_body("sun", sample_times, location)
+    moon_illum_curve = list((1 - np.cos(moon_positions.separation(sun_positions).radian)) / 2)
+    from nas_server.config import settings
+    moon_floor_illum = float(settings.get("planner_broadband_moon_illumination_limit", 0.50))
+    moon_floor_sep = float(settings.get("planner_broadband_moon_separation_min_deg", 30.0))
 
     # Median-night illumination for scoring
     if moon_illums:
@@ -655,7 +766,7 @@ def compute_plan(
     except Exception as e:
         log.warning(f"[planner] processing-quality signal unavailable: {e}")
 
-    targets = get_targets_for_planner()
+    targets = _association_groups(get_targets_for_planner())
     log.info(f"[planner] scoring {len(targets)} targets for {date_from}–{date_to}")
 
     # Resolve coords — DB cache first, then SIMBAD (up to limit)
@@ -665,7 +776,7 @@ def compute_plan(
             continue
         if resolved >= _COORD_RESOLVE_LIMIT:
             break
-        coords = resolve_coords(t["target"])
+        coords = resolve_coords(t["lookup_target"])
         if coords:
             t["ra"], t["dec"] = coords
             resolved += 1
@@ -683,38 +794,25 @@ def compute_plan(
             t["group_int_hours"], t["priority"],
             horizon=horizon,
             target_name=t["target"],
-            learn_score=learn_scores.get(t["target"], 0.5),
+            learn_score=learn_scores.get(t["lookup_target"], 0.5),
             transient=bool(t.get("transient", 0)),
             target_type=t.get("target_type", ""),
             days_since_last_obs=t.get("days_since_last_obs", 999.0),
-            processing_score=proc_map.get(t["target"], (0.5, ""))[0],
-            processing_tag=proc_map.get(t["target"], (0.5, ""))[1],
+            processing_score=proc_map.get(t["lookup_target"], (0.5, ""))[0],
+            processing_tag=proc_map.get(t["lookup_target"], (0.5, ""))[1],
+            moon_illum_curve=moon_illum_curve,
+            moon_floor_illum=moon_floor_illum,
+            moon_floor_sep=moon_floor_sep,
         )
         if metrics is None:
             continue
         results.append({
             "target": t["target"],
-            "association": t.get("association") or "",
             "own_int_hours": t["int_hours"],
+            "raw_hours": t.get("raw_hours"),
             **metrics,
         })
 
-    results.sort(key=lambda x: x["combined_score"], reverse=True)
-
-    # Companion bonus: if a target's association partner ranks in the top 20,
-    # give it a 10% score boost to keep co-imageable pairs together in the schedule.
-    top_20 = {r["target"] for r in results[:20]}
-    boosted = []
-    for r in results:
-        assoc = r.get("association") or ""
-        if assoc:
-            partners = [a.strip() for a in assoc.split(",") if a.strip()]
-            if any(p in top_20 for p in partners):
-                r = dict(r)  # don't mutate original
-                r["combined_score"] = round(r["combined_score"] * 1.10, 3)
-                r["companion_bonus"] = True
-        boosted.append(r)
-    results = boosted
     results.sort(key=lambda x: x["combined_score"], reverse=True)
 
     log.info(f"[planner] scored {len(results)} targets, skipped {skipped} (no coords)")
@@ -797,7 +895,7 @@ def compute_schedule(
         fi = _folio_info(r["target"])
         rec_h = fi["rec_hours"]          # 6.0h default when no folio
         panel_count = fi["panel_count"]  # 1 default
-        scaled_rec_h = rec_h * panel_count
+        scaled_rec_h = fi.get("total_rec_hours", rec_h * panel_count)
 
         # In normal mode skip targets that already have sufficient integration.
         # In replan mode the user picked them explicitly so always include.
@@ -816,7 +914,9 @@ def compute_schedule(
         else:
             sched_floor = [hcurve[i] if hcurve else 15.0 for i in range(n)]
 
-        vis_count = sum(1 for i in range(n) if alts_list[i] >= sched_floor[i])
+        moon_blocked = r.get("moon_blocked_curve", [False] * n)
+        vis_count = sum(1 for i in range(n) if alts_list[i] >= sched_floor[i]
+                        and not moon_blocked[i])
         # Require at least 1 hour of schedulable window (2 × 30-min slots).
         # A single-slot window means start == end in the table — not worth scheduling.
         if vis_count < 2:
@@ -833,7 +933,6 @@ def compute_schedule(
 
         candidates.append({
             "target": r["target"],
-            "association": r.get("association") or "",
             "is_mosaic": r.get("is_mosaic", False),
             "mosaic_class": r.get("mosaic_class", "single"),
             "mosaic_panels_w": r.get("mosaic_panels_w", 1),
@@ -845,10 +944,16 @@ def compute_schedule(
             "alts_list": alts_list,
             "max_alt": max_alt,
             "sched_floor": sched_floor,
+            "moon_blocked": moon_blocked,
+            "exclusion_reason": r.get("exclusion_reason", ""),
             "int_hours": r["int_hours"],
             "own_int_hours": r.get("own_int_hours", r["int_hours"]),
             "rec_h": rec_h,
-            "scaled_rec_h": scaled_rec_h,
+            "scaled_rec_h": r.get("scaled_rec_h", scaled_rec_h),
+            "panel_count": r.get("panel_count", panel_count),
+            "usable_hours": r.get("usable_hours", r["int_hours"]),
+            "raw_hours": r.get("raw_hours"),
+            "completion_frac": r.get("completion_frac"),
         })
 
         if len(candidates) >= 40:
@@ -876,6 +981,8 @@ def compute_schedule(
             alt = c["alts_list"][t]
             if alt < c["sched_floor"][t]:
                 continue
+            if c["moon_blocked"][t]:
+                continue
             # Normalise by max(peak_alt, 75°) so circumpolar targets that never
             # exceed 40° can't game the ratio against high-transit targets at the
             # same physical altitude. A target peaking at 38° gets alt/75 ≈ 0.47
@@ -890,7 +997,7 @@ def compute_schedule(
             curr = next((c for c in candidates if c["target"] == current_target), None)
             if curr:
                 alt = curr["alts_list"][t]
-                if alt >= curr["sched_floor"][t]:
+                if alt >= curr["sched_floor"][t] and not curr["moon_blocked"][t]:
                     curr_score = curr["combined_score"] * (alt / max(curr["max_alt"], 75.0))
                     if curr_score >= best_score * _SWITCH_THRESHOLD:
                         best_target = current_target
@@ -914,6 +1021,8 @@ def compute_schedule(
             for t in range(n):
                 alt = c["alts_list"][t]
                 if alt < c["sched_floor"][t]:
+                    continue
+                if c["moon_blocked"][t]:
                     continue
                 s = c["combined_score"] * (alt / c["max_alt"])
                 if s > best_s:
@@ -950,7 +1059,7 @@ def compute_schedule(
             end_hhmm = f"{(_tot // 60) % 24:02d}:{_tot % 60:02d}"
         schedule.append({
             "target": target,
-            "association": c.get("association") or "",
+            "exclusion_reason": c.get("exclusion_reason", ""),
             "is_mosaic": c.get("is_mosaic", False),
             "mosaic_class": c.get("mosaic_class", "single"),
             "mosaic_panels_w": c.get("mosaic_panels_w", 1),
@@ -963,9 +1072,13 @@ def compute_schedule(
             "planned_h": planned_h,
             "desired_h": round(c["desired_h"], 2),
             "rec_h": c["rec_h"],
-            "scaled_rec_h": round(c["scaled_rec_h"], 1),
+            "scaled_rec_h": c["scaled_rec_h"],
             "int_hours": round(c["int_hours"], 1),
             "own_int_hours": round(c.get("own_int_hours", c["int_hours"]), 1),
+            "usable_hours": c["usable_hours"],
+            "raw_hours": c["raw_hours"],
+            "panel_count": c["panel_count"],
+            "completion_frac": c["completion_frac"],
         })
         i = j
 
@@ -1033,7 +1146,7 @@ def get_narrative(results: list[dict], date_from: str, date_to: str,
 
         client = anthropic.Anthropic(api_key=key)
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=MODEL_EVAL,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )

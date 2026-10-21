@@ -1,4 +1,5 @@
 import re
+import json
 import sqlite3
 import os
 from contextlib import contextmanager
@@ -42,11 +43,14 @@ def init_database():
         from nas_server.experiment_evidence import migrate as migrate_experiment_evidence
         from nas_server.grading_evidence import migrate as migrate_grading_evidence
         from nas_server.grading_corpus import migrate as migrate_grading_corpus
+        from nas_server.grading_pairwise_page import migrate as migrate_grading_pairwise
         from nas_server.promotion_governance import migrate as migrate_promotion_governance
+        # Nullable proofs distinguish legacy rows; never hash old paths to bless them.
         migrate_environment(conn)
         migrate_experiment_evidence(conn)
         migrate_grading_evidence(conn)
         migrate_grading_corpus(conn)
+        migrate_grading_pairwise(conn)
         migrate_promotion_governance(conn)
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS stacked_files (
@@ -611,6 +615,14 @@ def init_database():
             "ALTER TABLE stacking_runs ADD COLUMN ecc_threshold REAL",
             "ALTER TABLE stacking_runs ADD COLUMN exptime INTEGER",
             "ALTER TABLE stacking_runs ADD COLUMN framing TEXT",
+            "ALTER TABLE stacking_runs ADD COLUMN stage_times_json TEXT",
+            "ALTER TABLE stacking_runs ADD COLUMN canvas_w INTEGER",
+            "ALTER TABLE stacking_runs ADD COLUMN canvas_h INTEGER",
+            "ALTER TABLE stacking_runs ADD COLUMN feather_px INTEGER",
+            "ALTER TABLE stacking_runs ADD COLUMN exptime_mix_json TEXT",
+            "ALTER TABLE stacking_runs ADD COLUMN work_dir_kind TEXT",
+            "ALTER TABLE stacking_runs ADD COLUMN registered_frames INTEGER",
+
             "ALTER TABLE experiment_results ADD COLUMN metrics_json TEXT",
             "ALTER TABLE experiment_results ADD COLUMN experiment_run_id TEXT",
             "ALTER TABLE experiment_results ADD COLUMN all_scores_json TEXT",
@@ -667,10 +679,16 @@ def init_database():
         except Exception:
             pass
 
+    with get_conn() as conn:
+        for table, column in (("processed_files", "retired_at"), ("processing_runs", "acceptance_json")):
+            if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+
     print(f"[database] Initialized at {DB_PATH}")
 
 
 # --- Adaptive planning decisions ---
+
 
 def log_adaptive_decisions(decisions: list[dict]) -> None:
     """Bulk-insert adaptive planning decisions. Each dict may have:
@@ -1724,14 +1742,17 @@ def get_processed_files(target: str, include_stack_params: bool = False) -> list
                        WHERE output_path = pf.file_path AND success = 1
                    )
                    WHERE pf.target = ?
-                   ORDER BY pf.created_at DESC""",
+                   ORDER BY pf.created_at DESC, pf.id DESC""",
                 (target,)).fetchall()
         else:
             rows = conn.execute(
                 """SELECT * FROM processed_files WHERE target = ?
-                ORDER BY created_at DESC""",
+                ORDER BY created_at DESC, id DESC""",
                 (target,)).fetchall()
-        return [dict(r) for r in rows]
+        from nas_server.library_publication import stack_eligible
+        return [dict(r) for r in rows if not r['retired_at'] and
+                (not is_raw_stack(r['filename'], r['step']) or
+                 stack_eligible(r['file_path'], ignore_pending=True))]
 
 
 def update_processed_file(file_id: int, step: str = None,
@@ -1758,13 +1779,14 @@ def save_claude_assessment(target: str, processed_id, phase: str,
                             raw: str = None, input_tokens: int = None,
                             output_tokens: int = None) -> int:
     import json as _json
+    from nas_server.claude_client import MODEL
     with get_conn() as conn:
         cur = conn.execute("""
             INSERT INTO claude_assessments
                 (target, processed_id, phase, model, scores, recommendation,
                  raw_response, input_tokens, output_tokens)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (target, processed_id, phase, "claude-sonnet-4-6",
+        """, (target, processed_id, phase, MODEL,
               _json.dumps(scores),
               _json.dumps(recommendation) if recommendation else None,
               raw, input_tokens, output_tokens))
@@ -1852,10 +1874,8 @@ def get_story_data(target: str | None = None) -> list[dict]:
             d["total_hours"] = round((d.pop("total_seconds") or 0) / 3600, 2)
 
             # Latest processed file + scores
-            pf = conn.execute(
-                "SELECT * FROM processed_files WHERE target=? ORDER BY created_at DESC LIMIT 1",
-                (d["target"],)).fetchone()
-            d["latest_processed"] = dict(pf) if pf else None
+            eligible = get_processed_files(d['target'])
+            d['latest_processed'] = eligible[0] if eligible else None
 
             # Latest Claude scores — prefer `scores` column, fall back to `recommendation`
             # (older rows stored the JSON in recommendation before the schema was settled)
@@ -2270,18 +2290,25 @@ def save_processing_run(
     classification_strength: float | None = None,
     experiment_run_id: str | None = None,
     run_dir: str | None = None,
+    acceptance_json: dict | None = None,
 ) -> int:
     """Save a completed auto-process run and return its ID."""
     import json as _json
-    with get_conn() as conn:
+    from nas_server.pi_broker import acceptance_fence
+    with acceptance_fence(), get_conn() as conn:
+        if acceptance_json:
+            from nas_server.library_publication import verify_proof
+            verify_proof(acceptance_json)
+            if output_path != acceptance_json['fits']['path']:
+                raise ValueError('acceptance output mismatch')
         cur = conn.execute(
             """INSERT INTO processing_runs
                (target, workflow, started_at, elapsed_s, steps_json,
                 initial_scores, final_scores, critical_eval, output_path, dry_run,
                 api_diagnostics, workflow_version, object_type,
                 classification_source, classification_strength,
-                experiment_run_id, run_dir)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                experiment_run_id, run_dir, acceptance_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 target, workflow, started_at, elapsed_s,
                 _json.dumps(steps),
@@ -2293,6 +2320,7 @@ def save_processing_run(
                 _json.dumps(api_diagnostics) if api_diagnostics else None,
                 workflow_version, object_type, classification_source,
                 classification_strength, experiment_run_id, run_dir,
+                _json.dumps(acceptance_json) if acceptance_json else None,
             ),
         )
         return cur.lastrowid
@@ -2304,12 +2332,12 @@ def get_processing_runs(target: str | None = None, limit: int = 50) -> list[dict
     with get_conn() as conn:
         if target:
             rows = conn.execute(
-                "SELECT * FROM processing_runs WHERE target=? ORDER BY finished_at DESC LIMIT ?",
+                "SELECT * FROM processing_runs WHERE target=? ORDER BY finished_at DESC, id DESC LIMIT ?",
                 (target, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM processing_runs ORDER BY finished_at DESC LIMIT ?",
+                "SELECT * FROM processing_runs ORDER BY finished_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
     result = []
@@ -2503,9 +2531,11 @@ def save_stacking_run(target: str, engine: str, started_at: str,
                       log_tail: str | None = None,
                       output_path: str | None = None,
                       metrics: dict | None = None,
-                      params: dict | None = None) -> int:
+                      params: dict | None = None,
+                      telemetry: dict | None = None) -> int:
     m = metrics or {}
     p = params or {}
+    t = telemetry or {}
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO stacking_runs
@@ -2513,8 +2543,10 @@ def save_stacking_run(target: str, engine: str, started_at: str,
                 success, error, log_tail, output_path,
                 sigma_sky, snr_stack, fwhm_stack, ecc_stack,
                 flatness_rms, clipping_frac, star_count_stack, efficiency,
-                hero, drizzle, bottom_pct, ecc_threshold, exptime, framing)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                hero, drizzle, bottom_pct, ecc_threshold, exptime, framing,
+                stage_times_json, canvas_w, canvas_h, feather_px, exptime_mix_json,
+                work_dir_kind, registered_frames)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (target, engine, started_at, frame_count, elapsed_s,
              1 if success else 0, error,
              log_tail[-4000:] if log_tail else None,
@@ -2525,7 +2557,11 @@ def save_stacking_run(target: str, engine: str, started_at: str,
              1 if p.get("hero") else 0,
              1 if p.get("drizzle") else 0,
              p.get("bottom_pct"), p.get("ecc_threshold"),
-             p.get("exptime"), p.get("framing")),
+             p.get("exptime"), p.get("framing"),
+             json.dumps(t["stage_times"], allow_nan=False) if t.get("stage_times") else None,
+             t.get("canvas_w"), t.get("canvas_h"), t.get("feather_px"),
+             json.dumps(t["exptime_mix"], allow_nan=False) if t.get("exptime_mix") is not None else None,
+             t.get("work_dir_kind"), t.get("registered_frames")),
         )
         return cur.lastrowid
 
@@ -2541,7 +2577,7 @@ def get_stacking_runs(target: str | None = None, limit: int = 50,
                         SELECT MAX(id) FROM stacking_runs
                         WHERE target=? AND success=1
                         GROUP BY COALESCE(output_path, CAST(id AS TEXT))
-                    ) ORDER BY finished_at DESC LIMIT ?
+                    ) ORDER BY finished_at DESC, id DESC LIMIT ?
                 """, (target, limit)).fetchall()
             else:
                 rows = conn.execute("""
@@ -2549,16 +2585,16 @@ def get_stacking_runs(target: str | None = None, limit: int = 50,
                         SELECT MAX(id) FROM stacking_runs
                         WHERE success=1
                         GROUP BY target, COALESCE(output_path, CAST(id AS TEXT))
-                    ) ORDER BY finished_at DESC LIMIT ?
+                    ) ORDER BY finished_at DESC, id DESC LIMIT ?
                 """, (limit,)).fetchall()
         elif target:
             rows = conn.execute(
-                "SELECT * FROM stacking_runs WHERE target=? ORDER BY finished_at DESC LIMIT ?",
+                "SELECT * FROM stacking_runs WHERE target=? ORDER BY finished_at DESC, id DESC LIMIT ?",
                 (target, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM stacking_runs ORDER BY finished_at DESC LIMIT ?",
+                "SELECT * FROM stacking_runs ORDER BY finished_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
     return [dict(r) for r in rows]
@@ -2623,7 +2659,8 @@ def get_frames_by_target(target: str) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, target, date, file_name, file_path, exposure_time,
-                      exclude, fwhm, eccentricity, snr, filter
+                      exclude, fwhm, eccentricity, snr, filter,
+                      solved_ra, solved_dec, solve_status
                FROM light_files WHERE target=? ORDER BY date""",
             (target,),
         ).fetchall()
@@ -2665,7 +2702,7 @@ def get_pipeline_with_stats() -> list[dict]:
         for row in result:
             sr = conn.execute(
                 "SELECT success, engine, finished_at, error FROM stacking_runs "
-                "WHERE target=? ORDER BY finished_at DESC LIMIT 1",
+                "WHERE target=? ORDER BY finished_at DESC, id DESC LIMIT 1",
                 (row["target"],),
             ).fetchone()
             row["last_stack"] = dict(sr) if sr else None
@@ -3403,22 +3440,30 @@ def list_chat_sessions(limit: int = 15) -> list[dict]:
 
 # ── Planner helpers ────────────────────────────────────────────────────────────
 
+def usable_exposure_seconds_sql(alias: str = "l") -> str:
+    """SQL aggregate for the planner's stack-usable exposure (trusted alias only)."""
+    if not alias.isidentifier():
+        raise ValueError("invalid SQL alias")
+    return f"""COALESCE(SUM(CASE
+        WHEN {alias}.exclude = 0
+         AND ({alias}.eccentricity IS NULL OR {alias}.eccentricity <= 0.66)
+         AND ({alias}.star_count IS NULL OR {alias}.star_count >= 20)
+         AND ({alias}.gradient_severity IS NULL OR {alias}.gradient_severity <= 0.5)
+        THEN {alias}.exposure_time ELSE 0 END), 0)"""
+
+
 def get_targets_for_planner() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT t.target, t.ra, t.dec, COALESCE(t.priority, 0) AS priority,
+            f"""SELECT t.target, t.ra, t.dec, COALESCE(t.priority, 0) AS priority,
                       COALESCE(t.association, '') AS association,
-                      COALESCE(SUM(CASE
-                          WHEN l.exclude = 0
-                           AND (l.eccentricity     IS NULL OR l.eccentricity     <= 0.66)
-                           AND (l.star_count        IS NULL OR l.star_count        >= 20)
-                           AND (l.gradient_severity IS NULL OR l.gradient_severity <= 0.5)
-                          THEN l.exposure_time ELSE 0 END), 0) AS int_seconds,
+                      {usable_exposure_seconds_sql()} AS int_seconds,
                       COALESCE(t.transient, 0) AS transient,
                       COALESCE(t.type, '') AS target_type,
                       CASE WHEN MAX(l.date) IS NOT NULL
                            THEN CAST(JULIANDAY('now') - JULIANDAY(MAX(l.date)) AS REAL)
-                           ELSE 999.0 END AS days_since_last_obs
+                           ELSE 999.0 END AS days_since_last_obs,
+                      COALESCE(SUM(CASE WHEN l.exclude = 0 THEN l.exposure_time ELSE 0 END), 0) AS raw_seconds
                FROM targets t
                LEFT JOIN light_files l ON l.target = t.target
                WHERE t.inactive = 0
@@ -3430,6 +3475,7 @@ def get_targets_for_planner() -> list[dict]:
             "target": r[0], "ra": r[1], "dec": r[2],
             "priority": r[3], "association": r[4] or "",
             "int_hours": (r[5] or 0) / 3600.0,
+            "raw_hours": (r[9] or 0) / 3600.0,
             "transient": int(r[6]),
             "target_type": r[7] or "",
             "days_since_last_obs": float(r[8] if r[8] is not None else 999.0),
@@ -3455,11 +3501,15 @@ def get_targets_for_planner() -> list[dict]:
         if len(members) == 1:
             merged = dict(members[0])
             merged["target"] = canonical
+            merged["source_names"] = [members[0]["target"]]
+            merged["source_associations"] = [members[0]["association"]]
             targets.append(merged)
             continue
         primary = next((m for m in members if m["target"] == canonical), members[0])
         targets.append({
             "target": canonical,
+            "source_names": [m["target"] for m in members],
+            "source_associations": [m["association"] for m in members],
             "ra": primary["ra"], "dec": primary["dec"],
             "priority": max(m["priority"] for m in members),
             "association": primary["association"] or next(
@@ -3470,6 +3520,7 @@ def get_targets_for_planner() -> list[dict]:
             # (unlike true field-mate association below, which is a
             # different physical object and must never be double-counted).
             "int_hours": sum(m["int_hours"] for m in members),
+            "raw_hours": sum(m["raw_hours"] for m in members),
             "transient": max(m["transient"] for m in members),
             "target_type": primary["target_type"] or next(
                 (m["target_type"] for m in members if m["target_type"]), ""

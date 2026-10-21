@@ -359,36 +359,18 @@ def _run_with_local_copy(job: dict) -> dict:
     _update_progress(f"copying source FITS for {target}")
     local_proc.mkdir(parents=True, exist_ok=True)
 
-    if source_file:
-        # Specific file provided by the VM's queue manager
-        src = nas_proc / source_file
-        if not src.exists():
-            raise FileNotFoundError(f"Source FITS not found on NAS: {src}")
-        dst = local_proc / source_file
-        shutil.copy2(src, dst)
-        log.info(f"[worker] copied {source_file} ({src.stat().st_size / 1e6:.0f} MB)")
-    else:
-        # No specific file — copy all FITS sitting directly in _processed/
-        # (source stacks only; ignore runs/ subdirectory to avoid pulling
-        # gigabytes of old processing history from NAS)
-        if not nas_proc.exists():
-            raise FileNotFoundError(f"_processed/ not found for {target} at {nas_proc}")
-
-        copied = []
-        for f in sorted(nas_proc.glob("*.fit*"), key=lambda x: x.stat().st_mtime):
-            if f.is_file():
-                dst = local_proc / f.name
-                shutil.copy2(f, dst)
-                copied.append(f.name)
-                log.info(f"[worker] copied {f.name} ({f.stat().st_size / 1e6:.0f} MB)")
-        if not copied:
-            raise FileNotFoundError(
-                f"No FITS found in {nas_proc} — nothing to process"
-            )
+    from nas_server.library_publication import stage_accepted_inputs
+    staged = stage_accepted_inputs(target, nas_proc, local_proc)
+    if source_file and not any(p.name == source_file for p in staged):
+        raise ValueError('source is not an accepted input')
+    if not staged:
+        raise FileNotFoundError('no accepted source stacks')
 
     # ------------------------------------------------------------------ #
     # Step 2 — redirect seestar_library_path to local SSD                 #
     # ------------------------------------------------------------------ #
+    from nas_server.library_publication import WORKER_PUBLICATION
+    publication_context = WORKER_PUBLICATION.set(True)
     original_lib      = _cfg.settings.get("seestar_library_path")
     original_gaia_path = _cfg.settings.get("gaia_db_path")
     _cfg.settings["seestar_library_path"] = str(local_lib)
@@ -437,56 +419,28 @@ def _run_with_local_copy(job: dict) -> dict:
         # ------------------------------------------------------------------ #
         _update_progress(f"syncing results to NAS for {target}")
 
-        local_runs = local_proc / "runs"
-        nas_runs   = nas_proc   / "runs"
-
-        if local_runs.exists():
-            nas_runs.mkdir(parents=True, exist_ok=True)
-            cp = subprocess.run(
-                ["rsync", "-a", "--info=stats1",
-                 str(local_runs) + "/", str(nas_runs) + "/"],
-                capture_output=True, text=True,
-            )
-            if cp.returncode != 0:
-                log.warning(f"[worker] rsync failed (rc={cp.returncode}): "
-                            f"{cp.stderr.strip()}")
-            else:
-                # Log rsync transfer summary (last 3 lines of stderr/stdout)
-                _summary = (cp.stdout + cp.stderr).strip().splitlines()
-                for _ln in _summary[-3:]:
-                    if _ln.strip():
-                        log.info(f"[worker] rsync: {_ln.strip()}")
-        else:
-            log.warning(f"[worker] no runs/ dir found locally after processing")
-
-        # Mirror the auto_final* root files to NAS. auto_process writes these to the
-        # _processed root (auto_final.fit / auto_final_preview.jpg + any suffixed
-        # branch outputs); on the VM that root IS the NAS, but here it's local SSD,
-        # so without this copy the target's folder-root preview stays stale on NAS
-        # (the website's target page reads the root, not the run dir).
-        copied_finals = 0
-        for f in sorted(local_proc.glob("auto_final*")):
-            if f.is_file():
-                try:
-                    shutil.copy2(str(f), str(nas_proc / f.name))
-                    copied_finals += 1
-                except Exception as _ce:
-                    log.warning(f"[worker] failed to copy {f.name} to NAS: {_ce}")
-        if copied_finals:
-            log.info(f"[worker] synced {copied_finals} auto_final* file(s) to NAS root")
-
-        # Rewrite output_path in result from local → NAS path so the VM's
-        # callback handler and DB writes use the correct NAS location
-        if result.get("output_path"):
-            _p = Path(result["output_path"])
-            try:
-                result["output_path"] = str(nas_lib / _p.relative_to(local_lib))
-            except ValueError:
-                pass  # Path wasn't under local_lib — leave it as-is
+        # Copy only this completed immutable generation into hidden VM inbox.
+        # VM import/acceptance is performed by queue recovery, never by the laptop.
+        import uuid
+        from nas_server.library_publication import _fsync_dir
+        if not result.get('output_path'):
+            return result
+        run = Path(result['output_path']).parent
+        inbox = nas_proc / '.incoming'
+        inbox.mkdir(parents=True, exist_ok=True)
+        staging = inbox / ('.' + uuid.uuid4().hex)
+        shutil.copytree(run, staging)
+        ready = inbox / run.name
+        if ready.exists():
+            ready = inbox / (run.name + '_' + uuid.uuid4().hex)
+        staging.rename(ready)
+        _fsync_dir(inbox)
+        result['import_ready'] = str(ready)
 
         return result
 
     finally:
+        WORKER_PUBLICATION.reset(publication_context)
         # Restore original library path and GAIA path (important if job is retried)
         if original_lib is not None:
             _cfg.settings["seestar_library_path"] = original_lib

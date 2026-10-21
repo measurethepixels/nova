@@ -5,5 +5,5 @@
 requires 1.4.0
 
 cd process
-stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -out=../result
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -overlap_norm -feather=100 -out=../result
 cd ..

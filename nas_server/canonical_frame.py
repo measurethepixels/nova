@@ -171,11 +171,65 @@ def canonical_target_wcs(target_name: str, drizzled: bool = False):
     return wcs, (h, w)
 
 
-def reproject_to_canonical(stack_fits: str, wcs, shape, out_fits: str) -> str | None:
-    """Reproject a plate-solved stack onto the canonical WCS/shape → out_fits.
+def supported_crop_bounds(valid: np.ndarray):
+    """Exact maximum supported rectangle, without tile rounding or hole filling.
 
-    Handles 2D (H,W) and 3D (C,H,W) data, reprojecting each channel. Writes the
-    canonical WCS into the output header. Returns out_fits, or None on failure.
+    Partial coverage uses an 80% retained-valid-area floor; callers can reject
+    the rectangle rather than over-trim a rotated/wedge-shaped field.
+    """
+    valid = np.asarray(valid, dtype=bool)
+    if valid.ndim != 2 or not valid.size:
+        return None
+    # Histogram maximal rectangle, O(H*W); vectorize height updates.
+    heights = np.zeros(valid.shape[1], dtype=int)
+    best, best_area = None, 0
+    for y, row in enumerate(valid):
+        heights = np.where(row, heights + 1, 0)
+        stack = []
+        for x in range(len(heights) + 1):
+            height = int(heights[x]) if x < len(heights) else 0
+            left = x
+            while stack and stack[-1][1] >= height:
+                origin, previous = stack.pop()
+                area = previous * (x - origin)
+                if area > best_area:
+                    best_area = area
+                    best = (y - previous + 1, y + 1, origin, x)
+                left = origin
+            stack.append((left, height))
+    return best
+
+
+def crop_coverage_provenance(path: str) -> dict:
+    """Audit science validity (all channels), including saved/manual crop paths."""
+    from astropy.io import fits
+    with fits.open(path, memmap=False) as hdul:
+        data = hdul[0].data
+        valid = np.isfinite(data)
+        if data.ndim == 3:
+            valid = valid.all(axis=0)
+        if "VALIDITY" in hdul:
+            valid &= hdul["VALIDITY"].data.astype(bool)
+        hdr = hdul[0].header
+        return {
+            "coverage_fraction": float(hdr.get("COVFRAC", valid.mean())),
+            "unsupported_fraction": float(1.0 - valid.mean()),
+            "retained_area_fraction": float(hdr.get("COVKEEP", 1.0)),
+            "retained_canvas_fraction": float(hdr.get("COVAREA", 1.0)),
+            "coverage_path": hdr.get("COVPATH", "finite_input"),
+            "shape": list(valid.shape),
+        }
+
+
+def reproject_to_canonical(stack_fits: str, wcs, shape, out_fits: str,
+                           *, preserve_frame: bool = False) -> str | None:
+    """Resample with explicit validity; crop automatic frames, preserve saved ones.
+
+    VALIDITY records the delivered support, REPROJ_VALID the original canvas.
+    Saved frames retain NaNs and geometry, with a warning; the pipeline crop
+    checkpoint refuses unsupported science before any downstream modelling.
+    Automatic partial frames must retain >=80% of supported area and clear
+    the existing S50 native-resolution floor, otherwise the candidate is skipped.
     """
     from astropy.io import fits
     from astropy.wcs import WCS
@@ -185,27 +239,60 @@ def reproject_to_canonical(stack_fits: str, wcs, shape, out_fits: str) -> str | 
     try:
         with fits.open(str(stack_fits), memmap=False) as hdul:
             data = np.asarray(hdul[0].data, dtype=np.float32)
-            # naxis=2 selects the two celestial axes directly. Plain WCS(header)
-            # on a 3-axis FITS with SIP raises ("SIP only works in 2 dimensions"),
-            # and .celestial/.sub trip the same error — naxis=2 avoids it.
             src_wcs = WCS(hdul[0].header, naxis=2)
-        if not src_wcs.has_celestial:
-            logger.warning(f"[canonical] {stack_fits}: no celestial WCS — cannot reproject")
+        if not src_wcs.has_celestial or data.ndim not in (2, 3):
+            logger.warning("[canonical] no celestial WCS or unsupported dimensions: %s", stack_fits)
             return None
-
-        if data.ndim == 3:
-            out = np.zeros((data.shape[0], h, w), dtype=np.float32)
-            for c in range(data.shape[0]):
-                arr, _ = reproject_interp((data[c], src_wcs), wcs, shape_out=(h, w))
-                out[c] = np.nan_to_num(arr, nan=0.0).astype(np.float32)
-        else:
-            arr, _ = reproject_interp((data, src_wcs), wcs, shape_out=(h, w))
-            out = np.nan_to_num(arr, nan=0.0).astype(np.float32)
-
-        hdr = wcs.to_header()
-        fits.writeto(str(out_fits), np.ascontiguousarray(out), header=hdr, overwrite=True)
-        logger.info(f"[canonical] reprojected {Path(stack_fits).name} → "
-                    f"{Path(out_fits).name} ({w}x{h})")
+        channels = data if data.ndim == 3 else data[None, ...]
+        arrays = []
+        valid = np.ones((h, w), dtype=bool)
+        for channel in channels:
+            arr, footprint = reproject_interp((channel, src_wcs), wcs, shape_out=(h, w))
+            valid &= np.isfinite(arr) & np.isfinite(footprint) & (footprint > 0)
+            arrays.append(arr.astype(np.float32))
+        out = np.stack(arrays)
+        out[:, ~valid] = np.nan
+        coverage = float(valid.mean())
+        bounds = (0, h, 0, w)
+        retained = 1.0
+        path = "full_coverage"
+        if not valid.all():
+            if preserve_frame:
+                path = "saved_frame_unsupported"
+                logger.warning("[canonical] saved framing unchanged: unsupported_fraction=%.6f; "
+                               "downstream processing must stop", 1.0 - coverage)
+            else:
+                bounds = supported_crop_bounds(valid)
+                if bounds is None:
+                    logger.warning("[canonical] no supported pixels; skipping candidate")
+                    return None
+                top, bottom, left, right = bounds
+                retained = (bottom - top) * (right - left) / float(valid.sum())
+                floor = max(900, int(0.45 * min(data.shape[-2:])))
+                if retained < 0.80 or min(bottom - top, right - left) < floor:
+                    logger.warning("[canonical] skip lossy candidate: coverage=%.6f "
+                                   "retained_valid_area=%.6f short=%s floor=%s",
+                                   coverage, retained, min(bottom-top, right-left), floor)
+                    return None
+                path = "supported_rectangle"
+        top, bottom, left, right = bounds
+        delivered_valid = valid[top:bottom, left:right]
+        out = out[:, top:bottom, left:right]
+        hdr = wcs.slice((slice(top, bottom), slice(left, right))).to_header()
+        hdr["COVFRAC"] = (coverage, "Supported fraction of reprojection canvas")
+        hdr["COVKEEP"] = (retained, "Retained fraction of supported canvas pixels")
+        hdr["COVAREA"] = ((bottom-top) * (right-left) / float(h*w), "Retained fraction of canvas")
+        hdr["COVPATH"] = path
+        hdr["COVTOP"], hdr["COVLEFT"] = top, left
+        science = out if data.ndim == 3 else out[0]
+        fits.HDUList([
+            fits.PrimaryHDU(np.ascontiguousarray(science), header=hdr),
+            fits.ImageHDU(delivered_valid.astype(np.uint8), name="VALIDITY"),
+            fits.ImageHDU(valid.astype(np.uint8), header=wcs.to_header(), name="REPROJ_VALID"),
+        ]).writeto(str(out_fits), overwrite=True)
+        logger.info("[canonical] %s -> %s coverage=%.6f retained_valid_area=%.6f "
+                    "path=%s bounds=%s", Path(stack_fits).name, Path(out_fits).name,
+                    coverage, retained, path, bounds)
         return out_fits
     except Exception as e:
         logger.warning(f"[canonical] reproject failed for {stack_fits}: {e}")

@@ -13,6 +13,7 @@ import re
 import anthropic
 
 from nas_server import ollama_client as ollama
+from nas_server.claude_client import MODEL_EVAL
 from nas_server.agent_tools import TOOLS, dispatch
 from nas_server.config import resolved_owner_profile, settings
 
@@ -178,7 +179,7 @@ def _run_claude_agent(user_message: str, image_b64: str | None = None, history: 
     for round_num in range(_MAX_TOOL_ROUNDS):
         try:
             resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=MODEL_EVAL,
                 max_tokens=1024,
                 system=_system_prompt(),
                 tools=_CLAUDE_TOOLS,

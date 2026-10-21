@@ -78,7 +78,7 @@ def cropper_box_to_array(x: float, y: float, w: float, h: float,
 def rotated_crop(data: np.ndarray, cx: int, cy: int, cw: int, ch: int,
                  rotate_deg: float) -> np.ndarray:
     """Extract a `cw`×`ch` axis-aligned box whose content is the source rotated
-    by `rotate_deg` about the box center — filled entirely with real pixels.
+    by `rotate_deg` about the box center, preserving unsupported pixels as NaN.
 
     Rotate-then-crop: we sample the rotated source directly into the output box
     via affine_transform, so the result has no black corner wedges (the bug from
@@ -108,7 +108,7 @@ def rotated_crop(data: np.ndarray, cx: int, cy: int, cw: int, ch: int,
 
     def _one(plane: np.ndarray) -> np.ndarray:
         return affine_transform(plane, R, offset=offset, output_shape=(ch, cw),
-                                order=1, mode="constant", cval=0.0)
+                                order=1, mode="constant", cval=np.nan)
 
     if data.ndim == 3:
         out = np.stack([_one(data[c]) for c in range(data.shape[0])])
@@ -378,7 +378,7 @@ def apply_saved_crop(target: str, stack_fits: str, out_fits: str) -> dict:
             if built:
                 wcs, shape = built
                 from nas_server.canonical_frame import reproject_to_canonical
-                if reproject_to_canonical(stack_fits, wcs, shape, out_fits):
+                if reproject_to_canonical(stack_fits, wcs, shape, out_fits, preserve_frame=True):
                     # The box WCS is constructed astropy-consistent (standard sky
                     # parity), so stamp the PLTSOLVD marker: the renderer then uses
                     # the theoretical flip rule, keeping every step's preview
@@ -392,7 +392,8 @@ def apply_saved_crop(target: str, stack_fits: str, out_fits: str) -> dict:
                         pass
                     logger.info(f"[target_crop] {target}: applied saved sky-box "
                                 f"({shape[1]}x{shape[0]}) via reproject")
-                    return {"ok": True, "output_path": out_fits, "method": "skybox"}
+                    return {"ok": True, "output_path": out_fits, "method": "skybox",
+                            "chosen": rec.get("source", "saved")}
         except Exception as e:
             logger.warning(f"[target_crop] {target}: sky-box reproject failed: {e}")
 
@@ -402,7 +403,8 @@ def apply_saved_crop(target: str, stack_fits: str, out_fits: str) -> dict:
             res = _apply_frac_crop(stack_fits, out_fits, rec)
             if res:
                 logger.info(f"[target_crop] {target}: applied saved fractional crop")
-                return {"ok": True, "output_path": out_fits, "method": "frac"}
+                return {"ok": True, "output_path": out_fits, "method": "frac",
+                        "chosen": rec.get("source", "saved")}
         except Exception as e:
             logger.warning(f"[target_crop] {target}: fractional crop failed: {e}")
 

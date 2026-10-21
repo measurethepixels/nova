@@ -87,7 +87,8 @@ def _run_gaia_query(center_ra: float, center_dec: float, radius_deg: float,
 
     # Automation mode: PI hangs at boot without --automation-mode on this VM.
     pi_ok, log_text = _run_pi(PI_GAIA_STARFIELD_JS, job_path, timeout=timeout,
-                              use_xvfb=True, use_automation_mode=True)
+                              use_xvfb=True, use_automation_mode=True,
+                              outputs={"output_csv": "file"})
     try:
         result = json.loads(Path(job_path).read_text())
     except Exception:

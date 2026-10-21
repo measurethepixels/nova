@@ -517,6 +517,11 @@ def _morning_plan():
                                 lat=lat, lon=lon, elevation=elev, horizon=horizon)
         schedule = compute_schedule(results, horizon)
 
+        # Store an empty plan too: the page must show today's decision rather
+        # than yesterday's schedule when nothing is observable.
+        plan_slots = schedule
+        save_planner_run(date_str, plan_slots)
+
         if not schedule:
             clear_icon = "✅ Clear" if is_clear else "🌧 Cloudy"
             telegram.send(f"<b>🌙 Tonight's Plan — {date_str}</b>\n"
@@ -524,11 +529,6 @@ def _morning_plan():
             return
 
         # Persist tonight's plan for tomorrow's learning evaluation
-        plan_slots = [
-            {"target": s["target"], "start_hhmm": s["start_hhmm"], "end_hhmm": s["end_hhmm"]}
-            for s in schedule
-        ]
-        save_planner_run(date_str, plan_slots)
         for s in plan_slots:
             update_target_learn(s["target"], plan_delta=1)
 
@@ -536,10 +536,13 @@ def _morning_plan():
         clear_icon = "✅ Clear" if is_clear else "🌧 Cloudy"
         lines = [f"<b>🌙 Tonight's Plan — {date_str}</b>",
                  f"{clear_icon} — {wx_summary}\n"]
+        from nas_server.planner_display import stored_plan_slot
         for slot in schedule:
-            need = slot["rec_h"] - slot["int_hours"]
-            need_str = f"{need:.1f}h needed" if need > 0.1 else "✓"
-            have_str = f"{slot['int_hours']:.1f}h" if slot["int_hours"] > 0 else "NEW"
+            display = stored_plan_slot(slot)
+            need_str = display["need_text"]
+            if not display["done"] and need_str != "—":
+                need_str += " needed"
+            have_str = display["have_text"]
             lines.append(
                 f"• <b>{slot['target']}</b>  {slot['start_hhmm']}–{slot['end_hhmm']}"
                 f"  ({slot['planned_h']:.1f}h planned · {have_str} · {need_str})"
@@ -566,7 +569,7 @@ def nightly_plan():
     from datetime import datetime
     from nas_server.planner import compute_plan, compute_schedule, get_narrative
     from nas_server import telegram
-    from nas_server.database import record_nightly_observing_decision
+    from nas_server.database import record_nightly_observing_decision, save_planner_run
 
     def record_decision(decision, reason, summary, scheduled_targets=None):
         try:
@@ -577,6 +580,12 @@ def nightly_plan():
             # Recording is additive evidence; a database problem must not change
             # the established go/no-go behavior or suppress its Telegram notice.
             log.warning("[nightly_plan] could not record decision: %s", exc)
+
+    def store_schedule(schedule):
+        try:
+            save_planner_run(date_str, schedule)
+        except Exception as exc:
+            log.warning("[nightly_plan] could not store plan: %s", exc)
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -592,6 +601,7 @@ def nightly_plan():
 
         is_clear, wx_summary = _get_weather(lat, lon)
         if not is_clear:
+            store_schedule([])
             log.info("[nightly_plan] cloudy — skipping Claude narrative")
             record_decision("not_imaging", "weather", wx_summary)
             telegram.send(f"🌧 <b>Not imaging tonight ({date_str})</b>\n{wx_summary}")
@@ -601,6 +611,7 @@ def nightly_plan():
         results  = compute_plan(date_from=date_str, date_to=date_str,
                                 lat=lat, lon=lon, elevation=elev, horizon=horizon)
         schedule = compute_schedule(results, horizon)
+        store_schedule(schedule)
         if not schedule:
             log.info("[nightly_plan] no schedule — skipping narrative")
             record_decision("not_imaging", "no_schedule", wx_summary)
@@ -639,11 +650,28 @@ def nightly_plan():
         log.warning(f"[nightly_plan] failed: {e}")
 
 
+def _queue_missed_morning_plan(scheduler, now=None) -> bool:
+    """Queue one catch-up after 07:30 when no plan for this local date exists."""
+    from datetime import datetime, time
+    from nas_server.database import get_latest_planner_run
+
+    now = now or datetime.now()
+    if now.time() <= time(7, 30):
+        return False
+    latest = get_latest_planner_run()
+    if latest is not None and latest[0] == now.strftime("%Y-%m-%d"):
+        return False
+    scheduler.add_job(_morning_plan, id="morning_plan_catchup")
+    log.info("[morning_plan] queued missed plan for %s", now.date())
+    return True
+
+
 def start_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler()
     scheduler.add_job(hourly_scan, "interval", hours=1, id="hourly_scan")
     scheduler.add_job(_morning_plan, CronTrigger(hour=7, minute=30), id="morning_plan")
     scheduler.add_job(nightly_plan, CronTrigger(hour=18, minute=0), id="nightly_plan")
     scheduler.start()
+    _queue_missed_morning_plan(scheduler)
     log.info("Scheduler started (hourly scan, 7:30am morning plan, 6pm weather check / Claude narrative)")
     return scheduler

@@ -434,6 +434,12 @@ def render_run_report_html(run: dict, lib_path: str) -> str:
         """
         if not rel_path:
             return None
+        if rel_path == 'auto_final_preview.jpg':
+            from nas_server.library_publication import read_final_pair
+            pair = read_final_pair(target, proc_dir)
+            if pair:
+                return f"/image/{target}/{pair[1].relative_to(proc_dir)}"
+            return None
         full_run = run_dir / rel_path
         if full_run.exists():
             try:

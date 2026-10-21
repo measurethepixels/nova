@@ -10,6 +10,6 @@ seqplatesolve light -nocache -force -order=4 -radius=25
 register light -drizzle -2pass -scale=2.0 -pixfrac=0.5 -kernel=square -framing=max
 seqapplyreg light -framing=max
 
-stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -out=../result
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -overlap_norm -feather=100 -out=../result
 
 cd ..

@@ -9,7 +9,11 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-sonnet-5-5"
+MODEL_PLANNER_LINEAR = MODEL
+MODEL_PLANNER_NONLINEAR = "claude-opus-5-5"
+MODEL_EVAL = "claude-haiku-5-5"
+_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 _ASSESS_MAX_TOKENS = 4096
 _ASSESS_RETRY_MAX_TOKENS = 8192
@@ -48,6 +52,10 @@ def set_physics_only(enabled: bool) -> None:
     _PHYSICS_ONLY = bool(enabled)
 
 
+class ClaudeRefusal(RuntimeError):
+    """The requested model and its server-side fallback chain declined."""
+
+
 class PhysicsOnlyMode(RuntimeError):
     """Raised by _messages_create when physics-only mode is active."""
 
@@ -67,20 +75,54 @@ def _messages_create(*, max_tokens: int, system, messages, model: str = MODEL,
         _diag.record(label, model, "physics_only", 0, 0, 0.0,
                      False, "physics-only mode")
         raise PhysicsOnlyMode("physics-only mode active")
-    try:
-        client = _client()
-        resp = client.messages.create(model=model, max_tokens=max_tokens,
-                                       system=system, messages=messages)
-        _diag.record(label, model, "anthropic",
+    # Adaptive thinking shares the output budget. Small structured replies need
+    # room for reasoning, then one bounded retry if that budget is exhausted.
+    adaptive = model in {MODEL, MODEL_PLANNER_NONLINEAR}
+    caps = (4096, 8192) if adaptive and max_tokens < 4096 else (max_tokens,)
+    for attempt, cap in enumerate(caps):
+        t0 = time.time()
+        try:
+            client = _client()
+            kwargs = dict(model=model, max_tokens=cap, system=system, messages=messages)
+            if adaptive:
+                kwargs.update(output_config={"effort": "high"},
+                              betas=[_SERVER_SIDE_FALLBACK_BETA], fallbacks="default")
+                resp = client.beta.messages.create(**kwargs)
+            else:
+                resp = client.messages.create(**kwargs)
+        except Exception as api_err:
+            _diag.record(label, model, "error", 0, 0, time.time() - t0,
+                         False, str(api_err))
+            raise
+
+        def field(value, name, default=None):
+            return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+        stop_reason = getattr(resp, "stop_reason", None)
+        refusal_category = field(getattr(resp, "stop_details", None), "category")
+        fallback_used = any(field(item, "type") == "fallback_message"
+                            for item in (field(resp.usage, "iterations", ()) or ())) or any(
+            field(block, "type") == "fallback" for block in resp.content)
+        error = None
+        if stop_reason == "refusal":
+            error = f"Claude refusal (category={refusal_category or 'unknown'})"
+        elif stop_reason == "max_tokens" and len(caps) > 1:
+            error = f"response truncated (stop_reason=max_tokens, cap={cap})"
+        _diag.record(label, getattr(resp, "model", None) or model, "anthropic",
                      resp.usage.input_tokens, resp.usage.output_tokens,
-                     time.time() - t0, True,
+                     time.time() - t0, error is None, error,
                      cache_creation_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
-                     cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0)
+                     cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+                     requested_model=model, fallback_used=fallback_used,
+                     refusal_category=refusal_category if stop_reason == "refusal" else None,
+                     effort="high" if adaptive else None, stop_reason=stop_reason)
+        if stop_reason == "refusal":
+            raise ClaudeRefusal(error)
+        if error:
+            if attempt + 1 < len(caps):
+                continue
+            raise RuntimeError(error)
         return resp
-    except Exception as api_err:
-        _diag.record(label, model, "error", 0, 0, time.time() - t0,
-                     False, str(api_err))
-        raise
 
 
 _MAX_IMAGE_BYTES = 4_800_000  # stay under Anthropic's 5 MB base64-decoded limit
@@ -1070,7 +1112,7 @@ def write_story_entry(target: str, data: dict) -> str | None:
     try:
         response = _messages_create(
             label="write_story_entry",
-            model="claude-haiku-4-5-20251001",  # prose generation, no reasoning needed
+            model=MODEL_EVAL,  # prose generation, no reasoning needed
             max_tokens=256,
             system=("You write warm, specific, first-person astrophotography journal entries. "
                     "2-4 sentences max. No fluff. Return only the paragraph text."),
@@ -1279,9 +1321,6 @@ def analyze_crop(image_b64: str, question: str, crop_name: str = "",
 # Adaptive workflow planning
 # ---------------------------------------------------------------------------
 
-MODEL_PLANNER_LINEAR = "claude-sonnet-5"      # physics confirmation + flag
-MODEL_PLANNER_NONLINEAR = "claude-opus-5"     # optional step selection — Opus 5 at $5/$25 is 2.5x Sonnet
-MODEL_EVAL = "claude-haiku-4-5-20251001"     # end-of-run critical eval — narrative prose, not grading; Haiku (~$0.005/run vs ~$0.038 Opus)
 
 
 def _fmt_adaptive_history(history: list[dict]) -> str:

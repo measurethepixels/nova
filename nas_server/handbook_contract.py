@@ -183,6 +183,22 @@ class EvidenceReference:
 
 
 @dataclass(frozen=True)
+class WalkthroughStep:
+    """One sourced, ordered step in a process article's practical walkthrough."""
+
+    title: str
+    body: str
+    source_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_text(self.title, "title")
+        _require_text(self.body, "body")
+        _require_text_items(self.source_ids, "source_ids")
+        if not self.source_ids:
+            raise ValueError("walkthrough steps require source_ids")
+
+
+@dataclass(frozen=True)
 class ConceptSection:
     section_id: str
     title: str
@@ -464,6 +480,9 @@ class HandbookArticle:
     acceptance_criteria: tuple[str, ...]
     sources: tuple[EvidenceReference, ...]
     validation_event_ids: tuple[str, ...] = ()
+    walkthrough_steps: tuple[WalkthroughStep, ...] = ()
+    walkthrough_version_stamp: str = ""
+    walkthrough_version_source_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_schema_version(self.schema_version)
@@ -497,12 +516,23 @@ class HandbookArticle:
         if any(not isinstance(item, EvidenceReference) for item in self.sources):
             raise ValueError("sources entries must be EvidenceReference values")
         source_ids = {source.reference_id for source in self.sources}
+        if any(not isinstance(step, WalkthroughStep) for step in self.walkthrough_steps):
+            raise ValueError("walkthrough_steps must contain WalkthroughStep values")
+        if self.walkthrough_version_stamp:
+            _require_text_items(self.walkthrough_version_source_ids, "walkthrough_version_source_ids")
+            if not self.walkthrough_version_source_ids:
+                raise ValueError("walkthrough version stamp requires source_ids")
         missing = {
             source_id
             for guidance in self.tool_guidance
             for source_id in guidance.source_ids
             if source_id not in source_ids
         }
+        missing.update(
+            source_id for step in self.walkthrough_steps
+            for source_id in step.source_ids if source_id not in source_ids
+        )
+        missing.update(source_id for source_id in self.walkthrough_version_source_ids if source_id not in source_ids)
         if missing:
             raise ValueError(f"tool_guidance references unknown sources: {sorted(missing)}")
 

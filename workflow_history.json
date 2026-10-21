@@ -1,19 +1,19 @@
 {
-  "current": "1.28.0",
+  "current": "2.10.0",
   "semver_policy": {
     "major": "scoring model or step add/remove; scores no longer comparable across versions (resets the critique baseline)",
     "minor": "param/threshold/gate tuning that changes output but keeps comparability",
     "patch": "bug fix not expected to change good-run output"
   },
   "tool_versions": {
-    "detected": "2026-08-31",
-    "note": "Pinned engine dependencies of the pipeline. A minor engine or model update can silently change a headless process/default, so treat these as part of the pipeline contract. Historically environment-only updates did not bump workflow semver. At Henry's direction on 2026-08-31, workflow 1.26.0 establishes an explicit provenance boundary for the promoted local BXT ML5 and SASpro 1.21.0 model stack so runs made before and after the model changes are distinguishable. The RC-Astro RunPod endpoint is not included until its 2.6.6 image is validated and cut over.",
-    "pixinsight": "1.9.3 Lockhart",
+    "detected": "2026-10-20",
+    "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+    "pixinsight": "UNKNOWN",
     "siril": "1.4.3",
-    "setiastrosuitepro": "1.21.0 (37 model files, updated 2026-08-31)",
-    "rcastro_local": "CLI 2.6.6 (BlurXTerminator ML5)",
-    "rcastro_runpod": "pre-2.6.6 live endpoint; 2.6.6 image built but not validated/cut over",
-    "graxpert": "3.0.2 Umbriel"
+    "setiastrosuitepro": "1.21.0",
+    "rcastro_local": "2.6.6",
+    "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+    "graxpert": "UNKNOWN"
   },
   "versions": [
     {
@@ -1342,6 +1342,387 @@
           "reason": "Repair IC 434-like clipping without lifting an already-neutral channel or overshooting the robust sky level."
         }
       ]
+    },
+    {
+      "version": "1.29.0",
+      "date": "2026-10-01",
+      "bump": "minor",
+      "summary": "Normalize overlapping max-framing frames and feather their edges during Siril stacking.",
+      "rationale": "S50 framing-mode and multi-session union stacks can show rectangular seams where neighboring frames have different sky levels. Siril overlap normalization and a configurable 100-pixel feather change stack output without changing scoring steps, so runs remain comparable but need a minor version boundary.",
+      "critiques_evaluated": [],
+      "changes": [
+        {
+          "file": "nas_server/seestar_stack*maxframing*.ssf and nas_server/stacker.py",
+          "param": "Siril max-framing stack normalization and feather",
+          "from": "additive scaling with output normalization, noise weighting and maximize only",
+          "to": "add overlap normalization and 100-pixel edge feather by default, configurable via max_framing_feather_px",
+          "reason": "Reduce tile seams in multi-pointing stacks; issue #934, C 50 / Rosette scratch re-stack evidence."
+        }
+      ]
+    },
+    {
+      "version": "2.0.0",
+      "date": "2026-10-01",
+      "bump": "major",
+      "summary": "Migrate Claude scoring/planning to Sonnet 5.5 and Opus 5.5 with explicit high effort and refusal fallbacks.",
+      "rationale": "Henry-approved model migration (#939) changes the scoring model; scores and Experiment Mode results across this boundary are not directly comparable. Haiku prose/eval uses the undated 4.5 alias. Deployment and a real autoprocess validation remain Henry/Claude-gated.",
+      "critiques_evaluated": [],
+      "changes": [
+        "Centralize Claude model IDs; pin anthropic 0.125.0 without the 1.x transport migration.",
+        "Set high effort and opt in to server-side refusal fallbacks on Sonnet/Opus only; record refusals and actual fallback evidence.",
+        "Reserve adaptive-thinking output budget for small-cap calls and retry truncation once.",
+        "Correct narrative/assessment model provenance and preserve historical pricing rows."
+      ],
+      "tool_versions": {
+        "detected": "2026-10-01",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.1.0",
+      "date": "2026-10-02",
+      "bump": "minor",
+      "summary": "Restore PI SPCC for broadband colour calibration; retain SSSC for LP.",
+      "rationale": "Henry-approved mitigation (#951): the 2026-10-02 12-target comparison found systematic green excess and suppressed blue in broadband SSSC. Engine selection changes output but retains scoring comparability with 2.0.0.",
+      "critiques_evaluated": [],
+      "changes": [
+        "Default broadband colour calibration to allow_sssc=False (PI SPCC); keep LP allow_sssc=True.",
+        "Allow explicit per-run extra_params[\"allow_sssc\"] overrides for diagnostics.",
+        "Correct the superseded Stage-1/Stage-3 SSSC parity claim; SSSC engine internals are unchanged."
+      ]
+    },
+    {
+      "version": "2.2.0",
+      "date": "2026-10-03",
+      "bump": "minor",
+      "summary": "Rank galaxy stretch peers by measured input-mask structure contrast with a fine-noise penalty.",
+      "rationale": "Issue #955: equal-health variants previously followed a fixed preference that chose the flattest VeraLux on M 31. Structure is now measured in a shared linear-input disk mask; noise is penalized and score bucketed. Existing DQs and non-galaxy branches are unchanged. Five-target replay is recorded in docs/analysis/issue-955-calibration.md; Henry requested a stronger grain guard after the initial M 51 replay; weight 0.70 replaces 0.50 within this unreleased version. Parameter/ranking tuning keeps the scoring model comparable. Not deployment evidence.",
+      "critiques_evaluated": [
+        "20261003_052528_seestar_galaxy",
+        "20260913_053854_seestar_galaxy",
+        "20260925_055523_seestar_galaxy",
+        "20260904_040215_seestar_galaxy",
+        "20260916_131618_seestar_galaxy"
+      ],
+      "changes": [
+        "Add shared input mask and signed mid-band contrast minus 0.70 times fine residual to galaxy stretch selection in nas_server/auto_process.py.",
+        "Rank structure within highlight-health bins and emit measurements with an explicit whole-survivor-set fallback.",
+        "Record five-target read-only calibration; preserve Henry merge/deploy and visual acceptance gates."
+      ],
+      "tool_versions": {
+        "detected": "2026-10-03",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.3.0",
+      "date": "2026-10-03",
+      "bump": "minor",
+      "summary": "Preserve unit-range FITS intensities across finishing steps.",
+      "rationale": "Issue #960: repeated extrema normalization brightened cores after stretch selection. Good-run output changes; retain scoring comparability.",
+      "critiques_evaluated": [],
+      "changes": [
+        "Decode integer FITS by declared storage scale; reject ambiguous float/signed-count units.",
+        "Audit narrowband sanitizer and integer-origin star scaling.",
+        "Measure HDR clipping on actual post-recombine input in absolute unit intensity.",
+        "Record workflow-boundary ranges, delivered stretch choice/overrides and final delivery override."
+      ]
+    },
+    {
+      "version": "2.3.1",
+      "date": "2026-10-03",
+      "bump": "patch",
+      "summary": "Restore star-layer normalisation for float StarXT layers (fix near-starless finals).",
+      "rationale": "Issue #967: 2.3.0 restricted star_stretch's p99.9 normalisation to integer input, so the float32 linear star layer was ~9x too dim; the auto stretch-factor mirror still replicated the removed loader min-max. Restores 2.2.0 star rendering while keeping the #960 core fix.",
+      "critiques_evaluated": [],
+      "changes": [
+        "star_stretch normalises a crushed linear star layer (p99.9 < 0.1) to p99.9 = 1.0 for float and integer input; star-layer input contract documented.",
+        "stretch_stars auto-factor estimate loads via seti_astro._load_fits instead of the stale pre-2.3 min-max mirror."
+      ],
+      "tool_versions": {
+        "detected": "2026-10-03",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.3.2",
+      "date": "2026-10-03",
+      "bump": "patch",
+      "summary": "Preserve canonical reprojection validity and remove unsupported automatic crop borders.",
+      "rationale": "Issue #966: unsupported reprojection pixels must not be zero-valued sky. Fully supported crops retain good-run pixels; saved manual framing is preserved and unsupported crops stop before downstream engines.",
+      "critiques_evaluated": [
+        "20261003_165312_seestar_galaxy"
+      ],
+      "changes": [
+        {
+          "file": "nas_server/canonical_frame.py",
+          "change": "Retain coverage maps; exact supported rectangle with 80% valid-area and native-resolution floors; saved crops retain NaNs."
+        },
+        {
+          "file": "nas_server/auto_process.py",
+          "change": "Record crop winner and coverage in run.log; stop unsupported chosen crops before downstream modelling."
+        },
+        {
+          "file": "nas_server/target_crop.py",
+          "change": "Preserve saved framing and NaN support in sky-box and rotated manual crops."
+        }
+      ],
+      "tool_versions": {
+        "detected": "2026-10-03",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.4.0",
+      "date": "2026-10-03",
+      "bump": "minor",
+      "summary": "Require galaxy faint-subject adequacy before stretch guards and structure ranking.",
+      "rationale": "Issue #961: quiet, nearly empty GHS candidates must not beat visible candidates after grain disqualification. Eligibility changes output; existing 0.10 grain threshold and 0.70 structure penalty remain unchanged.",
+      "critiques_evaluated": [
+        "20261003_165312_seestar_galaxy"
+      ],
+      "changes": [
+        {
+          "file": "nas_server/galaxy_adequacy.py",
+          "change": "Measure shared input-derived faint/nearby-sky separation in local noise units with a display noise floor; require >=0.25."
+        },
+        {
+          "file": "nas_server/auto_process.py",
+          "change": "Filter inadequate galaxies before existing guards. Preserve deterministic fallback if none are adequate; record delivered adequacy/guard relaxation and warn Henry when best available is not acceptable."
+        }
+      ]
+    },
+    {
+      "version": "2.5.0",
+      "date": "2026-10-04",
+      "bump": "minor",
+      "summary": "Target delivered sky bands with fixed-input faint protection and bounded clipping.",
+      "rationale": "Issue #970: the old sigma black point crushed sky and faint structure; a mismatched whole-frame crush lift changed cores.",
+      "critiques_evaluated": [
+        "20261004_023129_seestar_galaxy"
+      ],
+      "changes": [
+        {
+          "file": "nas_server/sky_finishing.py",
+          "change": "Versioned input sky40/blur6 population, #961 faint masks, band targets, 1% clipping bound, RGB-ratio-preserving mute and final evidence."
+        },
+        {
+          "file": "nas_server/auto_process.py",
+          "change": "Use shared finishing for combined images; remove corner-based mute and additive crush lift; record per-step and actual-delivery evidence."
+        }
+      ]
+    },
+    {
+      "version": "2.6.0",
+      "date": "2026-10-07",
+      "bump": "minor",
+      "summary": "Move the Haiku tier (MODEL_EVAL) from claude-haiku-4-5 to claude-haiku-5-5.",
+      "rationale": "Henry 2026-10-07: Haiku 5.5 released (models API lists claude-haiku-5-5, created 2026-10-07). MODEL_EVAL drives the crop clip-veto, the close-call stretch vision tiebreak, devlog/story prose, the planner narrative and the chat agent, so AI-assisted pipeline judgments may shift. Minor per semver_policy: output may change, but the scoring model (Sonnet) is unchanged, so scores stay comparable (not major like 2.0.0).",
+      "critiques_evaluated": [],
+      "changes": [
+        {
+          "file": "nas_server/claude_client.py",
+          "change": "MODEL_EVAL = claude-haiku-5-5 (single central constant; all Haiku callers import it)."
+        },
+        {
+          "file": "tests/test_claude_model_migration.py",
+          "change": "Centralised model-ID assertion updated."
+        }
+      ],
+      "tool_versions": {
+        "detected": "2026-10-07",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.7.0",
+      "date": "2026-10-15",
+      "bump": "minor",
+      "summary": "Always stack eligible LP and IRCUT frames separately (#1027).",
+      "rationale": "Henry-approved contract: never mix filters; automatic/all requests produce per-filter outputs. Changes stack composition while preserving the scoring model.",
+      "critiques_evaluated": [],
+      "changes": [
+        {
+          "file": "nas_server/stacker.py",
+          "change": "Freeze eligible sources, split by canonical filter, stamp truthful FITS metadata and source identity before publication."
+        },
+        {
+          "file": "nas_server/queue_manager.py",
+          "change": "Queue each successful per-filter source with isolated processing output suffix and preserve active-target guards."
+        }
+      ],
+      "tool_versions": {
+        "detected": "2026-10-15",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "UNKNOWN",
+        "setiastrosuitepro": "UNKNOWN",
+        "rcastro_local": "UNKNOWN",
+        "rcastro_runpod": "UNKNOWN",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.8.0",
+      "date": "2026-10-15",
+      "bump": "minor",
+      "summary": "Skip Siril max-framing feathering above a per-filter eligible-frame threshold (#1035).",
+      "rationale": "Henry accepts possible seams for quicker nightly auto stacks; retain every selected frame and all normalization options. Manual threshold override and zero always-feather are persisted with the queue job.",
+      "critiques_evaluated": [],
+      "changes": [
+        "Default mosaic_feather_max_subs=1250; feather at or below it, remove only -feather above it.",
+        "Freeze threshold and width in queued jobs; record effective width, count, override and reason.",
+        "Distinct nofeather/positive-width config tokens; Siril 1.4.3 effective width capped at 2000."
+      ]
+    },
+    {
+      "version": "2.8.1",
+      "date": "2026-10-16",
+      "bump": "patch",
+      "summary": "Publish immutable library generations and switch acceptance before root materialization (#1024).",
+      "rationale": "Preserve accepted bytes through crashes and failed imports; fence local acceptance and recover accepted bytes by durable content proof.",
+      "critiques_evaluated": [],
+      "changes": [
+        {
+          "file": "nas_server/library_publication.py",
+          "change": "Shared eligibility, immutable transfer, retention and content-bound accepted-pair recovery."
+        },
+        {
+          "file": "nas_server/pi_owner.py",
+          "change": "Atomic supersession/repair journal with post-acceptance finality."
+        },
+        {
+          "file": "nas_server/auto_process.py",
+          "change": "Accept immutable final paths before publishing convenience copies."
+        }
+      ],
+      "tool_versions": {
+        "detected": "2026-10-15",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "UNKNOWN",
+        "setiastrosuitepro": "UNKNOWN",
+        "rcastro_local": "UNKNOWN",
+        "rcastro_runpod": "UNKNOWN",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.8.2",
+      "date": "2026-10-16",
+      "bump": "patch",
+      "summary": "Persist inferred mount-mode metadata for rejected stack inventory without changing selection (#1050).",
+      "rationale": "Remove survivor-conditioned eq_mode population bias; preserve qualified-only mode counts, selection branches and existing 0/1 inference. No production backfill or frame-selection policy change.",
+      "critiques_evaluated": [],
+      "changes": [
+        {
+          "file": "nas_server/frame_modes.py",
+          "change": "Reuse selected header observations, read remaining per-stack inventory once, and batch best-effort metadata with elapsed-time logging."
+        },
+        {
+          "file": "nas_server/stacker.py",
+          "change": "Keep EQ/alt-az counts and filtering scoped to qualified frames; isolate metadata failures from selection."
+        }
+      ],
+      "tool_versions": {
+        "detected": "2026-10-16",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.9.0",
+      "date": "2026-10-16",
+      "bump": "minor",
+      "summary": "Coverage-stratified capture-transition mosaic caps with full feathering (#1052).",
+      "rationale": "Henry-approved auto/manual selection policy; preserves output comparability. Live M31 acceptance remains separately gated.",
+      "critiques_evaluated": [],
+      "changes": [
+        "Default new Siril/max capture-transition jobs to at most 1000 candidates per filter, quality-ranked within declared coverage strata.",
+        "New manual requests retain every eligible sub and feathering; existing frozen queue snapshots and explicit feather thresholds retain their meaning.",
+        "Freeze admission policy, source membership and coverage/ranking hashes; record cap, counts, quotas and registration survivors."
+      ]
+    },
+    {
+      "version": "2.9.1",
+      "date": "2026-10-17",
+      "bump": "patch",
+      "summary": "Correct mosaic settings migration, effective dedup and capped admission forecasts.",
+      "rationale": "Henry explicitly approved the three review corrections; no intended selection change for correctly admitted runs.",
+      "critiques_evaluated": [],
+      "changes": [
+        "Accept retired feather settings while preserving their valid values only for legacy queue restoration.",
+        "Deduplicate using effective applicable mosaic cap/cell configuration rather than provenance-only origin.",
+        "Bound provisional admission forecasts by the frozen applicable cap; retain actual selected start counts."
+      ],
+      "tool_versions": {
+        "detected": "2026-10-17",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
+    },
+    {
+      "version": "2.10.0",
+      "date": "2026-10-20",
+      "bump": "minor",
+      "summary": "Add per-stack Siril max-framing overlap normalization and feather opt-outs.",
+      "rationale": "Issue1100, Henry start3401: explicit user options may change stacking output; defaults unchanged. Draft, not deployed. Parallel PR1098 also proposes next minor2.10.0; reconcile version history at merge, without dropping either change.",
+      "critiques_evaluated": [],
+      "changes": [
+        "Persist requested booleans and resolved applicability/effective provenance through queue restart and worker handoff.",
+        "Render independent overlap/feather flags in per-run SSFs; preserve defaults and legacy threshold precedence.",
+        "Bind forecasts, dedup/output names and successful FITS/Telegram provenance to effective options; expose checked expert controls."
+      ],
+      "tool_versions": {
+        "detected": "2026-10-20",
+        "note": "Authoring-time snapshot from environment_components. Values are frozen with this workflow version; UNKNOWN means no successful installed identity was recorded at capture time. Status is not approval.",
+        "pixinsight": "UNKNOWN",
+        "siril": "1.4.3",
+        "setiastrosuitepro": "1.21.0",
+        "rcastro_local": "2.6.6",
+        "rcastro_runpod": "sha256:da30b586ec4a51cda32b2dd25b692d6220dd3457413bc7b500a271d55f095603",
+        "graxpert": "UNKNOWN"
+      }
     }
   ]
 }

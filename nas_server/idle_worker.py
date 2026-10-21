@@ -144,7 +144,8 @@ def _generate_one_preview() -> bool:
             return False
         for proc_dir in sorted(lib.glob("*/_processed")):
             existing_jpgs = {p.stem for p in proc_dir.glob("*.jpg")}
-            for fits_path in sorted(proc_dir.glob("*.fit")) + sorted(proc_dir.glob("*.fits")):
+            from nas_server.library_publication import accepted_stack_files
+            for fits_path in accepted_stack_files(proc_dir.parent.name, proc_dir):
                 if fits_path.stem + "_preview" not in existing_jpgs:
                     out = proc_dir / (fits_path.stem + "_preview.jpg")
                     ok = _generate_preview(fits_path, out)

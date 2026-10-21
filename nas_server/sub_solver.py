@@ -210,11 +210,75 @@ def solve_subs_astap(file_paths, work_root=None) -> dict:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _fallback_reference(src, header):
+    """Prefer catalog target/panel coordinates to potentially spoofed headers."""
+    from nas_server.database import get_conn
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT t.ra, t.dec FROM light_files l JOIN targets t ON t.target=l.target "
+            "WHERE l.file_path=?", (str(src),)).fetchone()
+    for candidate in (row, (header.get('RA'), header.get('DEC'))):
+        if candidate is None:
+            continue
+        try:
+            ra, dec = map(float, candidate)
+            if math.isfinite(ra) and math.isfinite(dec) and 0 <= ra < 360 and -90 <= dec <= 90:
+                return ra, dec
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _astap_fallback(src, work_dir):
+    """No DB writes. Strict solve of an isolated original copy, with guards."""
+    from astropy.io import fits
+    from nas_server.seti_astro import astap_solve
+    try:
+        header = fits.getheader(str(src))
+        # Acquisition geometry, never an inherited solved CD matrix.
+        if header.get('XBINNING', 1) != 1 or header.get('YBINNING', 1) != 1:
+            return None, 'unsupported binned acquisition scale'
+        if 'S50' in str(header.get('INSTRUME', '')):
+            expected_scale = 2.374
+        else:
+            # Only explicit acquisition geometry qualifies outside native S50.
+            pixel_um, focal_mm = float(header['XPIXSZ']), float(header['FOCALLEN'])
+            if pixel_um <= 0 or focal_mm <= 0:
+                return None, 'invalid acquisition geometry'
+            expected_scale = 206.265 * pixel_um / focal_mm
+        if not math.isfinite(expected_scale) or expected_scale <= 0:
+            return None, 'invalid acquisition scale'
+        reference = _fallback_reference(src, header)
+        if reference is None:
+            return None, 'no bounded position reference'
+        with tempfile.TemporaryDirectory(prefix='astap_', dir=str(work_dir)) as scratch:
+            copy = Path(scratch) / 'source.fit'
+            shutil.copy2(src, copy)
+            result = astap_solve(copy, fov_deg=expected_scale * header['NAXIS2'] / 3600,
+                                 search_deg=10, timeout=60, require_fresh=True)
+            if not result.get('ok'):
+                return None, 'ASTAP execution failed: ' + str(result.get('error', 'unknown'))
+            solution = _solve_from_header(fits.getheader(str(copy)))
+        if solution is None or not all(math.isfinite(v) for v in solution):
+            return None, 'invalid celestial WCS'
+        ra, dec, rotation, scale = solution
+        if not (0 <= ra < 360 and -90 <= dec <= 90):
+            return None, 'invalid solved centre'
+        if abs(scale / expected_scale - 1) > .02:
+            return None, 'pixel scale outside 2% acquisition tolerance'
+        if _angular_sep(ra, dec, *reference) > 3:
+            return None, 'solved centre beyond 3 degree reference radius'
+        return solution, 'fresh solution; scale and position guards passed'
+    except Exception as exc:
+        return None, 'ASTAP fallback error: ' + str(exc)
+
+
 def solve_subs(file_paths, work_root=None) -> dict:
     """Plate-solve the given subs standalone and persist the result.
 
     Stages copies into a temp work dir, runs the platesolve-only SSF, harvests the
-    per-frame WCS, then flags outliers per target. Returns {file_path: status}.
+    per-frame WCS with guarded ASTAP fallback, then flags outliers per target.
+    Returns {file_path: final status}, including the outlier pass.
     """
     file_paths = [Path(p) for p in file_paths if Path(p).exists()]
     if not file_paths:
@@ -237,25 +301,39 @@ def solve_subs(file_paths, work_root=None) -> dict:
             proc.communicate(timeout=SOLVE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.communicate()  # Reap before reading outputs or starting fallback.
             log.error("[solve] siril platesolve timed out")
-        n = harvest_solves(work_dir / "process", ordered, mark_failed=True)
-        log.info(f"[solve] harvested {n}/{len(ordered)} solves")
-        # Any source we staged but didn't harvest -> mark failed so we don't retry forever.
+        from astropy.io import fits
         from nas_server.database import update_light_frame_solve
         process_dir = work_dir / "process"
         for idx, src in enumerate(ordered, start=1):
-            if not (process_dir / f"light_{idx:05d}.fit").exists():
+            fp = process_dir / f"light_{idx:05d}.fit"
+            try:
+                solution = _solve_from_header(fits.getheader(str(fp)))
+                reason = 'missing usable Siril WCS' if solution is None else 'Siril WCS accepted'
+            except Exception as exc:
+                solution = None
+                reason = 'Siril output missing/unreadable: ' + str(exc)
+            solver = 'siril'
+            if solution is None:
+                solver = 'astap'
+                solution, fallback_reason = _astap_fallback(src, work_dir)
+                reason += '; ' + fallback_reason
+            if solution is None:
                 update_light_frame_solve(str(src), None, None, solve_status="failed")
-        result = _read_back_status(ordered)
+            else:
+                update_light_frame_solve(str(src), *solution, solve_status="ok")
+            log.info("[solve] source=%s solver=%s status=%s reason=%s", src, solver,
+                     'ok' if solution is not None else 'failed', reason)
         for t in {_target_of(p) for p in ordered}:
             if t:
                 try:
                     flag_alignment_outliers(t)
                 except Exception as e:
                     log.debug(f"[solve] outlier flag failed for {t}: {e}")
-        return result
+        return _read_back_status(ordered)
     finally:
-        subprocess.Popen(["rm", "-rf", str(work_dir)])
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _target_of(file_path) -> str | None:

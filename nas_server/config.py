@@ -29,7 +29,7 @@ SECRET_FIELDS = frozenset(
         "runpod_s3_secret_access_key",
     }
 )
-DEPRECATED_FIELDS = frozenset({"siril_path"})
+DEPRECATED_FIELDS = frozenset({"siril_path", "mosaic_feather_max_subs"})
 PATH_FIELDS = frozenset(
     {
         "calibration_library_path",
@@ -94,6 +94,8 @@ class SettingsModel:
     observer_lon: float = 0.0
     observer_elevation_m: int = 0
     observer_horizon: list[list[float]] = field(default_factory=list)
+    planner_broadband_moon_illumination_limit: float = 0.50
+    planner_broadband_moon_separation_min_deg: float = 30.0
     stability_wait_seconds: int = 60
     web_link_host: str = ""
     server_host: str = "http://localhost:8000"
@@ -127,6 +129,7 @@ class SettingsModel:
     relay_dir: str = ""
     codex_relay_dispatcher_enabled: bool = False
     claude_relay_dispatcher_enabled: bool = False
+    chatgpt_mcp_relay_bridge_enabled: bool = False
     chatgpt_sheet_fallback_enabled: bool = False
     chatgpt_sheet_fallback_spreadsheet_id: str = ""
     auto_assess: bool = True
@@ -154,6 +157,9 @@ class SettingsModel:
     background_neutralize_race_enabled: bool = False
     canonical_framing_auto: bool = True
     exclude_alignment_outliers: bool = True
+    max_framing_feather_px: int = 100
+    mosaic_auto_max_subs: int = 1000
+    stack_long_warn_hours: float = 5.0
     pi_register_mem_budget_gb: float = 32.0
     pi_ii_buffer_budget_mb: int = 16384
     pi_ii_stack_size_mb: int = 1024
@@ -305,6 +311,7 @@ _BOOLEAN_FIELDS = frozenset(
         "auto_process_enabled",
         "canonical_framing_auto",
         "claude_relay_dispatcher_enabled",
+        "chatgpt_mcp_relay_bridge_enabled",
         "chatgpt_sheet_fallback_enabled",
         "codex_relay_dispatcher_enabled",
         "cosmic_clarity_enabled",
@@ -327,6 +334,8 @@ _BOOLEAN_FIELDS = frozenset(
 )
 _INTEGER_RANGES = {
     "api_port": (1, 65535),
+    "max_framing_feather_px": (1, 10000),
+    "mosaic_auto_max_subs": (0, None),
     "experiment_gpu_max_concurrency_rcastro": (1, 16),
     "experiment_gpu_max_concurrency_ml_tools": (1, 16),
     "experiment_gpu_max_concurrency": (1, 16),
@@ -342,6 +351,9 @@ _INTEGER_RANGES = {
     "telegram_api_id": (0, None),
 }
 _FLOAT_RANGES = {
+    "stack_long_warn_hours": (0.0, None),
+    "planner_broadband_moon_illumination_limit": (0.0, 1.0),
+    "planner_broadband_moon_separation_min_deg": (0.0, 180.0),
     "observer_lat": (-90.0, 90.0),
     "observer_lon": (-180.0, 180.0),
     "pi_register_mem_budget_gb": (0.01, None),
@@ -361,6 +373,12 @@ def _validate_field(key: str, value: Any) -> Any:
     if key in _INTEGER_RANGES:
         minimum, maximum = _INTEGER_RANGES[key]
         return _require_int(key, value, minimum=minimum, maximum=maximum)
+    if key == "stack_long_warn_hours":
+        import math
+        normalized = _require_float(key, value)
+        if not math.isfinite(normalized) or normalized <= 0:
+            raise SettingsValidationError("stack_long_warn_hours must be finite and positive")
+        return normalized
     if key in _FLOAT_RANGES:
         minimum, maximum = _FLOAT_RANGES[key]
         return _require_float(key, value, minimum=minimum, maximum=maximum)
@@ -422,7 +440,10 @@ def validate_settings(
     normalized = dict(saved)
     for deprecated in sorted(DEPRECATED_FIELDS & set(normalized)):
         normalized.pop(deprecated)
-        warn(f"setting '{deprecated}' is deprecated and ignored")
+        if deprecated == "mosaic_feather_max_subs":
+            warn(f"setting '{deprecated}' is deprecated; used only for legacy queue restoration")
+        else:
+            warn(f"setting '{deprecated}' is deprecated and ignored")
 
     if "library_path" in normalized:
         legacy_value = normalized.pop("library_path")
@@ -450,6 +471,15 @@ def redact_settings(value: SettingsModel | dict[str, Any]) -> dict[str, Any]:
 DEFAULTS = SettingsModel().to_mapping()
 
 
+def _runtime_settings(model, saved):
+    result = model.to_mapping()
+    # Retired values are used only for restoring pre-snapshot queue jobs.
+    value = saved.get("mosaic_feather_max_subs")
+    if type(value) is int and value >= 0:
+        result["mosaic_feather_max_subs"] = value
+    return result
+
+
 def load_settings(path: str | os.PathLike[str] = SETTINGS_PATH) -> dict[str, Any]:
     settings_path = Path(path)
     if not settings_path.exists():
@@ -461,7 +491,7 @@ def load_settings(path: str | os.PathLike[str] = SETTINGS_PATH) -> dict[str, Any
         model = validate_settings(saved)
     except (json.JSONDecodeError, SettingsValidationError) as exc:
         raise SettingsValidationError(f"{settings_path}: {exc}") from exc
-    return model.to_mapping()
+    return _runtime_settings(model, saved)
 
 
 def save_setting(key: str, value: Any) -> None:
@@ -477,7 +507,7 @@ def save_setting(key: str, value: Any) -> None:
         encoding="utf-8",
     )
     settings.clear()
-    settings.update(model.to_mapping())
+    settings.update(_runtime_settings(model, data))
 
 
 settings = load_settings()

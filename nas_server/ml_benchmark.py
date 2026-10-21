@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Literal
+import math
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+EXECUTION_PATHS = ("local_cpu", "local_gpu", "runpod_cold", "runpod_warm")
 ExecutionPath = Literal["local_cpu", "local_gpu", "runpod_cold", "runpod_warm"]
 InputStage = Literal["linear", "linear_with_trail", "nonlinear"]
 
@@ -84,6 +86,12 @@ OPERATIONS: dict[str, OperationSpec] = {
                       "SASpro 1.20.1 Parallax star reduction", "saspro",
                       {"level": 5},
                       "Star reduction is not equivalent to full star removal."),
+        OperationSpec("classic_rl", "pixinsight", "linear", ("processed",),
+                      "PixInsight Deconvolution / Regularized Richardson-Lucy", "",
+                      notes="Measured external Moffat PSF, deringing and luminance masks; CPU baseline only."),
+        OperationSpec("syqon_parallax_pipeline", "syqon", "linear", ("processed",),
+                      "SASpro Parallax correct -> sharpen -> star_reduce", "saspro",
+                      notes="Full V1 pipeline; Natural/Defined mode and each operation's parameters must be recorded. No local wrapper is implied."),
     )
 }
 
@@ -123,13 +131,13 @@ class TimingEvidence:
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
         measured_parts = (
             self.compression_s + self.upload_s + self.queue_s + self.worker_start_s
             + self.execution_s + self.download_s + self.decompression_s
         )
-        if self.client_wall_s and measured_parts > self.client_wall_s + 0.1:
+        if measured_parts > self.client_wall_s + 0.1:
             raise ValueError("timing components exceed client wall time")
 
 
@@ -154,7 +162,13 @@ class BenchmarkRecord:
     cleanup_ok: bool | None = None
     notes: str = ""
 
+    invocation: str = ""
+
     def validate(self) -> None:
+        if self.execution_path not in EXECUTION_PATHS:
+            raise ValueError("unknown execution path")
+        if self.transfer_encoding not in ("raw", "zstd") or self.status not in ("valid", "invalid", "failed") or self.manual_review not in ("pending", "accepted", "rejected"):
+            raise ValueError("invalid benchmark enum")
         if not self.run_id:
             raise ValueError("run_id is required")
         spec = OPERATIONS.get(self.operation_id)
@@ -171,8 +185,8 @@ class BenchmarkRecord:
                 raise ValueError(f"valid record is missing output role(s): {sorted(missing)}")
             if not all(artifact.finite for artifact in self.outputs):
                 raise ValueError("valid record contains non-finite output")
-        if self.billing_amount_usd is not None and self.billing_amount_usd < 0:
-            raise ValueError("billing amount must be non-negative")
+        if self.billing_amount_usd is not None and (not math.isfinite(self.billing_amount_usd) or self.billing_amount_usd < 0):
+            raise ValueError("billing amount must be finite and non-negative")
         if self.billing_posted_at and self.billing_amount_usd is None:
             raise ValueError("billing timestamp requires an amount")
 
@@ -187,3 +201,19 @@ def operation_manifest() -> dict[str, object]:
         "schema_version": SCHEMA_VERSION,
         "operations": {key: asdict(value) for key, value in OPERATIONS.items()},
     }
+
+
+def record_from_manifest(value: dict[str, object]) -> BenchmarkRecord:
+    """Read schema v2 strictly; legacy records must be deliberately upgraded."""
+    data = dict(value)
+    if data.pop("schema_version", None) != SCHEMA_VERSION:
+        raise ValueError("Unsupported benchmark schema; expected v2")
+    try:
+        data["source"] = ArtifactEvidence(**data["source"])
+        data["outputs"] = tuple(ArtifactEvidence(**item) for item in data["outputs"])
+        data["timings"] = TimingEvidence(**data["timings"])
+        record = BenchmarkRecord(**data)
+        record.validate()
+        return record
+    except (TypeError, KeyError) as error:
+        raise ValueError("Malformed benchmark record") from error

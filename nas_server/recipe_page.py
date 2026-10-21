@@ -451,8 +451,13 @@ def _guard_corrections_html(step_records: list[dict]) -> str:
     )
 
 
-def render_recipe_body(run_dir: str | Path, *, comparison_base_url: str | None = None) -> dict:
-    """Return {'target','workflow','version','score','html'} for one run dir."""
+def render_recipe_body(run_dir: str | Path, *, comparison_base_url: str | None = None,
+                       version_fallback: str | None = None, banner: str | None = None) -> dict:
+    """Return {'target','workflow','version','score','html'} for one run dir.
+
+    version_fallback fills the workflow version only when run.log lacks it (early
+    runs); banner adds a short, escaped context note above the recipe (e.g. a
+    historical run featured in an episode)."""
     run_dir = Path(run_dir)
     j = json.loads((run_dir / "run.log").read_text())
     target = j.get("target") or run_dir.parents[1].name
@@ -476,10 +481,13 @@ def render_recipe_body(run_dir: str | Path, *, comparison_base_url: str | None =
             )
         )
 
+    version = j.get("workflow_version") or version_fallback or ""
+    banner_html = f'<p class="sub"><b>{html.escape(banner)}</b></p>' if banner else ""
     body = (
         f'<div class="prose"><h2>{html.escape(target)} — how NOVA processed it</h2>'
+        f'{banner_html}'
         f'<p class="sub">Workflow <code>{html.escape(str(j.get("workflow","")))}</code> '
-        f'v{html.escape(str(j.get("workflow_version","")))} · physics score '
+        f'v{html.escape(str(version))} · physics score '
         f'<b>{final if final is not None else "—"}</b>. Every step below is what the AI '
         f'actually did, with the settings it chose — and how to reproduce it by hand in '
         f'PixInsight, Siril, or SASpro.</p>'
@@ -488,7 +496,7 @@ def render_recipe_body(run_dir: str | Path, *, comparison_base_url: str | None =
         f'<div class="steps">{"".join(cards)}</div>'
     )
     return {"target": target, "workflow": j.get("workflow"),
-            "version": j.get("workflow_version"), "score": final, "html": body}
+            "version": version or None, "score": final, "html": body}
 
 
 class RecipeRunNotFoundError(Exception):

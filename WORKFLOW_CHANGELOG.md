@@ -15,6 +15,121 @@ pipeline version that produced them.
 `versions`), mirror it here, and record which critiques drove the change. Code reads the
 latest version automatically — no other edit needed.
 
+## 2.10.0 — 2026-10-20 (minor; issue1100 draft, not deployed)
+
+Per-stack Siril max-framing overlap normalization and feathering can be disabled
+independently; omitted defaults and the existing feather threshold policy are
+unchanged. Persist request/applicability/effective provenance through queue restart,
+render only the per-run integration command and verify its actual flags before
+execution. Forecasts and output/dedup identities separate effective configurations;
+successful FITS and Telegram records report the executed choices. UI controls stay
+checked by default and explain panel-consistency/seam tradeoffs.
+
+No live stack, benchmark, service change or deployment is authorized. PR1098 also
+proposes next-minor2.10.0 for neutralization; reconcile the two draft version entries
+at merge, retaining both histories rather than silently overwriting either.
+
+## 2.9.1 — 2026-10-17 (patch)
+
+Accept retired feather settings without breaking startup, retaining valid values
+only for legacy queue restoration. Deduplicate equivalent applicable cap policies
+across origins and ignore inapplicable cap metadata. Admission forecasts use the
+frozen cap as a provisional upper bound; start forecasts retain actual selected
+counts. No production deployment or live-stack validation is implied.
+
+## 2.9.0 — 2026-10-16 (minor)
+
+New capture-transition Siril/max stacks select at most 1,000 eligible frames
+per filter, ranked by finite `fwhm * (1 + eccentricity)` within coverage
+strata. New manual stacks remain unlimited. Both retain feathering and overlap
+normalization. Queue admission freezes origin/cap and feather policy; explicit
+legacy feather thresholds and existing queued snapshots retain their meaning.
+The retired default feather threshold is not converted into a selection cap.
+Cap filenames and FITS/run provenance distinguish selected membership, coverage
+quotas and registered survivors. Missing coverage for an above-cap selection
+stops before copying or engine execution. See `docs/MOSAIC_AUTO_SELECTION.md`.
+Henry separately gates merge, deployment and the live M31 quality/runtime test;
+this version entry does not establish those states.
+
+## 2.8.2 — 2026-10-16 (patch)
+
+Record inferred `eq_mode` for the current stack's rejected/excluded target and
+associated-panel inventory as well as qualifying frames (#1050), removing the
+survivor-conditioned metadata gap. Reuse selected header observations and batch
+updates in one best-effort transaction. Unreadable files write nothing; the
+existing EQMODE/EXPTIME inference is unchanged. Log extra header reads and pass
+elapsed time. Only qualifying frames contribute to mount-mode counts and the
+existing `eq_only` branches. Metadata failures do not change stack eligibility.
+No library backfill is included. Independent review and Henry's merge/deploy
+gates remain; this entry is not evidence of live latency or deployment.
+
+## 2.8.1 — 2026-10-16
+
+Crash-consistent immutable library generations, fenced VM acceptance, and content-bound final recovery (#1024). Worker root publication is removed; remote PI acceptance fails closed. Henry separately gates merge and deployment.
+
+## 2.8.0 — 2026-10-15 (minor)
+
+Siril max-framing stacks feather at or below 1,250 eligible subs per filter;
+above that, remove only `-feather=` and retain every selected frame, overlap
+normalization and all other stack options (#1035). Henry accepts possible seams
+as the speed/appearance trade. The stack form/API accepts `feather_max_subs`:
+blank uses the setting, a nonnegative integer changes the threshold, and zero
+always feathers. Queue jobs freeze that policy and width across restarts and
+filter children. FITS headers, run params and telemetry record the decision;
+`nofeather` and non-default positive-width tokens distinguish effective modes.
+Siril's 2,000 px width cap is recorded explicitly. Other engines and min framing
+are unaffected. Live setting changes, comparison fixtures, merge and deployment
+retain their separate gates; unit/fake-engine checks do not establish timing.
+
+## 2.7.0 — 2026-10-15 (minor)
+
+Stack requests never mix capture filters (#1027). After quality/manual exclusion,
+explicit exposure, alignment/EQ policy and file availability checks across all
+included targets/panels, `auto`, unset and `all` split LP/IRCUT into separate
+stacks. Named selections fail rather than falling back. Unknown filters and
+invalid exposure metadata fail closed; new filter routing remains out of scope.
+Each output records its selected sources, canonical FILTER and integration;
+source-sensitive names avoid reuse across populations. Each successful output
+gets its requested post-workflow with an isolated filter suffix. Merge and live
+deployment still need Henry's gates. Tool identities are UNKNOWN: no live
+environment inventory was queried during authoring.
+
+## 2.6.0 — 2026-10-07 (minor)
+
+Haiku tier moved to Claude Haiku 5.5: `MODEL_EVAL` = `claude-haiku-5-5` (was
+`claude-haiku-4-5`), at Henry's request on the day it was released. One central
+constant covers the crop clip-veto, the close-call stretch vision tiebreak,
+devlog/story prose, the planner narrative and the chat agent, so AI-assisted
+judgments may shift. Sonnet/Opus tiers are unchanged. Minor rather than patch
+(output can change) and not major (the Sonnet scoring model is unchanged, so scores
+stay comparable).
+
+## 2.5.0 — 2026-10-04
+
+Issue #970: replace the sigma-targeted sky mute and whole-frame additive crush
+lift with fixed-input sky measurement, low-band targets, a predeclared 1% sky
+clipping bound and #961-compatible faint protection. Preserve subject/core
+pixels and RGB ratios. Record finishing and actual delivered sky evidence;
+invalid input geometry/range skips finishing without changing the original.
+See `docs/analysis/issue-970-sky.md` for the contract and replay limitations.
+Merge, deployment and visual acceptance remain separately Henry-gated.
+
+## 2.3.2 — 2026-10-03
+
+Fix #966's unsupported canonical footprint without zero fill. Reprojection
+retains the original canvas validity map plus the delivered mask. Automatic
+partial frames use an exact fully supported rectangle only when it retains at
+least 80% of valid canvas area and clears the existing S50 short-side floor
+(maximum of 900px and 45% of input short side); otherwise skip that candidate
+and use the existing crop selection. Full coverage preserves framing and pixels.
+Saved manual framing remains unchanged, with unsupported values represented by
+NaN. The pipeline warns and records the fraction and selected crop in run.log,
+then stops before downstream processing because engines cannot safely carry a
+mask. Rotated manual crops also preserve outside-source pixels as NaN.
+
+Real engine/post-deploy validation remains Henry-gated; this does not fix #959's
+upstream periodic lattice. If #961 lands first, rebase the version bump.
+
 ## Pinned engine versions (updated 2026-08-31)
 
 | Engine | Version | Role |
@@ -60,6 +175,103 @@ output pixels and critiques need to distinguish runs made before and after the p
 It does not claim that the RC-Astro RunPod 2.6.6 image is live.
 
 ---
+
+## 2.4.0 — 2026-10-03 (minor)
+
+Issue #961: galaxy stretch eligibility now requires shared input-derived faint
+signal above nearby sky (>=0.25 local-noise units, with a one-level 8-bit display
+noise floor). Inadequate quiet candidates cannot win ahead of visible candidates;
+existing grain/sky guards apply within the adequate pool and retain least-bad
+adequate output if all violate a guard. The 0.10 grain DQ and 0.70 structure
+penalty are unchanged. With no adequate candidate, retain the deterministic
+previous fallback but record **best available, not acceptable** and notify Henry.
+Actual delivered bytes are checked before pedestal mutation, including forced
+and experiment choices. Replay/calibration: `docs/analysis/issue-961-adequacy.md`.
+Merge, deploy and visual acceptance remain Henry-gated.
+
+## 2.3.1 — 2026-10-03 (patch)
+
+Issue #967: 2.3.0 restricted `star_stretch`'s p99.9 normalisation to integer input,
+so the pipeline's float32 linear StarXT layer was no longer normalised and finals came
+out nearly starless (M 31 star layer p99.9 0.985 → 0.113). Restores the normalisation for
+float and integer star layers, documents the star-layer input contract, and makes the
+`stretch_stars` auto-factor estimate load through `seti_astro._load_fits` instead of the
+stale pre-2.3 min-max mirror. Measured on M 31's star layer, the result matches 2.2.0
+(pixels > 0.02: 215 774 vs 215 751; p90 0.564 vs 0.564). The #960 core fix is unchanged.
+
+---
+
+## 2.3.0 — 2026-10-03 (minor)
+
+Issue #960: preserve the pedestal and highlight headroom of unit-range FITS
+images instead of min/max re-stretching every load. Unsigned/scaled integer
+storage uses format-defined conversion; ambiguous float/signed-count units fail
+closed. Narrowband PI sanitation uses the same contract. Star-layer percentile
+compensation is restricted to integer-origin inputs. HDR clipping uses the actual
+post-recombine input and absolute intensity. Run logs capture workflow-boundary
+ranges, stretch delivery/override reasons, and final checkpoint delivery overrides.
+
+See `docs/validation/issue-960-numeric-range.md` for caller/producer audit and
+read-only saved-run replay evidence. Henry still gates merge, deployment and
+M 31 reprocessing/visual acceptance.
+
+## 2.2.0 — 2026-10-03 (minor)
+
+Galaxy stretch selection now measures disk structure instead of letting a fixed
+variant preference decide every highlight-health tie (#955). A shared linear-input
+mask (blur sigma 6, percentile 85–97) excludes the core; score is mid-scale contrast
+minus 0.70 of the fine residual, bucketed at 0.001 (strengthened at Henry's
+direction after the M 51 replay; workflow 2.2.0 remains unreleased).
+Existing health buckets and DQs
+remain first; the old variant order is the final tie-break. Missing/invalid evidence
+falls back for the whole survivor set and records that fact. Nebula/cluster picks
+are unchanged. Both ordinary and retry picks receive their actual stretch input.
+
+Five-target [calibration](../docs/analysis/issue-955-calibration.md) at weight
+0.70: M 31 switches VeraLux strong → stat_bright; M 51 keeps stat_bright;
+M 81/M 66 switch VeraLux strong → stat; M 100 keeps STF. Weight 0.75 failed
+M 31's non-VeraLux requirement because of score bucketing; 0.70 satisfies all
+five requirements and rejects the initial grainier M 51 STF winner. This is
+read-only replay, not deployment or final-output acceptance. Claude's same-stack
+M 31 reprocess and Henry's visual check remain required after approved deployment.
+
+## 2.1.0 — 2026-10-02 (minor)
+
+Restore **PI SPCC for broadband** colour calibration after the controlled M 31
+A/B and 12-target comparison in #951 found systematic green excess and suppressed
+blue with SSSC, including Stage 3. LP (dual-narrowband) retains its existing SSSC
+path. Explicit `extra_params["allow_sssc"]` overrides either default per run for
+diagnostics. Direct `seti_astro.spcc()` callers retain their existing default.
+
+This Henry-approved mitigation changes output while keeping scoring comparability
+with 2.0.0. SSSC corrections and LP validation remain follow-ups. Live acceptance
+requires the post-deploy broadband run and M 31 render comparison specified in #951.
+
+## 2.0.0 — 2026-10-01 (major)
+
+Henry-approved Claude API migration (#939): Sonnet 5.5 grades and linear planning,
+Opus 5.5 nonlinear planning, and undated Haiku 4.5 prose/eval. Sonnet/Opus use
+explicit high effort and server-side refusal fallbacks with `anthropic==0.125.0`.
+Final refusals enter existing physics/default paths; diagnostics record refusal
+categories and fallback evidence. Small-cap adaptive calls reserve thinking budget
+and retry truncation once. Model provenance and current pricing are corrected.
+
+The scoring model changed: scores and Experiment Mode results before and after
+this boundary are **not directly comparable**. This entry records implementation,
+not deployment: SDK installation, restart, and a real autoprocess validation remain
+gated to Henry/Claude. No engine versions were changed or inferred.
+
+## 1.29.0 — 2026-10-01 (minor)
+
+**Normalize overlapping max-framing frames and feather their edges in Siril.**
+
+All five max-framing stack scripts now use `-overlap_norm -feather=100` with
+the existing `-norm=addscale -output_norm -maximize` options. The two-phase
+Siril path renders the feather width from `max_framing_feather_px` (default
+100). Min-framing scripts and frame eligibility are unchanged. This follows
+the C 50 / Rosette scratch re-stack in issue #934, where overlap normalization
+and feathering removed visible rectangular tile seams; the deployed result
+still requires a real re-stack and visual comparison.
 
 ## 1.28.0 — 2026-09-24 (minor)
 

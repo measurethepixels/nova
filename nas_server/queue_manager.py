@@ -6,6 +6,7 @@ Usage:
     from nas_server.queue_manager import add_job, get_queue, remove_job, clear_queue
     start_worker()  # called once at server startup
 """
+from nas_server.library_publication import accepted_stack_files
 import logging
 import shutil
 import sqlite3
@@ -193,19 +194,21 @@ def _db_clear():
 _STACK_FINGERPRINT_FIELDS = (
     "engine", "cull", "bottom_pct", "min_stars", "fast", "framing", "hero",
     "drizzle", "exptime", "eq_only", "filter_name", "ecc_threshold",
-    "sky_level_factor", "gradient_threshold",
+    "sky_level_factor", "gradient_threshold", "feather_max_subs", "feather_px",
 )
 
 
 def _stack_fingerprint(item: dict) -> tuple:
     """Config fingerprint for stack-job dedup. Two stack jobs are duplicates
-    iff they'd produce the same output filename (mirrors
+    when their enqueue-time configurations match (mirrors
     stack_config._stack_config_tokens — reuses its exact rounding rule via
     stack_config._round_field, same field set minus engine/target which are
     prepended separately here). Sharing the rounding function (not just
     matching its behavior by hand) guarantees fingerprint-equality and
     filename-token-equality can never drift apart. post_autoprocess_* fields
-    are excluded — they don't change the stack itself.
+    are excluded — they don't change the stack itself. Feather thresholds are
+    conservatively distinct before eligible counts are known; two thresholds
+    can later resolve to the same effective command and output identity.
 
     Callers must resolve `item["framing"]` to its EFFECTIVE value (via
     stack_config.resolve_effective_framing) before building `item`, since
@@ -213,10 +216,28 @@ def _stack_fingerprint(item: dict) -> tuple:
     of what was requested — otherwise two requests that will actually
     collide on the same output filename could fingerprint as distinct."""
     from nas_server.stack_config import _round_field
-    return (item.get("target"),) + tuple(_round_field(item.get(f)) for f in _STACK_FINGERPRINT_FIELDS)
+    from nas_server.mosaic_selection import effective_cap
+    mosaic = (item.get("extra_params") or {}).get("stack_mosaic") or {}
+    cap = effective_cap(mosaic, item.get("framing"), item.get("engine"))
+    policy_identity = (cap, mosaic.get("cell_degrees", .25)) if cap else (0, None)
+    from nas_server.stack_config import feather_decision
+    feather_policy = (item.get("extra_params") or {}).get("stack_feather") or {
+        "threshold": item.get("feather_max_subs") or 0,
+        "override": None, "feather_px": item.get("feather_px", 100),
+        "configured_px": item.get("feather_px", 100),
+        "overlap_norm_requested": item.get("overlap_norm"),
+        "feather_requested": item.get("feather")}
+    effective_engine = "siril" if item.get("engine") == "pixinsight_register" and item.get("fast") else item.get("engine")
+    options = feather_decision(feather_policy, 0, item.get("framing"), effective_engine)
+    normalized = dict(item)
+    if options['applicable'] and feather_policy.get('feather_requested') is False:
+        normalized.update(feather_max_subs=0, feather_px=0)
+    return ((item.get("target"), *policy_identity) + tuple(_round_field(normalized.get(f)) for f in _STACK_FINGERPRINT_FIELDS)
+            + (options['overlap_norm'],))
 
 
-def _conflict_locked(job_type: str, target: str, fingerprint: tuple | None) -> str | None:
+def _conflict_locked(job_type: str, target: str, fingerprint: tuple | None,
+                     sibling_source: str | None = None) -> str | None:
     """Caller must hold _queue_lock. Returns a conflict label if a matching
     job already occupies this target, else None.
 
@@ -238,6 +259,10 @@ def _conflict_locked(job_type: str, target: str, fingerprint: tuple | None) -> s
         if pending.get("job_type") != job_type or pending.get("target") != target:
             continue
         if job_type == "stack" and fingerprint is not None and _stack_fingerprint(pending) != fingerprint:
+            continue
+        if (job_type == "process" and sibling_source
+                and (pending.get("extra_params") or {}).get("filter_stack_followup")
+                and pending.get("source_file") != sibling_source):
             continue
         return "queued"
     with _park_lock:
@@ -304,7 +329,8 @@ def add_job(target: str, workflow: str = "seestar_broadband",
             source_file: str | None = None,
             manual_review: bool = False,
             extra_params: dict | None = None,
-            force: bool = False) -> dict:
+            force: bool = False,
+            _filter_stack_followup: bool = False) -> dict:
     item = {
         "job_type": "process",
         "target": target,
@@ -313,16 +339,18 @@ def add_job(target: str, workflow: str = "seestar_broadband",
         "dry_run": dry_run,
         "source_file": source_file,
         "manual_review": manual_review,
-        "extra_params": extra_params or {},
+        "extra_params": {**(extra_params or {}),
+                         **({"filter_stack_followup": True} if _filter_stack_followup else {})},
     }
-    if not force:
+    if not force and not _filter_stack_followup:
         conflict = find_active_or_queued("process", target)
         if conflict:
             log.info(f"[queue] duplicate process '{target}' rejected (active: {conflict['where']})")
             return {"duplicate": True, "existing": conflict}
     with _queue_lock:
         if not force:
-            where = _conflict_locked("process", target, None)
+            where = _conflict_locked("process", target, None,
+                                     source_file if _filter_stack_followup else None)
             if where:
                 log.info(f"[queue] duplicate process '{target}' rejected ({where})")
                 return {"duplicate": True, "existing": {"where": where, "target": target}}
@@ -339,6 +367,10 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
                   drizzle: bool = False, exptime: int | None = None,
                   eq_only: bool = True,
                   filter_name: str | None = "auto",
+                  feather_max_subs: int | None = None,
+                  overlap_norm: bool | None = None, feather: bool | None = None,
+                  mosaic_max_subs: int | None = None,
+                  request_origin: str = "manual",
                   ecc_threshold: float = 0.66,
                   sky_level_factor: float = 3.0,
                   gradient_threshold: float = 0.5,
@@ -352,7 +384,18 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
     # requests that differ only in requested framing could both be accepted
     # here yet collide on the same output filename once mosaic detection
     # runs inside stack_target() (see PR #39 review, finding 3).
-    effective_framing = resolve_effective_framing(target, "max" if framing == "max" else "min")
+    from nas_server.stack_config import resolve_feather_policy
+    from nas_server.config import settings
+    feather_policy = resolve_feather_policy(feather_max_subs, settings, overlap_norm=overlap_norm, feather=feather)
+    from nas_server.mosaic_selection import admission_policy
+    mosaic_policy = admission_policy(request_origin, mosaic_max_subs, settings)
+    effective_framing = resolve_effective_framing(
+        target, "max" if framing == "max" else "min",
+        strict=request_origin == "capture-transition")
+    mosaic_policy["applicable"] = engine == "siril" and effective_framing == "max"
+    from nas_server.stack_config import feather_decision
+    effective_engine = "siril" if engine == "pixinsight_register" and fast else engine
+    option_plan = feather_decision(feather_policy, 0, effective_framing, effective_engine, fast)
     # Round numeric gates to the SAME 3-decimal precision the fingerprint and
     # filename token use, and STORE the rounded value (not just fingerprint
     # it rounded) — otherwise two requests differing only by float noise
@@ -379,6 +422,13 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
         "exptime": exptime,
         "eq_only": eq_only,
         "filter_name": filter_name,
+        "feather_max_subs": 0 if option_plan["applicable"] and feather is False else feather_policy["threshold"],
+        "feather_px": option_plan["feather_px"] if option_plan["applicable"] else feather_policy["feather_px"],
+        # These selection fields have no queue_jobs columns. Persist them in
+        # the existing JSON payload so a restart cannot broaden a named request.
+        "extra_params": {"stack_selection": {"filter_name": filter_name, "eq_only": eq_only},
+                         "stack_feather": feather_policy, "stack_mosaic": mosaic_policy,
+                         "stack_options": {"provisional": True, **option_plan["options"]}},
         "ecc_threshold": ecc_threshold,
         "sky_level_factor": sky_level_factor,
         "gradient_threshold": gradient_threshold,
@@ -392,6 +442,8 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
         if conflict:
             log.info(f"[queue] duplicate stack '{target}' rejected (active: {conflict['where']})")
             return {"duplicate": True, "existing": conflict}
+    from nas_server.stack_estimates import admission_forecasts
+    item["extra_params"]["stack_forecasts"] = admission_forecasts(item)
     with _queue_lock:
         if not force:
             where = _conflict_locked("stack", target, fingerprint)
@@ -401,6 +453,14 @@ def add_stack_job(target: str, engine: str = "siril", cull: bool = True,
         item["_db_id"] = _db_insert(item)
         _queue.append(item)
         pos = len(_queue)
+    try:
+        from nas_server.stack_estimates import description
+        from nas_server import telegram
+        labels = [f"{filt}: {description(estimate, settings.get('stack_long_warn_hours', 5))}"
+                  for filt, estimate in item["extra_params"]["stack_forecasts"].items()]
+        telegram.send(f"Stack queued: <code>{target}</code>\n" + "\n".join(labels))
+    except Exception as exc:
+        log.warning("[queue] forecast notification unavailable: %s", exc)
     suffix = f" +autoprocess({post_autoprocess_workflow})" if post_autoprocess_workflow else ""
     log.info(f"[queue] added stack '{target}' (engine={engine}){suffix} — position {pos}")
     return {"position": pos, **_public(item)}
@@ -1088,10 +1148,10 @@ def _progress_interval_seconds(elapsed_min: int) -> int:
     return 60 * 60
 
 
-def _progress_monitor(target: str, job_type: str, eta_min: int,
+def _progress_monitor(target: str, job_type: str, eta_min: int | None,
                        stop_event: threading.Event):
     """Ping at 15 min initially, then 30/60 min for genuinely long jobs."""
-    if eta_min <= 15:
+    if eta_min is not None and eta_min <= 15:
         return
     from nas_server import telegram as _tg
     elapsed_min = 0
@@ -1109,9 +1169,11 @@ def _progress_monitor(target: str, job_type: str, eta_min: int,
                 from nas_server.stacker import get_stack_status
                 s = get_stack_status(target) or {}
                 phase = s.get("phase", "running")
+            estimate_label = (s.get("estimate_label") if job_type == "stack" else None) or (
+                f"~{eta_min}min est." if eta_min is not None else "duration unknown")
             _tg.send(
                 f"⏱ <b>Progress</b>: <code>{target}</code>\n"
-                f"Step: {phase} | {elapsed_min}min elapsed / ~{eta_min}min est."
+                f"Step: {phase} | {elapsed_min}min elapsed / {estimate_label}"
             )
         except Exception:
             pass
@@ -1152,6 +1214,8 @@ def _try_runpod_queue_dispatch(item: dict, workflow: str, tg) -> bool:
         dispatcher = _RunPodDispatcher(_runpod_config(_settings))
         source_path = _resolve_runpod_source(item, _settings)
         workspace = create_workspace()
+        from nas_server.library_publication import content
+        remote_item['input_proof'] = content(source_path)
         input_ref = workspace.stage_input(source_path, name="stack")
         remote_item.update({
             "workspace_run_id": workspace.run_id,
@@ -1229,7 +1293,8 @@ def _resolve_runpod_source(item: dict, settings: dict) -> Path:
         if rel.is_absolute() or len(rel.parts) != 1 or rel.name != str(explicit):
             raise DispatchError("RunPod source_file must be a filename inside _processed")
         source = proc_dir / rel.name
-        if not source.is_file():
+        from nas_server.library_publication import stack_eligible
+        if not stack_eligible(source):
             raise DispatchError(f"RunPod source FITS not found: {source}")
         matching_rows = [
             row for row in get_processed_files(target)
@@ -1249,11 +1314,12 @@ def _resolve_runpod_source(item: dict, settings: dict) -> Path:
             continue
         candidates = [Path(str(row.get("file_path") or "")), proc_dir / row["filename"]]
         for candidate in candidates:
-            if candidate.is_file():
+            from nas_server.library_publication import stack_eligible
+            if stack_eligible(candidate):
                 return candidate
 
     candidates = sorted(
-        (path for path in proc_dir.glob("*.fit*") if is_raw_stack(path.name)),
+        accepted_stack_files(target, proc_dir),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     ) if proc_dir.exists() else []
@@ -1275,24 +1341,24 @@ def _recover_runpod_outputs(workspace, status: dict, proc_dir: Path, workspace_r
     if not isinstance(refs, dict) or not refs:
         raise ReviewRequired("worker completed without published output references")
 
-    recovered = []
-    for remote_name, key in refs.items():
-        rel = Path(str(remote_name))
-        if rel.is_absolute() or ".." in rel.parts or rel == Path("."):
-            raise ReviewRequired(f"unsafe RunPod output path: {remote_name!r}")
-        if len(rel.parts) == 1 and rel.name.startswith("auto_final"):
-            destination = proc_dir / rel.name
-        else:
-            destination = proc_dir / "runs" / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(f".{destination.name}.runpod-{uuid.uuid4().hex}")
-        try:
-            workspace.download(workspace_ref_cls(str(key)), temporary)
-            os.replace(temporary, destination)
-        finally:
-            temporary.unlink(missing_ok=True)
-        recovered.append(destination)
-    return recovered
+    import tempfile
+    from nas_server.library_publication import safe_relative, import_run
+    proc_dir.mkdir(parents=True, exist_ok=True)
+    inbox = proc_dir / '.incoming'
+    inbox.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=inbox) as td:
+        stage = Path(td)
+        for remote_name, key in refs.items():
+            rel = safe_relative(str(remote_name))
+            if len(rel.parts) < 2:
+                raise ReviewRequired('worker attempted root publication')
+            destination = stage / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            workspace.download(workspace_ref_cls(str(key)), destination)
+        recovered = []
+        for run in stage.iterdir():
+            recovered.append(import_run(run, proc_dir))
+        return recovered
 
 
 def _run_job(item: dict) -> None:
@@ -1339,23 +1405,35 @@ def _run_job(item: dict) -> None:
                 exptime=item.get("exptime"),
                 eq_only=item.get("eq_only", True),
                 filter_name=item.get("filter_name", "auto"),
+                _feather_snapshot=(item.get("extra_params") or {}).get("stack_feather"),
+                _mosaic_snapshot=(item.get("extra_params") or {}).get("stack_mosaic",
+                    {"version": 1, "origin": "legacy", "cap": 0}),
+                _admission_forecasts=(item.get("extra_params") or {}).get("stack_forecasts"),
                 ecc_threshold=item.get("ecc_threshold", 0.66),
                 sky_level_factor=item.get("sky_level_factor", 3.0),
                 gradient_threshold=item.get("gradient_threshold", 0.5),
             )
             stop_event.set()
-            if not result.get("success"):
-                raise RuntimeError(result.get("error", "stack failed"))
             post_workflow = item.get("workflow")
-            if post_workflow and result.get("processed_fit"):
+            stacks = result.get("stacks", [result])
+            split_followups = len(stacks) > 1
+            for stack in stacks:
+                if not (post_workflow and stack.get("success") and stack.get("processed_fit")):
+                    continue
                 from pathlib import Path as _Path
-                source_file = _Path(result["processed_fit"]).name
+                source_file = _Path(stack["processed_fit"]).name
                 try:
                     follow = add_job(
                         target,
                         workflow=post_workflow,
                         experiment_mode=bool(item.get("experiment_mode")),
                         source_file=source_file,
+                        # Sibling outputs are deliberate serial work, not a
+                        # duplicate target. The existing branch suffix isolates
+                        # their finals without changing filter routing.
+                        _filter_stack_followup=split_followups,
+                        extra_params={"branch": {"suffix": stack["filter"].lower()}}
+                        if split_followups and stack.get("filter") else None,
                     )
                 except Exception as follow_error:
                     log.exception(
@@ -1392,6 +1470,8 @@ def _run_job(item: dict) -> None:
                             f"[queue] auto-queued autoprocess '{target}' "
                             f"({post_workflow}, src={source_file}) — position {follow['position']}"
                         )
+            if not result.get("success"):
+                raise RuntimeError(result.get("error", "stack failed"))
         except Exception as e:
             stop_event.set()
             log.error(f"[queue] stack '{target}' failed: {e}")
@@ -1501,6 +1581,12 @@ def _worker():
     global _current_job_target, _current_job_type, _current_job_fingerprint, _current_park_event
     log.info("[queue] worker started")
     while True:
+        try:
+            from nas_server.library_publication import recover_library, import_inbox
+            import_inbox()
+            recover_library()
+        except Exception:
+            log.exception('[queue] library publication recovery refused')
         # Only block on LOCAL active jobs. Remote-worker jobs run in their own
         # monitor threads and the queue should continue dispatching stacking or
         # local process jobs in parallel while a remote job is in flight.
@@ -1588,6 +1674,24 @@ def start_worker():
     try:
         from nas_server.database import queue_load_pending
         pending = queue_load_pending()
+        for item in pending:
+            if item.get("job_type") == "stack":
+                selection = (item.get("extra_params") or {}).get("stack_selection") or {}
+                item["filter_name"] = selection.get("filter_name", "auto")
+                item["eq_only"] = selection.get("eq_only", True)
+                from nas_server.stack_config import resolve_feather_policy
+                from nas_server.config import settings
+                policy = (item.get("extra_params") or {}).get("stack_feather")
+                if policy is None:  # Legacy queue entries get an explicit snapshot at load.
+                    policy = resolve_feather_policy(settings.get("mosaic_feather_max_subs", 1250), settings)
+                    item.setdefault("extra_params", {})["stack_feather"] = policy
+                from nas_server.stack_config import feather_decision
+                effective_engine = "siril" if item.get("engine") == "pixinsight_register" and item.get("fast") else item.get("engine")
+                options = feather_decision(policy, 0, item.get("framing"), effective_engine)
+                item.setdefault("extra_params", {})["stack_options"] = {"provisional": True, **options["options"]}
+                disabled = options['applicable'] and policy.get('feather_requested') is False
+                item["feather_max_subs"] = 0 if disabled else policy["threshold"]
+                item["feather_px"] = 0 if disabled else policy["feather_px"]
         if pending:
             with _queue_lock:
                 _queue.extend(pending)
