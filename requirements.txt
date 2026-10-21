@@ -3,7 +3,7 @@
 # Optional/licensed: setiastrosuitepro is distributed separately; see REPLICATE.md.
 # Optional: torch is probed by the environment doctor only; install it only when your selected engine requires it.
 
-anthropic==0.96.0
+anthropic==0.125.0
 APScheduler==3.11.2
 astropy==7.2.0
 boto3==1.42.84

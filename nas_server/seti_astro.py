@@ -55,16 +55,17 @@ def _run(args: list[str], timeout: int = 1800) -> tuple[int, str, str, int]:
 
 
 def _load_fits(path: str | Path) -> tuple[np.ndarray, object]:
-    """Load a FITS file, return (float32 array normalised 0-1, header)."""
+    """Load physical FITS pixels without re-stretching unit-range images.
+
+    See fits_range.unit_range for supported integer formats and fail-closed
+    handling of ambiguous engine output. Read scaling metadata before astropy
+    mutates it while decoding the data.
+    """
     from astropy.io import fits as _fits
-    with _fits.open(str(path)) as hdul:
+    from nas_server.fits_range import unit_range
+    with _fits.open(str(path), memmap=False) as hdul:
         hdr = hdul[0].header.copy()
-        data = hdul[0].data.astype(np.float32)
-    # Normalise to [0, 1] based on BZERO/BSCALE already applied by astropy.
-    # Most Siril stacks are already in [0,1]; clamp to be safe.
-    lo, hi = float(np.nanmin(data)), float(np.nanmax(data))
-    if hi > lo:
-        data = (data - lo) / (hi - lo)
+        data = unit_range(hdul[0].data, hdr)
     return data, hdr
 
 
@@ -239,12 +240,16 @@ def generate_preview_stf(fits_path: str | Path, jpg_path: str | Path,
             data = np.fliplr(data)
 
         # Normalise ADU-scale images to [0, 1]
-        hi = float(data.max())
+        hi = float(np.nanmax(data))
         if hi > 1.5:
-            lo = float(data.min())
+            lo = float(np.nanmin(data))
             data = (data - lo) / max(hi - lo, 1e-9)
 
         def _stf_params(ch: np.ndarray) -> tuple[float, float]:
+            # Unsupported manual-crop pixels are excluded from display statistics.
+            ch = ch[np.isfinite(ch)]
+            if not ch.size:
+                return 0.0, 0.5
             m = float(np.median(ch))
             mad = float(np.median(np.abs(ch - m))) * 1.4826
             c0 = max(0.0, m - shadow_clip_k * mad)
@@ -261,7 +266,7 @@ def generate_preview_stf(fits_path: str | Path, jpg_path: str | Path,
             denom_mtf = (2.0 * mt - 1.0) * x - mt
             return np.where(np.abs(denom_mtf) > 1e-9, (mt - 1.0) * x / denom_mtf, 0.5)
 
-        if float(np.median(data)) > 0.15:
+        if float(np.nanmedian(data)) > 0.15:
             # Already stretched — just clip and save
             out = np.clip(data, 0.0, 1.0)
         elif linked and data.ndim == 3:
@@ -289,6 +294,8 @@ def generate_preview_stf(fits_path: str | Path, jpg_path: str | Path,
             out[:, :, 1] = np.minimum(out[:, :, 1], (out[:, :, 0] + out[:, :, 2]) / 2)
 
         # Cap at 1600 px wide for browser performance
+        # Black is display-only; the science FITS retains NaNs and its validity.
+        out = np.where(np.isfinite(data) & np.isfinite(out), out, 0.0)
         img = _Image.fromarray((out * 255).astype(np.uint8))
 
         # rect_xywh is in _load_fits()/auto_rect_50x50()'s raw (pre-flip) pixel
@@ -356,7 +363,7 @@ def stf_stretch(input_path: str | Path, output_path: str | Path,
             data = np.moveaxis(data, 0, -1)
 
         if float(np.median(data)) > 0.08:
-            # Already stretched — normalize and save
+            # Already stretched — preserve its intensity scale and save
             out = np.clip(data, 0.0, 1.0)
         else:
             n_ch = data.shape[2] if data.ndim == 3 else 1
@@ -2729,25 +2736,10 @@ def narrowband_normalize(input_path: str | Path, output_path: str | Path,
         if not result.get("ok"):
             logger.warning(f"[seti_astro] narrowband_normalize: PI returned not-ok: {result.get('error')}")
             return {"ok": False, "error": result.get("error", "NBN failed"), "elapsed_s": elapsed}
-        # Safety net: PI has saved integer-scaled FITS here (uint32 0..4.29e9 on the
-        # 1.7.0 NBN runs), which broke every downstream consumer that assumes [0,1].
-        # Rewrite as normalized float32 if the output came back out of range.
-        try:
-            from astropy.io import fits as _fits  # noqa: PLC0415
-            with _fits.open(str(output_path)) as _h:
-                _d = _h[0].data
-                _hdr = _h[0].header.copy()
-                _needs = (not np.issubdtype(_d.dtype, np.floating)) or float(np.nanmax(_d)) > 1.001
-                _d = _d.astype(np.float32)
-            if _needs:
-                _lo, _hi = float(np.nanmin(_d)), float(np.nanmax(_d))
-                if _hi > _lo:
-                    _d = (_d - _lo) / (_hi - _lo)
-                _save_fits(_d, _hdr, output_path)
-                logger.info("[seti_astro] narrowband_normalize: PI output was non-float/out-of-range — "
-                            "rewritten as normalized float32")
-        except Exception as _se:
-            logger.warning(f"[seti_astro] narrowband_normalize: float sanitize failed: {_se}")
+        # Decode PI integer storage by its FITS contract, never by extrema.
+        # Invalid/ambiguous output must make this step fail (outer handler).
+        _d, _hdr = _load_fits(output_path)
+        _save_fits(_d, _hdr, output_path)
         logger.info(f"[seti_astro] narrowband_normalize ({method}) o3Boost={o3_boost} done in {elapsed}s")
         return {"ok": True, "output_path": str(output_path), "method": method,
                 "o3_boost": float(o3_boost), "elapsed_s": elapsed}
@@ -4261,9 +4253,10 @@ def crop_multi(
                 wcs, shape = cw
                 canon_path = cand_dir / "auto_crop_canonical.fit"
                 if reproject_to_canonical(str(input_path), wcs, shape, str(canon_path)):
+                    canon_header = afits.getheader(canon_path)
                     candidates["canonical"] = {"path": canon_path,
-                                               "area": int(shape[0] * shape[1]),
-                                               "short": int(min(shape[0], shape[1])),
+                                               "area": int(canon_header["NAXIS1"] * canon_header["NAXIS2"]),
+                                               "short": int(min(canon_header["NAXIS1"], canon_header["NAXIS2"])),
                                                "kind": "reproject"}
                     canonical_ok = True
         except Exception as _ke:
@@ -4457,6 +4450,11 @@ def star_stretch(
     do_scnr: apply Average Neutral SCNR to remove green cast
     scnr_amount: SCNR strength 0–1 (should match the amount used on the starless image)
     gamma: brightness curves adjustment — values < 1.0 brighten midtones (e.g. 0.85)
+    
+    Input contract: the LINEAR star layer produced by star removal (StarXT/
+    remove_stars_linear), typically crushed near zero. A layer with p99.9 < 0.1 is
+    normalised so p99.9 = 1.0 before the transfer, for integer and float input alike
+    (#967). Callers must not pass already-stretched or starless images.
     """
     t0 = time.time()
     try:
@@ -4473,9 +4471,13 @@ def star_stretch(
         else:
             data = data.astype(np.float32)
 
-        # Auto-scale: if the data is crushed near zero (e.g. PI uint32 StarXT output
-        # normalised by 4294967295), rescale so the 99.9th percentile = 1.0.
-        # This ensures stretch_factor has the same effect regardless of input bit depth.
+        # Auto-scale: if the linear star layer is crushed near zero, rescale so the
+        # 99.9th percentile = 1.0 before the transfer. Applies to integer AND float
+        # input: the pipeline's StarXT layer is float32 linear data, and the auto
+        # stretch_factor in auto_process is calibrated for this normalised input.
+        # (#967: the 2.3.0 integer-only guard left float star layers unscaled, ~9x too
+        # dim.) This is an explicit stretch-input normalisation of one layer, not the
+        # per-file loader rescale that the #960 numeric-range contract removed.
         p999 = float(np.percentile(data, 99.9))
         if 0 < p999 < 0.1:
             data = np.clip(data / p999, 0.0, 1.0)
@@ -4668,78 +4670,31 @@ def green_cap_masked(input_path: str | Path, output_path: str | Path,
 
 
 def sky_mute_masked(input_path: str | Path, output_path: str | Path,
-                    lo_sigma: float = 1.5, hi_sigma: float = 5.0,
-                    bp_sigma: float = 1.0, feather: float = 3.0,
-                    dilate: int = 3, **_kwargs) -> dict:
-    """
-    Darken the sky background while leaving the extended galaxy untouched.
+                    stretch_input: str | Path | None = None,
+                    object_type: str = "galaxy", target: float | None = None,
+                    **_kwargs) -> dict:
+    """Band-targeted finishing with fixed pre-stretch geometry (#970).
 
-    Companion to the galaxy stretch directive (workflow 1.7.0): the stretch is chosen
-    on galaxy-detail retention and deliberately leaves the sky bright; this step then
-    mutes that sky. An auto-tuned luminance mask protects everything above the sky
-    noise floor and applies a black-point lift only to the sky pixels, so faint galaxy
-    structure (arms, tidal bridges) is preserved while the background goes dark.
-
-    All thresholds are RELATIVE to the image's own sigma-clipped sky statistics, so it
-    self-tunes per target (a sky-dominated frame and a galaxy-filling frame both work):
-      mask ramps from sky+lo_sigma·σ (just above noise) to sky+hi_sigma·σ (solid galaxy),
-      smoothstep + gaussian feather + slight dilate; sky black-point = sky-bp_sigma·σ.
-
-    Only meaningful on a 3-channel stretched RGB frame; mono / 2-D input is passed
-    through unchanged.
+    Legacy lo/hi/bp_sigma controls are retired. Missing/invalid input evidence
+    fails without writing pixels; callers must retain the original output.
     """
     t0 = time.time()
     try:
-        from scipy import ndimage as _ndi  # noqa: PLC0415
+        from nas_server.sky_finishing import masks_from_input, mute
+        if stretch_input is None:
+            raise ValueError("pre-stretch starless input required for sky finishing")
         data, hdr = _load_fits(input_path)
-        data = data.astype(np.float32)
-        if data.ndim != 3 or data.shape[0] != 3:
-            logger.info("[seti_astro] sky_mute_masked: non-RGB input, passing through")
-            _save_fits(data, hdr, output_path)
-            return {"ok": True, "output_path": str(output_path), "skipped": "non-rgb",
-                    "elapsed_s": int(time.time() - t0)}
-        R, G, B = data[0], data[1], data[2]
-        L = 0.2126 * R + 0.7152 * G + 0.0722 * B
-
-        # Sigma-clipped sky estimate (robust whether the frame is sky- or galaxy-dominated)
-        m = L.ravel().copy()
-        for _ in range(5):
-            med = float(np.median(m)); sd = float(m.std())
-            m = m[m < med + 2.5 * sd]
-        sky = float(np.median(m)); sig = float(m.std())
-
-        lo = sky + lo_sigma * sig
-        hi = sky + hi_sigma * sig
-        M = np.clip((L - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-        M = M * M * (3.0 - 2.0 * M)                       # smoothstep
-        M = _ndi.gaussian_filter(M, feather)
-        if dilate and dilate > 0:
-            M = np.clip(_ndi.maximum_filter(M, int(dilate)) * 0.5 + M * 0.5, 0.0, 1.0)
-
-        bp = max(sky - bp_sigma * sig, 0.0)               # black-point just below sky
-        denom = max(1.0 - bp, 1e-6)
-        dark = np.clip((data - bp) / denom, 0.0, 1.0)     # broadcast over channels
-        out = np.clip(M * data + (1.0 - M) * dark, 0.0, 1.0).astype(np.float32)
-
+        masks = masks_from_input(stretch_input)
+        out, evidence = mute(data, masks, object_type, target)
         _save_fits(out, hdr, output_path)
-        # Report the actual sky-darkening achieved (median luminance in the masked-out sky)
-        sky_mask = M < 0.1
-        Lo = 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
-        sky_before = float(np.median(L[sky_mask])) if sky_mask.any() else 0.0
-        sky_after = float(np.median(Lo[sky_mask])) if sky_mask.any() else 0.0
-        galcov = float((M > 0.7).mean())
         elapsed = int(time.time() - t0)
-        logger.info(
-            f"[seti_astro] sky_mute_masked done in {elapsed}s "
-            f"(sky {sky:.3f}±{sig:.3f}; sky L {sky_before:.3f}->{sky_after:.3f}; "
-            f"galcov {100*galcov:.1f}%): {output_path}")
+        logger.info("[seti_astro] sky_mute_masked: %s", evidence)
         return {"ok": True, "output_path": str(output_path), "elapsed_s": elapsed,
-                "sky_level": sky, "sky_sigma": sig,
-                "sky_before": sky_before, "sky_after": sky_after, "galaxy_coverage": galcov}
+                "sky_before": evidence["before"]["sky_level"],
+                "sky_after": evidence["after"]["sky_level"], **evidence}
     except Exception as e:
-        elapsed = int(time.time() - t0)
-        logger.error(f"[seti_astro] sky_mute_masked exception: {e}")
-        return {"ok": False, "error": str(e), "elapsed_s": elapsed}
+        logger.error("[seti_astro] sky_mute_masked exception: %s", e)
+        return {"ok": False, "error": str(e), "elapsed_s": int(time.time() - t0)}
 
 
 def sky_green_rebalance(input_path: str | Path, output_path: str | Path,
@@ -4779,7 +4734,7 @@ def sky_green_rebalance(input_path: str | Path, output_path: str | Path,
         R, G, B = data[0], data[1], data[2]
         L = 0.2126 * R + 0.7152 * G + 0.0722 * B
 
-        # Sigma-clipped sky estimate (same recipe as sky_mute_masked)
+        # Legacy sigma-clipped estimate for green rebalance only
         m = L.ravel().copy()
         for _ in range(5):
             med = float(np.median(m)); sd = float(m.std())
@@ -4987,24 +4942,23 @@ def spcc(
     allow_sssc: bool = True,
     **_kwargs,
 ) -> dict:
-    """Color calibration policy (2026-09-02): SSSC first, PI (SPCC for
-    broadband, ColorCalibration for LP -- SPCC's broadband white reference is
-    wrong for dual-narrowband, never attempt it there) as a second opinion
-    only when SSSC's own solve lands at **Stage 2**. A real 17-target,
-    same-methodology evidence set (SSSC_vs_SPCC_CC_AB_Comparison_2026_09_02
-    phone note) found SSSC tied PI in every Stage-1/Stage-3 result with zero
-    exceptions (13/17 targets) -- no second opinion is worth spending there.
-    Every real divergence happened at Stage 2, and even there SSSC never
-    catastrophically lost (worst case ~5% worse; best cases 3-8x better).
+    """Color calibration with optional SSSC-first engine selection.
 
-    Trigger is Stage, not a raw RMS threshold, deliberately: RMS tracks how
-    hard a target inherently is (some legitimately-agreeing targets sit at a
-    higher RMS than some Stage-2 divergences), Stage tracks whether SSSC had
-    enough calibration stars to trust -- that's what actually predicted
-    reliability in the evidence.
+    Workflow 2.1.0 (#951) passes allow_sssc=False for broadband, restoring
+    PI SPCC after the 2026-10-02 comparison found systematic green excess
+    and suppressed blue across 12/12 targets, including Stage-3 results.
+    This supersedes the 2026-09-02 claim that Stage-1/Stage-3 SSSC tied PI.
+    LP runs retain SSSC first; explicit per-run diagnostics may override
+    allow_sssc through auto_process extra_params.
 
-    allow_sssc=False restores plain PI-only behavior (kept for explicit
-    PI-only diagnostics/tests, not the default policy).
+    Direct callers still default to allow_sssc=True. When enabled, SSSC
+    Stage 2 requests a PI second opinion and chooses by measured residual;
+    accepted Stage-1/Stage-3 results are applied directly. This branching
+    policy does not establish broadband subject-colour accuracy.
+
+    allow_sssc=False selects plain PI calibration: SPCC for broadband,
+    ColorCalibration for LP (SPCC's broadband white reference is unsuitable
+    for dual-narrowband).
     """
     t0 = time.time()
     _sentinel = Path(output_path).parent / ".spcc_failed"
@@ -5422,8 +5376,12 @@ def _run_pi_color_calibration(
 
 
 def astap_solve(fits_path: str | Path, fov_deg: float = 1.3,
-                search_deg: float = 10.0, timeout: int = 120) -> dict:
+                search_deg: float = 10.0, timeout: int = 120, *,
+                require_fresh: bool = False) -> dict:
     """Blind/near plate-solve with ASTAP CLI, updating the FITS header IN PLACE.
+
+    require_fresh removes inherited WCS from the supplied file. Callers MUST
+    supply an isolated scratch copy; success requires exit 0 and new FITS WCS.
 
     Why (2026-07-02): Siril/PI write their plate solutions in a convention astropy
     misreads (axis-inverted, sometimes offset) — the SASpro/XP path (SSSC, NBExtract)
@@ -5444,6 +5402,22 @@ def astap_solve(fits_path: str | Path, fov_deg: float = 1.3,
         # location-spoofed capture whose RA/DEC are FAKE) -> full BLIND solve. This is
         # the long-standing "fix = blind solve" for the pre-EQ spoof cases.
         from astropy.io import fits as _fh
+        if require_fresh:
+            import re
+            # Leave acquisition hints and pixels intact; remove primary/alternate
+            # WCS, distortion and solve flags so inherited evidence cannot pass.
+            wcs_card = re.compile(
+                r"^(?:PLTSOLVD|WCSAXES[A-Z]?|WCSNAME[A-Z]?|"
+                r"(?:CTYPE|CRVAL|CRPIX|CDELT|CROTA|CUNIT|CNAME|CRDER|CSYER)\d+[A-Z]?|"
+                r"(?:CD|PC|PV|PS)\d+_\d+[A-Z]?|"
+                r"(?:LONPOLE|LATPOLE|RADESYS|EQUINOX)[A-Z]?|"
+                r"(?:A|B|AP|BP)_(?:ORDER|DMAX|\d+_\d+)|"
+                r"(?:CPDIS|CQDIS|D2IMDIS)\d+|(?:DP|DQ|D2IM)\d+.*)$")
+            with _fh.open(str(fits_path), mode="update", memmap=False) as hdul:
+                header = hdul[0].header
+                for key in list(header):
+                    if wcs_card.fullmatch(key):
+                        header.remove(key, remove_all=True, ignore_missing=True)
         _h0 = _fh.getheader(str(fits_path), memmap=False)
         if _h0.get("CRVAL1") is None and _h0.get("RA") is None:
             search_deg = 180
@@ -5458,7 +5432,7 @@ def astap_solve(fits_path: str | Path, fov_deg: float = 1.3,
                 _v = _h0.get(_k)
                 if _v not in (None, 0, 1.0):
                     _sc = abs(float(_v)); break
-            if _sc and 1e-5 < _sc < 0.1:
+            if not require_fresh and _sc and 1e-5 < _sc < 0.1:
                 fov_deg = round(min(max((_h0.get("NAXIS2") or 1920) * _sc, 0.4), 8.0), 2)
         except Exception:
             pass
@@ -5474,12 +5448,17 @@ def astap_solve(fits_path: str | Path, fov_deg: float = 1.3,
         from astropy.io import fits as _f
         h = _f.getheader(str(fits_path), memmap=False)
         ok = ("Solution found" in out or h.get("PLTSOLVD")) and h.get("CD1_1") is not None
+        if require_fresh:
+            # These cards were removed immediately before this synchronous run.
+            # Sidecar timestamps or a console success string alone cannot qualify.
+            required = ('CTYPE1', 'CTYPE2', 'CRVAL1', 'CRVAL2', 'CRPIX1', 'CRPIX2', 'CD1_1')
+            ok = r.returncode == 0 and all(h.get(k) is not None for k in required)
         elapsed = round(time.time() - t0, 1)
         if ok:
             logger.info(f"[seti_astro] astap_solve OK in {elapsed}s: {Path(fits_path).name}")
             return {"ok": True, "elapsed_s": elapsed,
                     "crval": [h.get("CRVAL1"), h.get("CRVAL2")]}
         logger.warning(f"[seti_astro] astap_solve failed in {elapsed}s: {out[-200:]}")
-        return {"ok": False, "error": out[-300:], "elapsed_s": elapsed}
+        return {"ok": False, "error": f"exit={r.returncode}; fresh={require_fresh}; {out[-300:]}", "elapsed_s": elapsed}
     except Exception as e:
         return {"ok": False, "error": str(e)[:200], "elapsed_s": round(time.time() - t0, 1)}

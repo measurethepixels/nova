@@ -1157,24 +1157,29 @@ def targets_page() -> str:
                         'justify-content:center;color:var(--text2);font-size:1.5rem">🌌</div>')
 
         cards += f"""
-        <a href="/target/{_uparse.quote(name, safe='')}" style="color:inherit;text-decoration:none">
+        <div>
           <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;
                       overflow:hidden;transition:border-color .15s"
                onmouseover="this.style.borderColor='var(--accent)'"
                onmouseout="this.style.borderColor='var(--border)'">
             {img_html}
             <div style="padding:.7rem .8rem">
-              <div style="font-weight:600;font-size:.9rem;white-space:nowrap;
-                          overflow:hidden;text-overflow:ellipsis">{name}</div>
+              <a href="/target/{_uparse.quote(name, safe='')}" style="font-weight:600;font-size:.9rem;display:block;white-space:nowrap;
+                          overflow:hidden;text-overflow:ellipsis">{_html.escape(name)}</a>
               <div style="display:flex;justify-content:space-between;
                           align-items:center;margin-top:.4rem">
                 {_stage_badge(stage)}
                 <span style="color:var(--text2);font-size:.78rem">{hours}h</span>
                 {_score_pill(score) if score else ''}
               </div>
+              <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.55rem;font-size:.72rem">
+                <a href="/target/{_uparse.quote(name, safe='')}#seestar-stacks">SeeStar stacks</a>
+                <a href="/target/{_uparse.quote(name, safe='')}#pipeline-stacks">Pipeline stacks</a>
+                <a href="/target/{_uparse.quote(name, safe='')}#processed">Processed</a>
+              </div>
             </div>
           </div>
-        </a>"""
+        </div>"""
 
     body = f"""
 <div style="max-width:1200px;margin:0 auto;padding:2rem 1.5rem">
@@ -1201,6 +1206,17 @@ def _queue_table_rows() -> str:
 
     rows = ""
 
+    def estimate_badges(estimates):
+        from html import escape
+        from nas_server.stack_estimates import description
+        from nas_server.config import settings
+        try:
+            return ''.join('<br><span style="color:var(--yellow,#e3b341)">'
+                           + escape(f"{filt}: {description(value, settings.get('stack_long_warn_hours', 5))}")
+                           + '</span>' for filt, value in estimates.items())
+        except Exception:
+            return '<br><span>Stack duration unavailable</span>'
+
     # Active jobs first
     for s in get_all_autoprocess_statuses():
         if s.get("phase") in ("done", "error", "aborted", None):
@@ -1226,7 +1242,8 @@ def _queue_table_rows() -> str:
                  f'<td style="padding:.5rem .8rem">▶ {s["target"]}</td>'
                  f'<td style="padding:.5rem .8rem;color:var(--text2)">stack</td>'
                  f'<td style="padding:.5rem .8rem"><span style="color:#e3b341">'
-                 f'{s.get("phase","running")} ({s.get("elapsed_human","?")})</span></td>'
+                 f'{s.get("phase","running")} ({s.get("elapsed_human","?")})</span>'
+                 f'<br>{_html.escape(s.get("estimate_label", ""))}</td>'
                  f'<td style="padding:.5rem .8rem;color:var(--text2)">active</td></tr>')
 
     # Pending queue
@@ -1236,12 +1253,13 @@ def _queue_table_rows() -> str:
         jtype = item.get("job_type", "process")
         wf = item.get("workflow") or item.get("engine", "")
         exp = " +exp" if item.get("experiment_mode") else ""
+        estimate = estimate_badges((item.get("extra_params") or {}).get("stack_forecasts") or {}) if jtype == "stack" else ""
         del_btn = (f'<button onclick="deleteJob({pos})" '
                    f'style="background:none;border:none;cursor:pointer;color:var(--text2);'
                    f'font-size:.85rem;padding:.1rem .4rem" title="Remove from queue">✕</button>')
         rows += (f'<tr>'
                  f'<td style="padding:.5rem .8rem;color:var(--text2)">#{pos} {target}</td>'
-                 f'<td style="padding:.5rem .8rem;color:var(--text2)">{jtype}: {wf}{exp}</td>'
+                 f'<td style="padding:.5rem .8rem;color:var(--text2)">{jtype}: {wf}{exp}{estimate}</td>'
                  f'<td style="padding:.5rem .8rem;color:var(--text2)">pending</td>'
                  f'<td style="padding:.5rem .8rem;color:var(--text2)">{del_btn}</td></tr>')
 
@@ -1415,6 +1433,20 @@ def queue_page() -> str:
             <option value="min">Min / intersection</option>
             <option value="max">Max / union</option>
           </select>
+        </div>
+        <div>
+          <label for="qb-overlap-norm"><input id="qb-overlap-norm" type="checkbox" checked aria-describedby="qb-overlap-help"> Overlap normalization</label>
+          <small id="qb-overlap-help" style="color:var(--text2);display:block">Siril max framing only. Disabling may reduce runtime but worsen panel/background consistency.</small>
+        </div>
+        <div>
+          <label for="qb-feather"><input id="qb-feather" type="checkbox" checked aria-describedby="qb-feather-option-help"> Feathering</label>
+          <small id="qb-feather-option-help" style="color:var(--text2);display:block">Siril max framing only. Disabling can expose seams. When enabled, the limit below still applies.</small>
+        </div>
+        <div>
+          <label class="qb-label" for="qb-feather-max-subs">Feather up to (subs)</label>
+          <input id="qb-feather-max-subs" type="number" min="0" step="1"
+                 placeholder="Always feather" class="qb-input" aria-describedby="qb-feather-help">
+          <small id="qb-feather-help" style="color:var(--text2)">Siril max framing only. Blank or 0: always feather. A positive limit disables feathering above that count; seams may appear.</small>
         </div>
         <div>
           <label class="qb-label">Exp time filter</label>
@@ -1607,6 +1639,16 @@ function qbSubmit() {{
       hero: hero, drizzle: drizzle, eq_only: eqOnly,
       cull: parseFloat(cull) > 0
     }});
+    var featherInput = document.getElementById('qb-feather-max-subs');
+    if (featherInput.validity.badInput || !featherInput.checkValidity() ||
+        (featherInput.value !== '' && !/^(0|[1-9][0-9]*)$/.test(featherInput.value))) {{
+      status.textContent = 'Feather limit: enter a whole number of 0 or more, or leave blank.';
+      featherInput.focus();
+      return;
+    }}
+    if (featherInput.value !== '') params.append('feather_max_subs', featherInput.value);
+    if (!document.getElementById('qb-overlap-norm').checked) params.append('overlap_norm', 'false');
+    if (!document.getElementById('qb-feather').checked) params.append('feather', 'false');
     if (exptime) params.append('exptime', exptime);
     if (apAfter) params.append('post_autoprocess_workflow', 'auto');
     url = '/stack/' + encodeURIComponent(target) + '?' + params.toString();
@@ -3712,7 +3754,9 @@ def pipeline_page() -> str:
             f'<td class="pl-stack">{stack_cell}</td>'
             f'<td class="pl-act">'
             f'<a href="/frames/{tgt_enc}" class="pl-link">Captures</a>'
-            f'<a href="/fits/{tgt_enc}" class="pl-link">FITS</a>'
+            f'<a href="/target/{tgt_enc}#seestar-stacks" class="pl-link">SeeStar stacks</a>'
+            f'<a href="/target/{tgt_enc}#pipeline-stacks" class="pl-link">Pipeline stacks</a>'
+            f'<a href="/target/{tgt_enc}#processed" class="pl-link">Processed</a>'
             f'<a href="/stack-history/{tgt_enc}" class="pl-link">Stacks</a>'
             f'<a href="/queue-view?target={tgt_enc}" class="pl-link pl-queue">＋ Queue</a>'
             f'<label class="pl-af-label" title="Auto-stack after transfer">'
@@ -4593,6 +4637,9 @@ def target_detail_page(target: str) -> str:
     assessments = get_claude_history(target=target, limit=3)
     proc_files = get_processed_files(target=target)
     fits_products = list_fits_products(target, processed_rows=proc_files)
+    native_p = [p for p in fits_products if p.provenance == "seestar_stack"]
+    pipeline_p = [p for p in fits_products if p.provenance == "pipeline_stack"]
+    processed_p = [p for p in fits_products if p.provenance == "processed_final"]
 
     # --- Hero block ---
     preview = t.get("preview_filename")
@@ -4680,7 +4727,9 @@ def target_detail_page(target: str) -> str:
     {crop_html}
     <div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-top:1.1rem">
       <a href="/frames/{tgt_enc}" class="td-btn">📷 Captures</a>
-      <a href="/fits/{tgt_enc}" class="td-btn">🔭 FITS</a>
+      <a href="#seestar-stacks" class="td-btn">SeeStar stacks ({len(native_p)})</a>
+      <a href="#pipeline-stacks" class="td-btn">Pipeline stacks ({len(pipeline_p)})</a>
+      <a href="#processed" class="td-btn">Processed ({len(processed_p)})</a>
       <a href="/stack-history/{tgt_enc}" class="td-btn">📊 Stack History</a>
       <a href="/story?target={tgt_enc}" class="td-btn">📖 Story</a>
       <a href="/folio/{tgt_enc}" class="td-btn">📋 Folio</a>
@@ -4749,18 +4798,18 @@ def target_detail_page(target: str) -> str:
     # --- Deterministic FITS product grids ---
     def _pf_card(p) -> str:
         fn = _html.escape(p.filename)
+        folder = _html.escape(p.storage_target)
         tool = _html.escape(p.tool or "")
         step = _html.escape(p.step or "")
         integ = p.total_integration or 0
         hours_p = integ / 3600
         obs = p.obs_date or ""
-        metadata = []
-        if p.frame_count:
-            metadata.append(f"{p.frame_count:,} frames")
-        if hours_p:
-            metadata.append(f"{hours_p:.1f}h")
-        if obs:
-            metadata.append(obs[:10])
+        metadata = [
+            f"Date {_html.escape(obs[:10]) if obs else '—'}",
+            f"Subs {p.frame_count:,}" if p.frame_count else "Subs —",
+            f"Integration {hours_p:.1f}h" if hours_p else "Integration —",
+            f"Filter {_html.escape(p.filter_name) if p.filter_name else '—'}",
+        ]
         link = p.viewer_url
         mosaic_badge = ('<span class="td-product-badge td-product-mosaic">Mosaic</span>'
                          if p.mosaic else "")
@@ -4774,38 +4823,28 @@ def target_detail_page(target: str) -> str:
                 f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="{fn}">{fn}</div>'
                 f'<div style="color:var(--text2);margin-top:.2rem">{tool} {step}</div>'
                 f'<div style="color:var(--text2)">{" · ".join(metadata)}</div>'
+                f'<div style="color:var(--text2);margin-top:.2rem">Folder: {folder}</div>'
+                f'<div style="color:var(--accent);margin-top:.3rem">Preview →</div>'
                 f'</div></div></a>')
 
-    pipeline_p = [p for p in fits_products if p.provenance == "pipeline_stack"]
-    processed_p = [p for p in fits_products if p.provenance == "processed_final"]
-    native_p = [p for p in fits_products if p.provenance == "seestar_stack"]
-    pipeline_cards = "".join(_pf_card(p) for p in pipeline_p[:24])
-    pf_cards = "".join(_pf_card(p) for p in processed_p[:24])
+    pipeline_cards = "".join(_pf_card(p) for p in pipeline_p)
+    pf_cards = "".join(_pf_card(p) for p in processed_p)
     native_cards = "".join(_pf_card(p) for p in native_p)
-
-    def _more_products(products: list) -> str:
-        hidden = len(products) - 24
-        if hidden <= 0:
-            return ""
-        return (f'<a class="td-products-more" href="/fits/{tgt_enc}">'
-                f'Open FITS browser for {hidden} more →</a>')
 
     _grid_open = ('<div style="display:grid;grid-template-columns:'
                   'repeat(auto-fill,minmax(160px,1fr));gap:.75rem;margin-bottom:2rem">')
     proc_section = f"""
-<details class="td-product-group" open>
-  <summary>Pipeline Stacks <span class="td-product-count">({len(pipeline_p)})</span></summary>
-  {_grid_open}{pipeline_cards or '<p style="color:var(--text2)">No pipeline stacks yet.</p>'}</div>
-  {_more_products(pipeline_p)}
-</details>
-<details class="td-product-group">
-  <summary>Processed Finals <span class="td-product-count">({len(processed_p)})</span></summary>
-  {_grid_open}{pf_cards or '<p style="color:var(--text2)">No processed finals yet.</p>'}</div>
-  {_more_products(processed_p)}
-</details>
-<details class="td-native-products">
-  <summary>SeeStar Stacks <span class="td-product-count">({len(native_p)})</span></summary>
+<details id="seestar-stacks" class="td-native-products" {'open' if len(native_p) <= 12 else ''}>
+  <summary>SeeStar stacks <span class="td-product-count">({len(native_p)})</span></summary>
   {_grid_open}{native_cards or '<p style="color:var(--text2)">No native SeeStar stacks yet.</p>'}</div>
+</details>
+<details id="pipeline-stacks" class="td-product-group" {'open' if len(pipeline_p) <= 12 else ''}>
+  <summary>Pipeline stacks <span class="td-product-count">({len(pipeline_p)})</span></summary>
+  {_grid_open}{pipeline_cards or '<p style="color:var(--text2)">No pipeline stacks yet.</p>'}</div>
+</details>
+<details id="processed" class="td-product-group" {'open' if len(processed_p) <= 12 else ''}>
+  <summary>Processed <span class="td-product-count">({len(processed_p)})</span></summary>
+  {_grid_open}{pf_cards or '<p style="color:var(--text2)">No processed finals yet.</p>'}</div>
 </details>"""
 
     # --- User comments section ---
@@ -5009,7 +5048,18 @@ async function setAutoFlag(tenc, key, val){{
   {automation_section}
   {asmt_section}
   {comments_section}
-</div>"""
+</div>
+<script>
+function openProductGroup() {{
+  const group = document.getElementById(location.hash.slice(1));
+  if (group && group.matches('details.td-product-group, details.td-native-products')) {{
+    group.open = true;
+    group.scrollIntoView();
+  }}
+}}
+window.addEventListener('hashchange', openProductGroup);
+openProductGroup();
+</script>"""
 
     css = """
   .td-wrap { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
@@ -5036,8 +5086,6 @@ async function setAutoFlag(tenc, key, val){{
       cursor: pointer; padding: .7rem 1rem; font-weight: 650; min-height: 44px; }
   .td-native-products > div, .td-product-group > div {
       margin: 0; padding: .25rem .75rem .75rem; }
-  .td-products-more { display: inline-block; margin: 0 .75rem .8rem;
-                      font-size: .78rem; }
   details summary::-webkit-details-marker { display: none; }
   @media (max-width: 600px) {
     .td-wrap { padding: 1rem .75rem 3rem; }
@@ -5540,6 +5588,8 @@ def folio_page(target: str) -> str:
         ach_rows.append(("Min hours", f'{s50["min_integration_hours"]}h'))
     if s50.get("recommended_integration_hours"):
         ach_rows.append(("Recommended", f'{s50["recommended_integration_hours"]}h'))
+    if s50.get("recommended_total_hours"):
+        ach_rows.append(("Total goal (measured)", f'{s50["recommended_total_hours"]}h'))
     if s50.get("drizzle_benefit"):
         ach_rows.append(("Drizzle 2×", s50["drizzle_benefit"][:80]))
     if s50.get("detail_ceiling"):
@@ -6258,6 +6308,7 @@ def planner_page() -> str:
         var mosaicBadge = r.is_mosaic ? ' <span style="font-size:.68rem;background:#6e40c922;color:#d2a8ff;border:1px solid #6e40c955;border-radius:3px;padding:1px 4px" title="' + mosaicTitle + '">' + (r.mosaic_label || (r.mosaic_panels_w + '×' + r.mosaic_panels_h + ' mosaic')) + '</span>' : '';
         var assocFmt = fmtAssoc(r.association);
         var assocBadge = assocFmt ? ' <span style="font-size:.68rem;color:var(--text2)" title="Associated: ' + r.association + '">⟷ ' + assocFmt + '</span>' : '';
+        var moonBadge = r.exclusion_reason ? ' <span style="font-size:.68rem;color:#e3b341" title="' + r.exclusion_reason + '">Moon slots excluded</span>' : '';
         var transientBadge = r.transient ? ' <span style="font-size:.68rem;background:#7d4a0022;color:#e3a020;border:1px solid #7d4a0055;border-radius:3px;padding:1px 4px" title="Transient target — 1.5× score boost">⚡</span>' : '';
         var procBadge = r.processing_tag === 'finished' ? ' <span style="font-size:.68rem;background:#16331c22;color:#3fb950;border:1px solid #3fb95055;border-radius:3px;padding:1px 4px" title="Already has a good processed result — eased off acquisition">✓ done</span>' : '';
         var complColors = {{'almost done':['#3d2f0d','#e3b341'],'enough data':['#21262d','#8b949e']}};
@@ -6269,7 +6320,7 @@ def planner_page() -> str:
         tr.innerHTML =
           '<td style="padding:.3rem .4rem"><input type="checkbox" class="pl-check" data-target="' + r.target.replace(/"/g,'&quot;') + '"></td>'
           + '<td class="pl-rank">' + (i+1) + '</td>'
-          + '<td class="pl-target"><span title="' + scarcityTitle + '">' + r.target + '</span>' + newBadge + mosaicBadge + assocBadge + transientBadge + complBadge + procBadge + '</td>'
+          + '<td class="pl-target"><span title="' + scarcityTitle + '">' + r.target + '</span>' + newBadge + mosaicBadge + assocBadge + moonBadge + transientBadge + complBadge + procBadge + '</td>'
           + '<td>' + scorePill(r.combined_score) + '</td>'
           + '<td class="pl-num">' + r.max_alt + '°</td>'
           + visCell
@@ -6527,10 +6578,10 @@ def planner_page() -> str:
       ctx.textAlign = 'center';
       ctx.fillText(slot.target, cx, ly);
 
-      // Sub-label: planned hours  (e.g. "2.0h / 5.0h rec")
-      var deficit = slot.rec_h - slot.int_hours;
+      // Sub-label uses the same scored snapshot as the schedule table.
       var sub = slot.planned_h.toFixed(1) + 'h planned';
-      if (deficit > 0.1) sub += ' · ' + deficit.toFixed(1) + 'h needed';
+      if (!slot.done && slot.need_text && slot.need_text !== '—')
+        sub += ' · ' + slot.need_text + ' needed';
       ctx.font = '8px system-ui,sans-serif';
       ctx.fillStyle = '#8b949e';
       ctx.fillText(sub, cx, ly + 11);
@@ -6574,23 +6625,23 @@ def planner_page() -> str:
     fetch('/planner/autoflags').then(function(r) {{ return r.json(); }}).then(function(autoflags) {{
       var rows = slots.map(function(slot, ci) {{
         var color = colors[ci % colors.length];
-        var need = Math.max(0, slot.rec_h - slot.int_hours);
         var af = autoflags[slot.target] || {{}};
         var tenc = encodeURIComponent(slot.target);
-        var newBadge = slot.int_hours === 0 ? ' <span style="font-size:.68rem;background:#1f6feb;color:#fff;border-radius:3px;padding:1px 4px">NEW</span>' : '';
+        var newBadge = slot.usable_hours === 0 ? ' <span style="font-size:.68rem;background:#1f6feb;color:#fff;border-radius:3px;padding:1px 4px">NEW</span>' : '';
         var mosaicTitle2 = slot.mosaic_class === 's50_framing' ? 'Use SeeStar Framing mode + same target name → Siril max framing. No panel naming or stitching needed.' : 'Larger than S50 2× framing range. Use separate panel names + stitch in Siril/PI.';
         var mosaicBadge = slot.is_mosaic ? ' <span style="font-size:.68rem;background:#6e40c922;color:#d2a8ff;border:1px solid #6e40c955;border-radius:3px;padding:1px 4px" title="' + mosaicTitle2 + '">' + (slot.mosaic_label || (slot.mosaic_panels_w + '×' + slot.mosaic_panels_h)) + '</span>' : '';
         var assocFmt2 = fmtAssoc(slot.association);
         var assocBadge = assocFmt2 ? ' <span style="font-size:.68rem;color:var(--text2)" title="' + slot.association + '">⟷ ' + assocFmt2 + '</span>' : '';
+        var moonBadge = slot.exclusion_reason ? ' <span style="font-size:.68rem;color:#e3b341" title="' + slot.exclusion_reason + '">Moon slots excluded</span>' : '';
         return '<tr data-target="' + tenc + '">'
           + '<td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + color + ';vertical-align:middle"></span></td>'
-          + '<td style="color:' + color + ';font-weight:600">' + slot.target + newBadge + mosaicBadge + assocBadge + '</td>'
+          + '<td style="color:' + color + ';font-weight:600">' + slot.target + newBadge + mosaicBadge + assocBadge + moonBadge + '</td>'
           + '<td>' + slot.start_hhmm + '</td>'
           + '<td>' + slot.end_hhmm + '</td>'
           + '<td>' + slot.planned_h.toFixed(1) + 'h</td>'
-          + '<td style="color:var(--text2)">' + (slot.int_hours > 0 ? slot.int_hours.toFixed(1) + 'h' : '—') + '</td>'
-          + '<td style="color:' + (need > 0.1 ? '#e3b341' : '#3fb950') + '">'
-          +   (need > 0.1 ? need.toFixed(1) + 'h' : '✓') + '</td>'
+          + '<td style="color:var(--text2)">' + slot.have_text + '</td>'
+          + '<td style="color:' + (slot.done ? '#3fb950' : '#e3b341') + '">'
+          +   slot.need_text + '</td>'
           + '<td style="text-align:center"><label title="Auto-stack after transfer"><input type="checkbox" class="af-stack" data-target="' + tenc + '"' + (af.auto_stack ? ' checked' : '') + '><span style="font-size:.72rem;color:var(--text2);margin-left:3px">Stack</span></label></td>'
           + '<td style="text-align:center"><label title="Auto-process after stack"><input type="checkbox" class="af-proc" data-target="' + tenc + '"' + (af.auto_process ? ' checked' : '') + '><span style="font-size:.72rem;color:var(--text2);margin-left:3px">Process</span></label></td>'
           + '</tr>';
@@ -6674,18 +6725,15 @@ def planner_page() -> str:
       var colors = ['#58a6ff','#3fb950','#e3b341','#d2a8ff','#ff7b72','#ffa657','#39c5cf','#f778ba'];
       var rows = plan.slots.map(function(slot, ci) {{
         var color = colors[ci % colors.length];
-        var recH  = slot.rec_h || 0;
-        var need  = Math.max(0, recH - slot.int_hours);
+
         var af    = autoflags[slot.target] || {{}};
         var tenc  = encodeURIComponent(slot.target);
-        var newBadge = slot.int_hours === 0
+        var newBadge = slot.usable_hours === 0
           ? ' <span style="font-size:.68rem;background:#1f6feb;color:#fff;border-radius:3px;padding:1px 4px">NEW</span>'
           : '';
         var plannedCell = slot.planned_h != null ? slot.planned_h.toFixed(1) + 'h' : '—';
-        var haveCell    = slot.int_hours > 0 ? slot.int_hours.toFixed(1) + 'h' : '—';
-        var needCell    = need > 0.1
-          ? '<span style="color:#e3b341">' + need.toFixed(1) + 'h</span>'
-          : '<span style="color:#3fb950">✓</span>';
+        var haveCell = slot.have_text;
+        var needCell = '<span style="color:' + (slot.done ? '#3fb950' : '#e3b341') + '">' + slot.need_text + '</span>';
         return '<tr style="border-bottom:1px solid #21262d" data-target="' + tenc + '">'
           + '<td style="padding:.3rem .5rem"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + color + ';vertical-align:middle"></span></td>'
           + '<td style="padding:.3rem .5rem;color:' + color + ';font-weight:600;white-space:nowrap">' + slot.target + newBadge + '</td>'

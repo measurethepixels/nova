@@ -4,12 +4,15 @@ import json
 import subprocess
 import shutil
 import logging
+import math
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
 from nas_server import telegram
+from nas_server.siril_stack_script import prepare_stack_script
+from nas_server.stack_timing import StackTiming, script_feather_px
 from nas_server.stack_config import (
     STACK_CONFIG_DEFAULTS,
     _round_field,
@@ -315,7 +318,7 @@ def score_and_cull_frames(
     }
 
 
-def stack_target(target_name: str, library_path: str, db_path: str | None = None,
+def _stack_target_impl(target_name: str, library_path: str, db_path: str | None = None,
                  engine: str = "siril", cull: bool = True,
                  bottom_pct: float = 0.10, min_stars: int = 20,
                  fast: bool = False, framing: str = "min",
@@ -323,9 +326,16 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                  exptime: int | None = None,
                  eq_only: bool = True,
                  filter_name: str | None = "auto",
+                 feather_max_subs: int | None = None,
+                 overlap_norm: bool | None = None, feather: bool | None = None,
+                 _feather_snapshot: dict | None = None,
+                 _mosaic_snapshot: dict | None = None,
                  ecc_threshold: float = 0.66,
                  sky_level_factor: float = 3.0,
-                 gradient_threshold: float = 0.5) -> dict:
+                 gradient_threshold: float = 0.5,
+                 _plan_only: bool = False, _selected_paths: list[str] | None = None,
+                 _selection: dict | None = None,
+                 _admission_forecasts: dict | None = None) -> dict:
     """
     Stack all light frames for a target.
 
@@ -371,7 +381,8 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
     _stack_params = {
         "hero": hero, "drizzle": drizzle, "bottom_pct": bottom_pct,
         "ecc_threshold": ecc_threshold, "exptime": exptime, "framing": framing,
-        "eq_only": eq_only,
+        "eq_only": eq_only, "filter_name": filter_name,
+        "extra_params": {"stack_feather": _feather_snapshot},
     }
 
     lib_root = Path(library_path)
@@ -380,8 +391,6 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
     # --- Build candidate frame list from DB (all subfolders, any path) ---
     from nas_server.database import get_frames_by_target as _get_all_frames, get_conn as _db_conn
     _all_db_frames = _get_all_frames(target_name)
-    if not _all_db_frames:
-        return {"success": False, "error": f"No frames in DB for target: {target_name}"}
 
     # Include frames from confirmed associated targets (set via /associations page)
     _included_targets = {target_name}
@@ -433,39 +442,53 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         except Exception as _ae:
             logger.warning(f"[stack] {target_name}: mosaic flag lookup failed: {_ae}")
 
-    candidate_paths = [Path(f["file_path"]) for f in _all_db_frames if not f.get("exclude")]
+    if not _all_db_frames:
+        return {"success": False, "error": f"No frames in DB for target: {target_name}"}
 
-    # --- Canonical framing (PI register engine only) ---
-    # When the PI register engine is selected for a folio target with valid coords, build
-    # (cached) a synthetic Gaia reference on the fixed canonical grid and register real subs
-    # onto it, so every session lands on identical pixels (cumulative cross-night master
-    # stacks). The engine choice is NOT overridden — a Siril/ImageMM/WBPP stack of the same
-    # target runs normally — so the UI can default folios-with-a-reference to PI register
-    # while still allowing a quick Siril stack. Skipped for mosaics (framing=max / panels;
-    # the canonical fixed grid is single-pointing) and fast mode (incompatible with PI).
-    canonical_ref = None
-    if (engine == "pixinsight_register"
-            and settings.get("canonical_framing_auto", True)
-            and not fast and framing != "max" and not _has_mosaic_panels):
-        canonical_ref = _maybe_build_canonical_reference(target_name, drizzle)
+    candidate_paths = [Path(f["file_path"]) for f in _all_db_frames if not f.get("exclude")]
 
     started_at = datetime.now().isoformat(timespec="seconds")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = target_name.replace(" ", "_").replace("/", "_")
     work_dir = None
     work_light = None
+    timing = StackTiming()
+    telemetry = {"feather_px": None, "registered_frames": None}
+    forecasts = {"admission": _admission_forecasts, "start": None}
+    to_copy = []
+    log_output = ""
+    run_saved = False
+    last_outcome = {"success": False, "error": "Attempt ended before an engine result was recorded"}
+
+    def save_attempt(*, success, error=None, output_path=None, metrics=None):
+        nonlocal run_saved
+        last_outcome.update(success=success, error=error, output_path=output_path, metrics=metrics)
+        from nas_server.database import save_stacking_run
+        record = timing.finish()
+        if _selection is not None:
+            record["filter_selection"] = _selection
+        record["feather_policy"] = telemetry.get("feather_policy")
+        record["overlap_norm"] = (telemetry.get("executed_stack") or {}).get("overlap_norm")
+        record["stack_options"] = (telemetry.get("feather_policy") or {}).get("options")
+        record["executed_stack"] = telemetry.get("executed_stack")
+        record["stack_options_status"] = "executed_success" if success and telemetry.get("executed_stack") else "planned"
+        from nas_server.stack_estimates import attach_forecasts
+        attach_forecasts(record, forecasts)
+        record["unavailable"] = ["convert_s", "seqplatesolve_s", "register_s", "feather_s"]
+        record["notes"] = "Siril sub-stages share calls; feather is included in integrate_s. External engines use engine_bundle_s."
+        save_stacking_run(target_name, engine, started_at, len(to_copy),
+                          record["elapsed_s"], success=success, error=error,
+                          log_tail=log_output or "[telemetry] No engine stdout was captured before this attempt ended.",
+                          output_path=output_path, metrics=metrics,
+                          # Mosaic/fast overrides can change the effective mode.
+                          params={**_stack_params, "framing": framing, "drizzle": drizzle},
+                          telemetry={**telemetry, "stage_times": record})
+        run_saved = True
 
     try:
-        # --- Starting message with ETA ---
+        # Selection/preflight does not issue a start forecast or notification.
         frame_total = len(_all_db_frames)
-        eta_min = _estimate_stack_minutes(target_name, frame_total, engine)
         _set_stack_phase(target_name, "culling" if cull else "copying")
-        _drizzle_note = " | drizzle 2x" if drizzle else ""
-        _exptime_note = f" | {exptime}s subs only" if exptime else ""
-        telegram.send(
-            f"🚀 <b>Stack starting</b>: <code>{target_name}</code>\n"
-            f"Engine: {engine}{_drizzle_note}{_exptime_note} | ~{frame_total} frames | ETA ~{eta_min}min"
-        )
         if drizzle and frame_total < 100:
             telegram.send(
                 f"⚠️ <b>Drizzle warning</b>: <code>{target_name}</code>\n"
@@ -473,148 +496,157 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                 f"SeeStar alt-az rotation helps, but fewer frames may leave gaps in the output grid."
             )
 
-        # --- Phase 0: Measure frames (store quality metrics, threshold applied below) ---
-        # Run per-target so panel frames are scored and qualified under their own target name.
-        if cull:
-            _set_stack_phase(target_name, "culling")
-            for _ct in _included_targets:
-                _ct_paths = [Path(f["file_path"]) for f in _all_db_frames
-                             if f.get("target") == _ct and not f.get("exclude")]
-                if _ct_paths:
-                    score_and_cull_frames(_ct, _ct_paths, db_path,
-                                          bottom_pct=bottom_pct, min_stars=min_stars)
+        if _selected_paths is None:
+            # --- Phase 0: Measure frames (store quality metrics, threshold applied below) ---
+            # Run per-target so panel frames are scored and qualified under their own target name.
+            if cull:
+                _set_stack_phase(target_name, "culling")
+                for _ct in _included_targets:
+                    _ct_paths = [Path(f["file_path"]) for f in _all_db_frames
+                                 if f.get("target") == _ct and not f.get("exclude")]
+                    if _ct_paths:
+                        score_and_cull_frames(_ct, _ct_paths, db_path,
+                                              bottom_pct=bottom_pct, min_stars=min_stars)
 
-        # Apply threshold dynamically from stored measurements.
-        # exclude=1 in DB means manual user exclusion only (not auto-culling).
-        from nas_server.database import get_frames_for_stack
-        if cull:
-            qualifying_paths = set()
-            for _ct in _included_targets:
-                qualifying_paths.update(get_frames_for_stack(
-                    _ct, bottom_pct=bottom_pct, min_stars=min_stars,
-                    ecc_threshold=ecc_threshold, sky_level_factor=sky_level_factor,
-                    gradient_threshold=gradient_threshold))
-        else:
-            qualifying_paths = {f["file_path"] for f in _all_db_frames if not f.get("exclude")}
+            # Refresh metrics written by scoring before ranking coverage strata.
+            _all_db_frames = [f for t in sorted(_included_targets) for f in _get_all_frames(t)]
 
-        # Optional exposure-time filter (e.g. exptime=30 for EQ-mode subs only)
-        if exptime is not None:
-            with _db_conn() as _c:
-                exptime_paths = {r[0] for r in _c.execute(
-                    "SELECT file_path FROM light_files WHERE target=? AND ROUND(exposure_time)=?",
-                    (target_name, round(exptime))
-                ).fetchall()}
-            qualifying_paths = qualifying_paths & exptime_paths
-            logger.info(f"[stack] {target_name}: exptime={exptime}s filter → {len(qualifying_paths)} frames")
+            # Apply threshold dynamically from stored measurements.
+            # exclude=1 in DB means manual user exclusion only (not auto-culling).
+            from nas_server.database import get_frames_for_stack
+            if cull:
+                qualifying_paths = set()
+                for _ct in _included_targets:
+                    qualifying_paths.update(get_frames_for_stack(
+                        _ct, bottom_pct=bottom_pct, min_stars=min_stars,
+                        ecc_threshold=ecc_threshold, sky_level_factor=sky_level_factor,
+                        gradient_threshold=gradient_threshold))
+            else:
+                qualifying_paths = {f["file_path"] for f in _all_db_frames if not f.get("exclude")}
 
-        # ── Alignment-outlier filter ──────────────────────────────────────
-        # Drop subs whose TRUE solved position sits far from their panel/target
-        # siblings (solve_status='outlier' — e.g. a pre-EQ ALP-spoofed frame ~50°
-        # off-pointing). These would otherwise drag registration off the cluster or
-        # smear the max-frame mosaic. Gated by a setting in case the data is wanted.
-        if settings.get("exclude_alignment_outliers", True):
-            with _db_conn() as _c:
-                _outlier_paths = {r[0] for r in _c.execute(
-                    "SELECT file_path FROM light_files WHERE solve_status='outlier'"
-                ).fetchall()}
-            if _outlier_paths:
-                _before = len(qualifying_paths)
-                qualifying_paths = {p for p in qualifying_paths
-                                    if str(p) not in _outlier_paths}
-                _dropped = _before - len(qualifying_paths)
-                if _dropped:
-                    logger.info(f"[stack] {target_name}: dropped {_dropped} alignment "
-                                f"outlier(s) from stack (solved position off-cluster)")
+            # Optional exposure-time filter (e.g. exptime=30 for EQ-mode subs only)
+            if exptime is not None:
+                with _db_conn() as _c:
+                    placeholders = ",".join("?" for _ in _included_targets)
+                    exptime_paths = {r[0] for r in _c.execute(
+                        f"SELECT file_path FROM light_files WHERE target IN ({placeholders}) "
+                        "AND ROUND(exposure_time)=?",
+                        (*sorted(_included_targets), round(exptime))
+                    ).fetchall()}
+                qualifying_paths = qualifying_paths & exptime_paths
+                logger.info(f"[stack] {target_name}: exptime={exptime}s filter → {len(qualifying_paths)} frames")
 
-        # ── EQ-mode detection & optional filter ───────────────────────────
-        # Read EQMODE from FITS headers for qualifying frames.
-        # EQMODE=1 → equatorial mode (consistent framing)
-        # EQMODE=0 → alt-az (field rotation; mixing causes diagonal artifacts)
-        # EQMODE absent → old firmware predating the flag: infer from EXPTIME. The S50
-        #   cannot expose 30s in alt-az (field rotation smears stars), so any ≥30s sub is
-        #   EQ; shorter flagless subs are alt-az.
-        # Always detect mixing; filter to EQ-only when eq_only=True.
-        _EQ_MIN_EXP_S = 29.5  # ≥30s subs require an EQ mount on the S50
-        try:
-            from astropy.io import fits as _af_eq
-            _eq_count = _altaz_count = _unknown_count = 0
-            _altaz_paths: set[str] = set()
-            _eq_resolved: dict[str, int] = {}
-            for _fp in list(qualifying_paths):
-                try:
-                    _hdr = _af_eq.getheader(str(_fp), ext=0)
-                    _em = _hdr.get("EQMODE")
-                    if _em == 1:
-                        _is_eq = True
-                    elif _em == 0:
-                        _is_eq = False
-                    else:
-                        # EQMODE absent (pre-flag firmware): infer EQ from exposure time.
-                        try:
-                            _exp = float(_hdr.get("EXPTIME") or 0)
-                        except Exception:
-                            _exp = 0.0
-                        _is_eq = _exp >= _EQ_MIN_EXP_S
-                    if _is_eq:
-                        _eq_count += 1
-                        _eq_resolved[str(_fp)] = 1
-                    else:
-                        _altaz_count += 1
-                        _altaz_paths.add(str(_fp))
-                        _eq_resolved[str(_fp)] = 0
-                except Exception:
-                    _unknown_count += 1
+            # ── Alignment-outlier filter ──────────────────────────────────────
+            # Drop subs whose TRUE solved position sits far from their panel/target
+            # siblings (solve_status='outlier' — e.g. a pre-EQ ALP-spoofed frame ~50°
+            # off-pointing). These would otherwise drag registration off the cluster or
+            # smear the max-frame mosaic. Gated by a setting in case the data is wanted.
+            if settings.get("exclude_alignment_outliers", True):
+                with _db_conn() as _c:
+                    _outlier_paths = {r[0] for r in _c.execute(
+                        "SELECT file_path FROM light_files WHERE solve_status='outlier'"
+                    ).fetchall()}
+                if _outlier_paths:
+                    _before = len(qualifying_paths)
+                    qualifying_paths = {p for p in qualifying_paths
+                                        if str(p) not in _outlier_paths}
+                    _dropped = _before - len(qualifying_paths)
+                    if _dropped:
+                        logger.info(f"[stack] {target_name}: dropped {_dropped} alignment "
+                                    f"outlier(s) from stack (solved position off-cluster)")
 
-            # Persist resolved eq_mode to DB lazily (best-effort, won't block stacking)
+            # ── EQ-mode detection & optional filter ───────────────────────────
+            # Read EQMODE from FITS headers for qualifying frames.
+            # EQMODE=1 → equatorial mode (consistent framing)
+            # EQMODE=0 → alt-az (field rotation; mixing causes diagonal artifacts)
+            # EQMODE absent → old firmware predating the flag: infer from EXPTIME. The S50
+            #   cannot expose 30s in alt-az (field rotation smears stars), so any ≥30s sub is
+            #   EQ; shorter flagless subs are alt-az.
+            # Always detect mixing; filter to EQ-only when eq_only=True.
             try:
-                with _db_conn() as _c_eq:
-                    for _fp, _val in _eq_resolved.items():
-                        _c_eq.execute(
-                            "UPDATE light_files SET eq_mode=? WHERE file_path=?",
-                            (_val, _fp)
-                        )
-            except Exception as _db_eq_err:
-                logger.debug(f"[stack] {target_name}: eq_mode DB update skipped: {_db_eq_err}")
+                from astropy.io import fits as _af_eq
+                from nas_server.frame_modes import mode_from_header, persist_frame_modes
+                _eq_count = _altaz_count = _unknown_count = 0
+                _altaz_paths: set[str] = set()
+                _eq_resolved: dict[str, int] = {}
+                for _fp in list(qualifying_paths):
+                    try:
+                        _hdr = _af_eq.getheader(str(_fp), ext=0)
+                        _is_eq = bool(mode_from_header(_hdr))
+                        if _is_eq:
+                            _eq_count += 1
+                            _eq_resolved[str(_fp)] = 1
+                        else:
+                            _altaz_count += 1
+                            _altaz_paths.add(str(_fp))
+                            _eq_resolved[str(_fp)] = 0
+                    except Exception:
+                        _unknown_count += 1
 
-            total_q = len(qualifying_paths)
-            if _altaz_count > 0 and _eq_count > 0:
-                _mix_pct = _altaz_count / total_q * 100
-                logger.warning(
-                    f"[stack] {target_name}: MIXED MOUNT MODE — "
-                    f"{_eq_count} EQ + {_altaz_count} alt-az frames ({_mix_pct:.0f}% alt-az). "
-                    f"This causes diagonal banding and low efficiency. "
-                    f"Re-stack with eq_only=True or exptime filter to use EQ frames only."
-                )
-                if not eq_only:
-                    telegram.send(
-                        f"⚠️ <b>{target_name}</b> stack: mixed EQ + alt-az frames detected "
-                        f"({_eq_count} EQ / {_altaz_count} alt-az). "
-                        f"Consider re-stacking with <b>EQ only</b> to avoid diagonal banding."
+                # Rejected/excluded frames contribute metadata only, never
+                # selected-mode counts or the downstream eq_only branches.
+                try:
+                    persist_frame_modes(
+                        (f["file_path"] for f in _all_db_frames),
+                        qualifying_paths, _eq_resolved,
+                        read_header=_af_eq.getheader, get_conn=_db_conn, logger=logger)
+                except Exception as _db_eq_err:
+                    logger.debug(f"[stack] {target_name}: eq_mode DB update skipped: {_db_eq_err}")
+
+                total_q = len(qualifying_paths)
+                if _altaz_count > 0 and _eq_count > 0:
+                    _mix_pct = _altaz_count / total_q * 100
+                    logger.warning(
+                        f"[stack] {target_name}: MIXED MOUNT MODE — "
+                        f"{_eq_count} EQ + {_altaz_count} alt-az frames ({_mix_pct:.0f}% alt-az). "
+                        f"This causes diagonal banding and low efficiency. "
+                        f"Re-stack with eq_only=True or exptime filter to use EQ frames only."
+                    )
+                    if not eq_only:
+                        telegram.send(
+                            f"⚠️ <b>{target_name}</b> stack: mixed EQ + alt-az frames detected "
+                            f"({_eq_count} EQ / {_altaz_count} alt-az). "
+                            f"Consider re-stacking with <b>EQ only</b> to avoid diagonal banding."
+                        )
+
+                if eq_only and _eq_count > 0:
+                    qualifying_paths -= _altaz_paths
+                    _removed = _altaz_count
+                    logger.info(
+                        f"[stack] {target_name}: eq_only=True — excluded {_removed} alt-az frames "
+                        f"(EQMODE=0 or flagless <30s), {len(qualifying_paths)} EQ frames remain"
+                    )
+                    if len(qualifying_paths) == 0:
+                        return {"success": False, "error": "eq_only=True but no equatorial-mode frames found"}
+                elif eq_only and _eq_count == 0:
+                    # Pure alt-az target — no EQ frames to keep, so eq_only filtering is a no-op.
+                    # Banding only arises from MIXING EQ + alt-az; an all-alt-az stack is fine.
+                    logger.info(
+                        f"[stack] {target_name}: eq_only=True but target is 100% alt-az "
+                        f"({_altaz_count} frames) — no mixing risk, stacking all alt-az frames"
                     )
 
-            if eq_only and _eq_count > 0:
-                qualifying_paths -= _altaz_paths
-                _removed = _altaz_count
-                logger.info(
-                    f"[stack] {target_name}: eq_only=True — excluded {_removed} alt-az frames "
-                    f"(EQMODE=0 or flagless <30s), {len(qualifying_paths)} EQ frames remain"
-                )
-                if len(qualifying_paths) == 0:
-                    return {"success": False, "error": "eq_only=True but no equatorial-mode frames found"}
-            elif eq_only and _eq_count == 0:
-                # Pure alt-az target — no EQ frames to keep, so eq_only filtering is a no-op.
-                # Banding only arises from MIXING EQ + alt-az; an all-alt-az stack is fine.
-                logger.info(
-                    f"[stack] {target_name}: eq_only=True but target is 100% alt-az "
-                    f"({_altaz_count} frames) — no mixing risk, stacking all alt-az frames"
-                )
+            except Exception as _eq_err:
+                logger.debug(f"[stack] {target_name}: eq_mode detection failed: {_eq_err}")
 
-        except Exception as _eq_err:
-            logger.debug(f"[stack] {target_name}: eq_mode detection failed: {_eq_err}")
+        else:
+            # Frozen by preflight across the combined target/panel population.
+            qualifying_paths = set(_selected_paths) & {
+                f["file_path"] for f in _all_db_frames if not f.get("exclude")}
 
         # Resolve to existing paths; sort for reproducible sequential naming
         to_copy = sorted(Path(p) for p in qualifying_paths if Path(p).exists())
         n_missing = len(qualifying_paths) - len(to_copy)
+        try:
+            exposures = {f["file_path"]: f.get("exposure_time") for f in _all_db_frames}
+            mix = {}
+            for frame in to_copy:
+                value = exposures.get(str(frame))
+                key = format(float(value), "g") if value is not None else "unknown"
+                mix[key] = mix.get(key, 0) + 1
+            telemetry["exptime_mix"] = mix
+        except Exception as exc:
+            logger.debug(f"[stack] exposure telemetry unavailable: {exc}")
 
         logger.info(f"[stack] {target_name}: {len(to_copy)} frames pass threshold "
                     f"(bottom_pct={bottom_pct:.0%} min_stars={min_stars} ecc<{ecc_threshold} "
@@ -624,6 +656,40 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
 
         if not to_copy:
             return {"success": False, "error": "No non-excluded frames to stack"}
+
+        from nas_server.stack_selection import plan_filter_stacks
+        if _plan_only:
+            plan = plan_filter_stacks(_all_db_frames, to_copy, filter_name)
+            from nas_server.mosaic_selection import cap_filter_plan
+            plan = [cap_filter_plan(p, _all_db_frames, _mosaic_snapshot,
+                                    framing, engine, _panels if _has_mosaic_panels else [])
+                    for p in plan]
+            run_saved = True  # Planning is not an engine attempt.
+            return {"success": True, "plan": plan}
+        if _selection is None:
+            raise ValueError("Stack execution requires a frozen filter selection")
+        # Revalidate metadata and availability immediately before engine execution.
+        check = plan_filter_stacks(_all_db_frames, to_copy, filter_name)
+        if len(check) != 1 or any(check[0][k] != _selection[k]
+                                  for k in ("filter", "paths", "source_hash")):
+            raise ValueError("Selected source population changed after preflight; retry request")
+        _stack_params["mosaic_policy"] = _selection.get("mosaic_policy")
+        telemetry["mosaic_policy"] = _selection.get("mosaic_policy")
+        logger.info("[stack] %s: filter selection %s", target_name, json.dumps(_selection))
+        # --- Canonical framing (PI register engine only) ---
+        # When the PI register engine is selected for a folio target with valid coords, build
+        # (cached) a synthetic Gaia reference on the fixed canonical grid and register real subs
+        # onto it, so every session lands on identical pixels (cumulative cross-night master
+        # stacks). The engine choice is NOT overridden — a Siril/ImageMM/WBPP stack of the same
+        # target runs normally — so the UI can default folios-with-a-reference to PI register
+        # while still allowing a quick Siril stack. Skipped for mosaics (framing=max / panels;
+        # the canonical fixed grid is single-pointing) and fast mode (incompatible with PI).
+        canonical_ref = None
+        if (engine == "pixinsight_register"
+                and settings.get("canonical_framing_auto", True)
+                and not fast and framing != "max" and not _has_mosaic_panels):
+            canonical_ref = _maybe_build_canonical_reference(target_name, drizzle)
+
 
         # PI ImageIntegration peak RAM ≈ baseline + (canvas_Mpx × ~10.7 MB) × N_frames.
         # Driver is CANVAS SIZE × N — one resident RGB-float frame per sub — NOT the
@@ -701,6 +767,31 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                     "error": f"Insufficient space: need ~{_needed_mb // 1024}GB, "
                              f"local={_local_free_mb // 1024}GB, nas={_nas_free_mb // 1024}GB"}
 
+        telemetry["work_dir_kind"] = "local_ssd" if work_dir.parent == Path("/tmp") else "nas_hdd"
+        from nas_server.stack_config import feather_decision
+        effective_engine = "siril" if engine == "pixinsight_register" and fast else engine
+        forecast_feather = feather_decision(_feather_snapshot, len(to_copy), framing, effective_engine, fast)
+        telemetry["feather_policy"] = forecast_feather
+        try:
+            from nas_server.stack_estimates import safe_forecast, description, runtime_context
+            context = runtime_context(effective_engine, settings, hero=hero, fast=fast)
+            overlap_norm = bool(forecast_feather["overlap_norm"])
+            forecasts["configuration"] = {"context": context, "overlap_norm": overlap_norm, "stack_options": forecast_feather["options"]}
+            forecasts["start"] = safe_forecast(
+                target_name, len(to_copy), effective_engine, framing, drizzle,
+                forecast_feather["feather_px"] if effective_engine == "siril" else None, count_basis="frozen eligible per-filter paths before registration",
+                context=context, overlap_norm=overlap_norm, work_dir_kind=telemetry["work_dir_kind"])
+            forecasts["start"]["warn_hours"] = settings.get("stack_long_warn_hours", 5)
+            forecasts["start"]["feather_policy"] = forecast_feather
+            label = description(forecasts["start"], forecasts["start"]["warn_hours"])
+            logger.info("[stack] %s [%s]: %s", target_name, filter_name, label)
+            with _stack_lock:
+                if target_name in _active_stacks:
+                    _active_stacks[target_name]["estimate_label"] = label
+            telegram.send(f"🚀 <b>Stack starting</b>: <code>{target_name}</code> [{filter_name}]\n"
+                          f"Engine: {effective_engine} | {len(to_copy)} eligible frames | {label}")
+        except Exception as forecast_error:
+            logger.warning("[stack] forecast/notification unavailable: %s", forecast_error)
         work_light = work_dir / "light"
 
         # --- Phase 1: Copy ---
@@ -791,28 +882,20 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         obs_date = frame_meta.get("obs_date")
         exptime = frame_meta.get("exptime") or 0
         sensor_temp = frame_meta.get("sensor_temp")
-        # Sum actual per-frame exposure times from DB (handles mixed sub lengths correctly).
-        # Fall back to first-frame × count if DB lookup fails or returns nothing.
-        try:
-            _to_copy_strs = [str(p) for p in to_copy]
-            _placeholders = ",".join("?" * len(_to_copy_strs))
-            with _db_conn() as _c:
-                _row = _c.execute(
-                    f"SELECT SUM(exposure_time) FROM light_files WHERE file_path IN ({_placeholders})",
-                    _to_copy_strs
-                ).fetchone()
-            total_integration = float(_row[0]) if (_row and _row[0] is not None) else exptime * len(to_copy)
-            logger.info(f"[stack] {target_name}: total integration from DB sum = {total_integration:.1f}s "
-                        f"(first-frame exptime={exptime}s × {len(to_copy)} = {exptime * len(to_copy):.0f}s)")
-        except Exception as _tie:
-            logger.warning(f"[stack] {target_name}: DB exposure sum failed ({_tie}), using exptime×count")
-            total_integration = exptime * len(to_copy)
+        total_integration = _selection["integration_seconds"]
 
         # --- Phase 2: Stack ---
         # PI drizzle requires full plate solve per frame \u2014 incompatible with fast mode.
         if engine == "pixinsight_register" and fast:
             logger.warning("[stack] fast=True incompatible with pixinsight_register \u2014 using siril")
             engine = "siril"
+
+        from nas_server.stack_config import feather_description, stack_options_description
+        decision = telemetry["feather_policy"]
+        _stack_params["feather_policy"] = decision
+        telemetry["feather_policy"] = decision
+        logger.info("[stack] %s [%s]: %s", target_name, filter_name, feather_description(decision))
+        telegram.send(f"<b>{target_name}</b> [{filter_name}]: Planned: {stack_options_description(decision)}")
 
         if engine == "imagemm":
             telegram.send(
@@ -847,15 +930,15 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         t0 = datetime.now()
 
         if engine == "imagemm":
-            result_ok, log_output = _run_imagemm_engine(
+            result_ok, log_output = timing.call("engine_bundle_s", _run_imagemm_engine,
                 target_name, work_dir, len(to_copy), framing=framing, hero=hero, drizzle=drizzle
             )
         elif engine == "pixinsight_wbpp":
-            result_ok, log_output = _run_wbpp_engine(
+            result_ok, log_output = timing.call("engine_bundle_s", _run_wbpp_engine,
                 target_name, work_dir, len(to_copy), framing=framing, hero=hero, drizzle=drizzle
             )
         elif engine == "pixinsight_register":
-            result_ok, log_output = _run_pi_drizzle_engine(
+            result_ok, log_output = timing.call("engine_bundle_s", _run_pi_drizzle_engine,
                 target_name, work_dir, len(to_copy),
                 reference_image=canonical_ref, drizzle=drizzle
             )
@@ -901,7 +984,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 )
                 _register_stack(target_name, proc_ps, len(to_copy), t0, work_dir)
-                stdout_ps, stderr_ps = proc_ps.communicate()
+                stdout_ps, stderr_ps = timing.call("convert_solve_bundle_s", proc_ps.communicate)
                 _unregister_stack(target_name)
                 log_output = stdout_ps + stderr_ps
 
@@ -925,7 +1008,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     )
                     _register_stack(target_name, proc_reg, len(to_copy), t0, work_dir)
-                    stdout_reg, stderr_reg = proc_reg.communicate()
+                    stdout_reg, stderr_reg = timing.call("registration_bundle_s", proc_reg.communicate)
                     _unregister_stack(target_name)
                     log_output += "\n[drizzle-reg] " + stdout_reg + stderr_reg
                     result_ok = (proc_reg.returncode == 0
@@ -967,7 +1050,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     )
                     _register_stack(target_name, proc_fb, len(to_copy), t0, work_dir)
-                    stdout_fb, stderr_fb = proc_fb.communicate()
+                    stdout_fb, stderr_fb = timing.call("registration_bundle_s", proc_fb.communicate)
                     _unregister_stack(target_name)
                     log_output += "\n[drizzle-fallback] " + stdout_fb + stderr_fb
                     result_ok = (proc_fb.returncode == 0
@@ -981,7 +1064,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 )
                 _register_stack(target_name, proc, len(to_copy), t0, work_dir)
-                stdout, stderr = proc.communicate()
+                stdout, stderr = timing.call("registration_bundle_s", proc.communicate)
                 _unregister_stack(target_name)
                 log_output = stdout + stderr
                 result_ok = proc.returncode == 0 and "Script execution failed" not in log_output
@@ -1046,7 +1129,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                         )
                         _register_stack(target_name, proc_fb, len(to_copy), t0, work_dir)
-                        stdout_fb, stderr_fb = proc_fb.communicate()
+                        stdout_fb, stderr_fb = timing.call("registration_bundle_s", proc_fb.communicate)
                         _unregister_stack(target_name)
                         log_output += "\n[fallback] " + stdout_fb + stderr_fb
                         result_ok = (proc_fb.returncode == 0
@@ -1072,13 +1155,32 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
             # Phase B: stack (only if register succeeded)
             if result_ok:
                 logger.info(f"[stack] {target_name}: Siril stack via {_stack_ssf.name}")
-                proc2 = subprocess.Popen(
-                    ["siril-cli", "-s", str(_stack_ssf), "-d", str(work_dir)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                _run_stack_ssf = prepare_stack_script(
+                    _stack_ssf, work_dir, decision["feather_px"] or None,
+                    overlap_norm=decision["overlap_norm"] if decision["applicable"] else True
                 )
-                _register_stack(target_name, proc2, len(to_copy), t0, work_dir)
-                stdout2, stderr2 = proc2.communicate()
-                _unregister_stack(target_name)
+                try:
+                    from nas_server.siril_stack_script import executed_stack_options
+                    executed = executed_stack_options(_run_stack_ssf.read_text())
+                    if decision['applicable'] and (executed['overlap_norm'] != decision['overlap_norm']
+                            or executed['feather_px'] != decision['feather_px']):
+                        raise ValueError('Executed stack flags differ from frozen plan')
+                    telemetry['executed_stack'] = executed
+                    try:
+                        telemetry["feather_px"] = executed['feather_px']
+                        telemetry["registered_frames"] = _read_seq_frame_count(str(work_dir))
+                    except Exception as exc:
+                        logger.debug(f"[stack] integration telemetry unavailable: {exc}")
+                    proc2 = subprocess.Popen(
+                        ["siril-cli", "-s", str(_run_stack_ssf), "-d", str(work_dir)],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    )
+                    _register_stack(target_name, proc2, len(to_copy), t0, work_dir)
+                    stdout2, stderr2 = timing.call("integrate_s", proc2.communicate)
+                    _unregister_stack(target_name)
+                finally:
+                    if _run_stack_ssf != _stack_ssf:
+                        _run_stack_ssf.unlink(missing_ok=True)
                 log_output += "\n" + stdout2 + stderr2
                 _stack_out = stdout2 + stderr2
                 result_ok = (proc2.returncode == 0
@@ -1112,11 +1214,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
             )
             try:
                 from nas_server.database import save_stacking_run
-                save_stacking_run(target_name, engine, started_at, len(to_copy),
-                                  elapsed, success=False,
-                                  error=f"{engine} stack failed",
-                                  log_tail=log_output,
-                                  params=_stack_params)
+                save_attempt(success=False, error=f"{engine} stack failed")
             except Exception:
                 pass
             # Cleanup via subprocess: survives daemon-thread kill when uvicorn crashes on failure.
@@ -1142,14 +1240,17 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
             "eq_only": eq_only, "filter_name": filter_name,
             "ecc_threshold": ecc_threshold, "sky_level_factor": sky_level_factor,
             "gradient_threshold": gradient_threshold,
+            "feather_px": decision["feather_px"] if decision["applicable"] else None,
+            "overlap_norm": decision["overlap_norm"],
+            "mosaic_cap": (_selection.get("mosaic_policy") or {}).get("cap", 0),
         })
         stack_name = make_processed_filename(
             target_name, obs_date, total_integration, sensor_temp,
-            tool_label, "stack", "fit", config_tokens=_cfg_tokens
+            tool_label, "stack", "fit", config_tokens=_cfg_tokens + "_" + filter_name + "_" + _selection["source_hash"][:16]
         )
         preview_name = make_processed_filename(
             target_name, obs_date, total_integration, sensor_temp,
-            tool_label, "stack", "jpg", config_tokens=_cfg_tokens
+            tool_label, "stack", "jpg", config_tokens=_cfg_tokens + "_" + filter_name + "_" + _selection["source_hash"][:16]
         )
 
         result_fit = work_dir / "result.fit"
@@ -1169,7 +1270,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         # pi_solve.js now reads CDELT1/CDELT2 from PI's own SaveKeywords (not hardcoded),
         # so job["south_up"] and job["mirrored"] carry real parity info.
         # If solve fails, fall back to empirical always-flip for max framing.
-        _solve_result = _flip_and_solve(result_fit, target_name, notify=False)
+        _solve_result = timing.call("solve_result_s", _flip_and_solve, result_fit, target_name, notify=False)
         _did_flip = False
         if framing == "max":
             if _solve_result.get("ok"):
@@ -1190,7 +1291,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                     _cov_flip_ops.append((-1,))
                     _did_flip = True
                 if _did_flip:
-                    _solve_result = _flip_and_solve(result_fit, target_name, notify=True)
+                    _solve_result = timing.call("solve_result_s", _flip_and_solve, result_fit, target_name, notify=True)
                 else:
                     logger.info(f"[stack] {target_name}: maxframing image already correct orientation — no flip")
                     # Still send solved notification
@@ -1206,7 +1307,7 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                 _flip_fits_inplace(result_fit, axes=(-2,))
                 _cov_flip_ops.append((-2,))
                 _did_flip = True
-                _flip_and_solve(result_fit, target_name, notify=True)
+                timing.call("solve_result_s", _flip_and_solve, result_fit, target_name, notify=True)
         elif _solve_result.get("ok"):
             telegram.send(
                 f"🔭 <b>Plate solved</b>: <code>{target_name}</code>\n"
@@ -1228,72 +1329,142 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
 
         # Generate preview for all engines (removed from inside engine functions)
         if not preview_jpg.exists():
-            _generate_preview_jpg(result_fit, preview_jpg)
+            timing.call("preview_s", _generate_preview_jpg, result_fit, preview_jpg)
 
-        out_fit = processed_dir / stack_name
-        out_jpg = processed_dir / preview_name
+        from nas_server.library_publication import reserve_stack, accept_stack, retire_stacks
+        out_fit = reserve_stack(processed_dir, stack_name, tool_label)
+        stack_name = out_fit.name
+        out_jpg = out_fit.with_suffix('.jpg')
 
-        if result_fit.exists():
-            _move_with_overwrite_warning(result_fit, out_fit, target_name, "stack output")
-        else:
+        if not result_fit.exists():
             return {"success": False, "error": "Siril produced no result.fit"}
-        if preview_jpg.exists():
-            _move_with_overwrite_warning(preview_jpg, out_jpg, target_name, "preview output")
 
         # Embed integration metadata into the stack header for every engine. Siril
         # writes STACKCNT/LIVETIME natively, but SASpro (Image MM) and PI stacks do
         # not — so the downstream process step (which may run on a worker node with an
         # empty local DB) has no authoritative source for frame count / integration.
         # Writing them here makes the FITS header the single source of truth.
+        # (#1020: done on the work copy BEFORE publication, never after.)
         try:
             from astropy.io import fits as _meta_fits
-            with _meta_fits.open(str(out_fit), mode="update", memmap=False) as _mh:
+            with _meta_fits.open(str(result_fit), mode="update", memmap=False) as _mh:
                 _hdr = _mh[0].header
-                _hdr["STACKCNT"] = (int(len(to_copy)), "Number of integrated frames")
+                _hdr["FILTER"] = (filter_name, "Canonical selected capture filter")
+                _hdr["SRCHASH"] = _selection["source_hash"]
+                mosaic = _selection.get("mosaic_policy") or {}
+                if telemetry["registered_frames"] is None:
+                    telemetry["registered_frames"] = _read_seq_frame_count(str(work_dir))
+                mosaic["registered_survivors"] = telemetry["registered_frames"]
+                mosaic["effective_feather_px"] = decision["feather_px"]
+                mosaic["overlap_norm"] = decision["overlap_norm"]
+                mosaic["stack_options"] = decision["options"]
+                mosaic["executed_stack"] = telemetry.get("executed_stack")
+                logger.info("[stack] %s [%s]: cap=%s candidates=%s kept=%s registered_survivors=%s feather=%s overlap=%s",
+                            target_name, filter_name, mosaic.get("cap", 0),
+                            mosaic.get("candidates", len(to_copy)), len(to_copy),
+                            telemetry["registered_frames"], decision["feather_px"], mosaic["overlap_norm"])
+                _hdr["REQORIG"] = mosaic.get("origin", "legacy")
+                _hdr["MOSCAP"] = mosaic.get("cap", 0)
+                _hdr["MOSCAND"] = mosaic.get("candidates", len(to_copy))
+                _hdr["MOSKEPT"] = len(to_copy)
+                _hdr["MOSPOL"] = json.dumps(mosaic, sort_keys=True, separators=(",", ":"))
+                _hdr["MOSPART"] = mosaic.get("partition_hash", "none")
+                _hdr["MOSSEL"] = mosaic.get("selected_hash", _selection["source_hash"])
+                _hdr["MOSSTRAT"] = len(mosaic.get("strata", {}))
+                _hdr["MOSUNSCR"] = mosaic.get("unscored", 0)
+                _hdr["MOSMISS"] = mosaic.get("missing_positions", 0)
+                from nas_server.siril_stack_script import stack_option_headers
+                _hdr.update(stack_option_headers(decision, telemetry.get('executed_stack')))
+                _hdr["REGSURV"] = telemetry["registered_frames"] if telemetry["registered_frames"] is not None else -1
+                _hdr["FTHCOUNT"] = (decision["selected_frames"], "Eligible per-filter frame count")
+                _hdr["FTHMAX"] = (decision["threshold"], "Feather threshold; 0 always feathers")
+                _hdr["FTHOVR"] = (str(decision["override"]), "Requested override; None uses frozen default")
+                _hdr["FTHWHY"] = decision["reason"]
+                _hdr["FTHCONF"] = (decision["configured_px"], "Configured feather width before Siril cap")
+                _hdr["STACKCNT"] = (int(len(to_copy)), "Selected input frames; see REGSURV")
                 _hdr["LIVETIME"] = (float(total_integration), "Total integration time [s]")
                 _mh.flush()
         except Exception as _mhe:
-            logger.warning(f"[stack] {target_name}: failed to embed STACKCNT/LIVETIME header: {_mhe}")
+            raise RuntimeError(f"Cannot publish stack without authoritative FILTER/provenance: {_mhe}") from _mhe
+
+        try:
+            from astropy.io import fits as _telemetry_fits
+            header = _telemetry_fits.getheader(str(result_fit))
+            telemetry["canvas_w"] = int(header["NAXIS1"])
+            telemetry["canvas_h"] = int(header["NAXIS2"])
+            if telemetry["registered_frames"] is None:
+                telemetry["registered_frames"] = _read_seq_frame_count(str(work_dir))
+        except Exception as exc:
+            logger.debug(f"[stack] output telemetry unavailable: {exc}")
 
         # --- Frame-coverage map (built before work_dir cleanup) ---
-        # Persist beside the stack as <stem>_coverage.fit for the auto-process
-        # crop step (coverage / intersection candidates). Non-fatal.
+        # Persisted beside the stack as <stem>_coverage.fit for the auto-process crop
+        # step. Built into the work dir first so it is published in the SAME transaction
+        # as the stack it describes (#1020): a stale map can't describe a new stack.
+        # Non-fatal.
+        _cov_path = out_fit.with_name(out_fit.stem + "_coverage.fit")
+        _cov_work = work_dir / "coverage_publish.fit"
         try:
-            _cov, _cov_n = _build_coverage_map(work_dir / "process", target_name)
+            _cov, _cov_n = timing.call("coverage_s", _build_coverage_map, work_dir / "process", target_name)
             if _cov is not None:
-                _cov_path = out_fit.with_name(out_fit.stem + "_coverage.fit")
-                _persist_coverage_map(_cov, _cov_n, _cov_path, flip_ops=_cov_flip_ops)
-                logger.info(f"[stack] {target_name}: coverage map → {_cov_path.name}")
+                timing.call("coverage_s", _persist_coverage_map, _cov, _cov_n, _cov_work, flip_ops=_cov_flip_ops)
         except Exception as _ce:
             logger.warning(f"[stack] {target_name}: coverage map failed (non-fatal): {_ce}")
 
-        # --- Write DB row ---
-        flags = json.dumps({"debayer": True})
+        # --- Publish the stack as ONE logical final (#1020) ---
+        # FITS + preview + coverage are one broker transaction (crash-consistent, fenced
+        # against the PI generations this stack consumed); the DB row below is the
+        # acceptance marker, after which the transaction is completed.
+        _items = [(result_fit, out_fit, True)]
+        if preview_jpg.exists():
+            _items.append((preview_jpg, out_jpg, True))
+        _removes = []
+        if _cov_work.exists():
+            _items.append((_cov_work, _cov_path, True))
+        elif _cov_path.exists():
+            # No new map: an old one must not describe the new stack. Removed as a tombstone
+            # INSIDE the transaction, so the old accepted stack+coverage pair stays intact
+            # until the new final commits.
+            _removes.append(_cov_path)
+        for _it in _items:
+            if _it[1].exists():
+                logger.warning(f"[stack] {target_name}: overwriting existing {_it[1].name}")
+        from nas_server import pi_broker as _pib
+        _txid = _pib.fenced_publish_set(_items, removes=_removes)
+        if _cov_path.exists():
+            logger.info(f"[stack] {target_name}: coverage map → {_cov_path.name}")
+
+        # --- Write DB row (acceptance marker for the published final) ---
+        flags = json.dumps({"debayer": True, "filter_selection": _selection})
         notes = f"{len(to_copy)} frames \u00b7 {elapsed:.0f}s stack time"
-        upsert_processed_file(
-            target=target_name,
-            file_path=str(out_fit),
-            filename=stack_name,
-            tool="Siril",
-            step="stack",
-            total_integration=total_integration,
-            frame_count=len(to_copy),
-            sensor_temp=sensor_temp,
-            obs_date=obs_date,
-            flags=flags,
-            notes=notes,
-            is_auto=1,
-        )
+        with _pib.acceptance_fence():
+            upsert_processed_file(
+                target=target_name,
+                file_path=str(out_fit),
+                filename=stack_name,
+                tool="Siril",
+                step="stack",
+                total_integration=total_integration,
+                frame_count=len(to_copy),
+                sensor_temp=sensor_temp,
+                obs_date=obs_date,
+                flags=flags,
+                notes=notes,
+                is_auto=1,
+            )
 
         # Update pipeline stage
         set_pipeline_stage(target_name, "stacked", notes=notes)
+        accept_stack(out_fit)
+        _pib.complete_publication(_txid)
+        retire_stacks(target_name, out_fit)
 
         # --- Physics metrics (before Claude so they feed into the prompt) ---
         metrics = {}
         try:
             from nas_server.stack_assessor import assess_stack, get_frame_snrs
             snrs = get_frame_snrs([str(f) for f in to_copy])
-            metrics = assess_stack(out_fit, len(to_copy), snrs,
+            metrics = timing.call("metrics_s", assess_stack, out_fit, len(to_copy), snrs,
                                    mask_zero_border=(framing == "max"))
             logger.info(f"[stack] {target_name}: efficiency={metrics.get('efficiency')} "
                         f"snr={metrics.get('snr_stack')} fwhm={metrics.get('fwhm_stack')}")
@@ -1303,15 +1474,15 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         # --- Claude assessment (non-fatal) ---
         _set_stack_phase(target_name, "assessing")
         processed_id = _get_processed_id(str(out_fit))
-        scores = _run_claude_assessment(target_name, out_jpg, processed_id,
+        scores = timing.call("assessment_s", _run_claude_assessment, target_name, out_jpg, processed_id,
                                         len(to_copy), total_integration, obs_date,
-                                        physics=metrics or None)
+                                        physics=metrics or None, filter_name=filter_name)
 
         # --- Send preview photo to Telegram ---
         if out_jpg.exists():
             hours = total_integration / 3600
             caption_parts = [
-                f"<b>{target_name}</b> — stack complete",
+                f"<b>{target_name}</b> [{filter_name}] — stack complete",
                 f"{len(to_copy)} frames · {hours:.1f}h integration · {elapsed:.0f}s stack time",
             ]
             # Physics line
@@ -1346,24 +1517,21 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
                 )
                 for issue in (scores.get("issues") or [])[:2]:
                     caption_parts.append(f"⚠️ {issue}")
+            caption_parts.append("Executed: " + stack_options_description(decision))
             telegram.send_photo(str(out_jpg), caption="\n".join(caption_parts))
 
         # --- Cosmic Clarity post-processing (non-fatal, opt-in) ---
-        _run_cosmic_clarity(target_name, out_fit, processed_id)
+        timing.call("cosmic_clarity_s", _run_cosmic_clarity, target_name, out_fit, processed_id)
 
         logger.info(f"[stack] {target_name}: done in {elapsed:.0f}s → {out_fit.name}")
         try:
             from nas_server.database import save_stacking_run
-            save_stacking_run(target_name, engine, started_at, len(to_copy),
-                              elapsed, success=True, output_path=str(out_fit),
-                              metrics=metrics, params=_stack_params)
+            save_attempt(success=True, output_path=str(out_fit), metrics=metrics)
         except Exception as _ae:
             logger.warning(f"[stack] save_stacking_run failed: {_ae}")
             try:
                 from nas_server.database import save_stacking_run
-                save_stacking_run(target_name, engine, started_at, len(to_copy),
-                                  elapsed, success=True, output_path=str(out_fit),
-                                  params=_stack_params)
+                save_attempt(success=True, output_path=str(out_fit))
             except Exception:
                 pass
         return {
@@ -1371,15 +1539,16 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
             "processed_fit": str(out_fit),
             "preview_jpg": str(out_jpg) if out_jpg.exists() else None,
             "frames": len(to_copy),
+            "filter": filter_name,
+            "integration_seconds": total_integration,
+            "selection": _selection,
             "elapsed": elapsed,
         }
 
     except subprocess.TimeoutExpired:
         try:
             from nas_server.database import save_stacking_run
-            save_stacking_run(target_name, engine, started_at, 0, 0,
-                              success=False, error="Siril timed out after 1 hour",
-                              params=_stack_params)
+            save_attempt(success=False, error="Siril timed out after 1 hour")
         except Exception:
             pass
         return {"success": False, "error": "Siril timed out after 1 hour"}
@@ -1387,41 +1556,46 @@ def stack_target(target_name: str, library_path: str, db_path: str | None = None
         logger.exception(f"[stack] Unexpected error for {target_name}")
         try:
             from nas_server.database import save_stacking_run
-            save_stacking_run(target_name, engine, started_at, 0, 0,
-                              success=False, error=str(e), params=_stack_params)
+            save_attempt(success=False, error=str(e))
         except Exception:
             pass
         return {"success": False, "error": str(e)}
     finally:
-        _unregister_stack(target_name)
-        # --- Phase 4: Cleanup ---
-        telegram.send(f"\U0001f9f9 <b>Cleaning up temp files</b>: <code>{target_name}</code>")
-        try:
-            if work_dir is not None:
-                shutil.rmtree(work_dir, ignore_errors=True)
-        except Exception:
-            pass
-        # Reclaim qcow2 blocks immediately after cleanup so NAS Volume 2 shrinks
-        # without waiting for the weekly fstrim.timer. This is a VM-disk-specific
-        # optimization (real for this project's own qcow2-backed VM), not a
-        # general pipeline requirement -- unconditionally invoking `sudo fstrim /`
-        # is inappropriate on a portable/public install that may have no
-        # passwordless sudo at all (real repro: clean-machine Codespace test,
-        # 2026-09-15/16 -- also caught that the prior version never checked the
-        # real exit code, so a failed fstrim silently logged as "complete").
-        from nas_server.config import settings
-        if settings.get("reclaim_qcow2_after_stack", False):
+        if not _plan_only:
+            if not run_saved:
+                try:
+                    save_attempt(**last_outcome)
+                except Exception as exc:
+                    logger.warning(f"[stack] final telemetry save skipped: {exc}")
+            _unregister_stack(target_name)
+            # --- Phase 4: Cleanup ---
+            telegram.send(f"\U0001f9f9 <b>Cleaning up temp files</b>: <code>{target_name}</code>")
             try:
-                import subprocess as _sp
-                _result = _sp.run(["sudo", "fstrim", "-v", "/"], capture_output=True,
-                                  timeout=120, text=True)
-                if _result.returncode == 0:
-                    logger.info("[stack] fstrim / complete — qcow2 blocks reclaimed")
-                else:
-                    logger.warning(f"[stack] fstrim / failed (non-fatal): "
-                                   f"exit {_result.returncode}: {_result.stderr.strip()}")
-            except Exception as _fe:
-                logger.warning(f"[stack] fstrim failed (non-fatal): {_fe}")
+                if work_dir is not None:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+            except Exception:
+                pass
+            # Reclaim qcow2 blocks immediately after cleanup so NAS Volume 2 shrinks
+            # without waiting for the weekly fstrim.timer. This is a VM-disk-specific
+            # optimization (real for this project's own qcow2-backed VM), not a
+            # general pipeline requirement -- unconditionally invoking `sudo fstrim /`
+            # is inappropriate on a portable/public install that may have no
+            # passwordless sudo at all (real repro: clean-machine Codespace test,
+            # 2026-09-15/16 -- also caught that the prior version never checked the
+            # real exit code, so a failed fstrim silently logged as "complete").
+            from nas_server.config import settings
+            if settings.get("reclaim_qcow2_after_stack", False):
+                try:
+                    import subprocess as _sp
+                    _result = _sp.run(["sudo", "fstrim", "-v", "/"], capture_output=True,
+                                      timeout=120, text=True)
+                    if _result.returncode == 0:
+                        logger.info("[stack] fstrim / complete — qcow2 blocks reclaimed")
+                    else:
+                        logger.warning(f"[stack] fstrim / failed (non-fatal): "
+                                       f"exit {_result.returncode}: {_result.stderr.strip()}")
+                except Exception as _fe:
+                    logger.warning(f"[stack] fstrim failed (non-fatal): {_fe}")
 
 
 def _run_imagemm_engine(target_name: str, work_dir: Path, frame_count: int,
@@ -1982,7 +2156,8 @@ def _get_processed_id(file_path: str) -> int | None:
 
 def _run_claude_assessment(target_name: str, out_jpg, processed_id,
                             frame_count: int, total_integration: float,
-                            obs_date: str, physics: dict | None = None) -> None:
+                            obs_date: str, physics: dict | None = None,
+                            filter_name: str | None = None) -> None:
     """Run Claude post-stack assessment. Non-fatal — logs and returns on any error."""
     try:
         from nas_server.config import settings
@@ -2014,7 +2189,7 @@ def _run_claude_assessment(target_name: str, out_jpg, processed_id,
             "stackcnt": frame_count,
             "total_hours": round(total_integration / 3600, 2),
             "obs_date": obs_date,
-            "filter": "IRCUT",
+            "filter": filter_name,
             "object_type": _get_object_type(target_name),
         }
         scores = claude_client.assess_stacked_image(target_name, str(out_jpg), meta,
@@ -2094,32 +2269,21 @@ _stack_lock = _threading.Lock()
 _active_stacks: dict = {}  # target -> {proc, started_at, frames, pid, phase}
 
 
-def _estimate_stack_minutes(target: str, frame_count: int, engine: str) -> int:
-    """Estimate stack duration in minutes. Queries processing_runs history, falls back to defaults."""
-    try:
-        from nas_server.database import get_conn
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT AVG(elapsed_s) FROM processing_runs WHERE target=? AND workflow LIKE ? LIMIT 5",
-                (target, f"%{engine}%")
-            ).fetchone()
-            if row and row[0]:
-                return max(1, int(row[0] / 60))
-    except Exception:
-        pass
-    # Default estimates by engine
-    if engine == "imagemm":
-        return max(5, frame_count // 60)
-    if engine == "pixinsight_wbpp":
-        return max(3, 2 + frame_count // 200)
-    if engine == "pixinsight_register":
-        return max(10, frame_count // 20)  # ~8s/frame SA + ~12s/frame DI
-    return max(3, frame_count // 120)  # siril: ~0.5s/frame
+def _estimate_stack_minutes(target: str, frame_count: int, engine: str) -> int | None:
+    """Compatibility value for the progress monitor, using only stack history.
+
+    Unknown forecasts remain unknown in progress notifications.
+    """
+    from nas_server.stack_estimates import safe_forecast
+    estimate = safe_forecast(target, frame_count, engine, None, False, None,
+                             count_basis="progress-monitor provisional count")
+    return max(1, math.ceil(estimate["seconds"] / 60)) if estimate.get("seconds") else None
 
 
 def _register_stack(target: str, proc, frames: int, started_at, work_dir=None) -> None:
     with _stack_lock:
         _active_stacks[target] = {
+            "estimate_label": _active_stacks.get(target, {}).get("estimate_label", ""),
             "proc": proc,
             "work_dir": str(work_dir) if work_dir else None,
             "started_at": started_at,
@@ -2184,6 +2348,7 @@ def get_stack_status(target: str) -> dict:
         "phase": entry.get("phase", "running"),
         "elapsed_s": elapsed,
         "elapsed_human": f"{mins}m {secs}s",
+        "estimate_label": entry.get("estimate_label", ""),
         "work_dir": work_dir,
     }
 
@@ -2240,3 +2405,55 @@ def _run_cosmic_clarity(target_name: str, fits_path, processed_id) -> None:
             logger.warning(f"[seti_astro] {target_name}: CC denoise failed: {result.get('error','')}")
     except Exception as e:
         logger.warning(f"[seti_astro] {target_name}: exception (non-fatal): {e}")
+
+
+def stack_target(*args, **kwargs):
+    """Preflight once, then execute one frozen, unmixed selection per filter.
+
+    Multi-output calls return ``stacks``. Single-output calls also retain the
+    legacy top-level output fields. Partial failures retain successful outputs
+    so the queue can schedule their requested follow-ups without restacking.
+    """
+    import inspect
+    from nas_server import pi_broker
+    bound = inspect.signature(_stack_target_impl).bind(*args, **kwargs)
+    bound.apply_defaults()
+    params = dict(bound.arguments)
+    from nas_server.stack_config import resolve_feather_policy
+    from nas_server.config import settings
+    if params["_feather_snapshot"] is None:
+        params["_feather_snapshot"] = resolve_feather_policy(params["feather_max_subs"], settings,
+            overlap_norm=params["overlap_norm"], feather=params["feather"])
+    if params["_mosaic_snapshot"] is None:
+        from nas_server.mosaic_selection import admission_policy
+        params["_mosaic_snapshot"] = admission_policy("manual", None, settings)
+    # Private execution controls cannot be supplied through the public entry.
+    params.update(_plan_only=True, _selected_paths=None, _selection=None)
+    with pi_broker.generation_scope():
+        try:
+            planned = _stack_target_impl(**params)
+            if not planned.get("success"):
+                return planned
+            stacks = []
+            for selection in planned["plan"]:
+                params.update(_plan_only=False, filter_name=selection["filter"],
+                              _selected_paths=selection["paths"], _selection=selection)
+                result = _stack_target_impl(**params)
+                result["filter"] = selection["filter"]
+                stacks.append(result)
+                if not result.get("success"):
+                    break  # A cancellation/failure must not launch another engine.
+            success = all(result.get("success") for result in stacks)
+            combined = {"success": success, "stacks": stacks}
+            if len(stacks) == 1:
+                combined.update(stacks[0])
+            if not success:
+                combined["error"] = "; ".join(
+                    f"{r['filter']}: {r.get('error', 'stack failed')}"
+                    for r in stacks if not r.get("success"))
+            return combined
+        finally:
+            _unregister_stack(params["target_name"])
+
+
+stack_target.__wrapped__ = _stack_target_impl

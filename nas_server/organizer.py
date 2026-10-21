@@ -355,6 +355,7 @@ def _maybe_auto_queue(target_name: str, storage_target: str | None = None,
             result = queue_manager.add_stack_job(
                 target=target_name,
                 engine="siril",
+                request_origin="capture-transition",
                 post_autoprocess_workflow=post_wf,
             )
             if result.get("duplicate"):

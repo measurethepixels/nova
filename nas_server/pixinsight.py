@@ -39,145 +39,143 @@ _PI_FORCE_XVFB: bool = _os.environ.get("PI_FORCE_XVFB", "0") == "1"
 PI_CACHE_DIR = Path.home() / ".PixInsight"
 
 
-def _cleanup_pi_workspace(output_dir: str | None = None) -> None:
-    """Remove PI ImageIntegration cache files and rejection maps after a run."""
-    # Clear II cache files (can grow very large between runs)
-    for cache_file in PI_CACHE_DIR.glob("ImageIntegration-*.cache"):
-        try:
-            size_mb = cache_file.stat().st_size // (1024 * 1024)
-            cache_file.unlink()
-            log.info(f"[pi] cleanup: removed {cache_file.name} ({size_mb} MB)")
-        except Exception as e:
-            log.warning(f"[pi] cleanup: could not remove {cache_file}: {e}")
-
-    # Remove rejection maps and normalised frames left in the output directory
-    if output_dir:
-        out_path = Path(output_dir)
-        for pattern in ("*_rjmap.fits", "*rejection_high.fits", "*rejection_low.fits",
-                        "*_norm.fits", "*_norm.fit", "*integration_rejected*.fits"):
-            for f in out_path.glob(pattern):
-                try:
-                    f.unlink()
-                    log.info(f"[pi] cleanup: removed rejection map {f.name}")
-                except Exception as e:
-                    log.warning(f"[pi] cleanup: could not remove {f}: {e}")
+# #1020: every PixInsight launch goes through the host ownership broker
+# (nas_server/pi_broker.py). There is no legacy launch path and no global kill:
+# if the broker is unreachable the run fails closed.
+_JUNK_PATTERNS = ("*_rjmap.fits", "*rejection_high.fits", "*rejection_low.fits",
+                  "*_norm.fits", "*_norm.fit", "*integration_rejected*.fits")
+_QT_IPC_GLOBS = ("/dev/shm/qipc_sharedmemory_PIXINSIGHT*", "/dev/shm/sem.qipc_systemsem_PIXINSIGHT*")
 
 
-def _kill_lingering_pi() -> None:
-    """Kill any PixInsight processes left from a previous run or crash, and clear
-    PI's crash-detection shared memory so the next invocation doesn't see
-    'A running instance has crashed' and exit in <10 seconds.
-
-    PI uses Qt QSharedMemory objects in /dev/shm/ to track running instances.
-    When PI is killed (SIGKILL on timeout, OOM, or manual restart), these objects
-    remain in /dev/shm/. The next PI invocation reads the stale 'alive' flag and
-    immediately exits with the crash message. Deleting the files clears this state.
-    """
-    import os, signal as _signal, glob as _glob
-    try:
-        result = subprocess.run(["pgrep", "-f", "PixInsight"], capture_output=True, text=True)
-        if result.returncode == 0:
-            pids = [int(p) for p in result.stdout.split() if p.strip()]
-            for pid in pids:
-                try:
-                    os.kill(pid, _signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            if pids:
-                time.sleep(2)
-                log.info(f"[pi] killed {len(pids)} lingering PI process(es) before new run")
-    except Exception:
-        pass
-
-    # Clear PI crash-detection state: Qt shared memory and semaphore objects
-    # that persist in /dev/shm/ after a SIGKILL or OOM kill.
-    cleared = 0
-    for pattern in ("/dev/shm/qipc_sharedmemory_PIXINSIGHT*",
-                    "/dev/shm/sem.qipc_systemsem_PIXINSIGHT*"):
-        for shm_path in _glob.glob(pattern):
-            try:
-                os.unlink(shm_path)
-                log.info(f"[pi] cleared PI shared memory: {Path(shm_path).name}")
-                cleared += 1
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                log.warning(f"[pi] could not clear PI shared memory {shm_path}: {e}")
-
-    # Always wait briefly so the kernel fully closes any IPC handles the previous
-    # PI process had open.  Without this, the next PI launch sometimes sees a
-    # stale "running instance" flag and exits in <5 s before running any script.
-    time.sleep(1)
+def _is_junk(name: str) -> bool:
+    import fnmatch
+    return any(fnmatch.fnmatch(name, pat) for pat in _JUNK_PATTERNS)
 
 
-def _pi_preexec() -> None:
-    """Raise the open-file-descriptor soft limit to the hard limit before exec'ing PI.
+def _stage_outputs(job: dict, outputs: dict[str, str], tag: str) -> list[tuple[str, Path, Path, str]]:
+    """Point each declared output key at a private staging dir beside its destination
+    (same filesystem, so the broker's commit is a rename). Kinds: 'file', 'dir', 'inplace'."""
+    staged = []
+    for key, kind in outputs.items():
+        orig = job.get(key)
+        if not orig:
+            continue
+        dest_dir = Path(orig) if kind == "dir" else Path(orig).parent
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        stage = dest_dir / f".nova-pi-stage-{tag}-{key}"
+        stage.mkdir(mode=0o700)
+        staged.append((key, stage, dest_dir, kind))
+        if kind == "dir":
+            job[key] = str(stage)
+        else:
+            job[key] = str(stage / Path(orig).name)
+            if kind == "inplace":
+                shutil.copy2(orig, job[key])
+    return staged
 
-    PI opens one fd per input frame during ImageIntegration. With 9K+ frames the
-    default 1024 soft limit is exhausted, causing GLib-ERROR 'Too many open files'.
-    The hard limit on this system is 524288 — set the soft limit to match.
-    """
-    import resource as _resource
-    try:
-        _soft, _hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
-        _resource.setrlimit(_resource.RLIMIT_NOFILE, (_hard, _hard))
-    except Exception:
-        pass
+
+def _unstage_paths(value, staged):
+    """Rewrite staging paths the JS reported back (e.g. job.output_xisf) to final paths."""
+    if isinstance(value, str):
+        for _k, stage, dest_dir, _kind in staged:
+            if value.startswith(str(stage)):
+                return str(dest_dir) + value[len(str(stage)):]
+        return value
+    if isinstance(value, list):
+        return [_unstage_paths(v, staged) for v in value]
+    if isinstance(value, dict):
+        return {k: _unstage_paths(v, staged) for k, v in value.items()}
+    return value
 
 
 def _run_pi(script_path: str, job_path: str, timeout: int = 600,
             use_xvfb: bool = False,
-            use_automation_mode: bool = True) -> tuple[bool, str]:
-    """Run a PI JS script headlessly. Returns (ok, log_text).
+            use_automation_mode: bool = True,
+            outputs: dict[str, str] | None = None,
+            caller: str = "production") -> tuple[bool, str]:
+    """Run a PI JS script headlessly under the ownership broker. Returns (ok, log_text).
 
+    outputs: job keys PI writes, as {key: 'file'|'dir'|'inplace'}. They are staged and
+        published only through the broker's fenced commit after a valid run (exit 0, no
+        timeout/revocation, no orphaned descendants). Junk (rejection maps) is never published.
     use_xvfb: wrap with xvfb-run for a real virtual X display (required for DI).
     use_automation_mode: pass --automation-mode to PI. Set False for DrizzleIntegration,
         which silently fails in automation mode (PI 1.9.3 confirmed limitation).
+    Never raises: broker unavailability, admission refusal and run failure return (False, msg).
     """
-    import os
-    _kill_lingering_pi()
-    Path("/tmp/pi_job_path.txt").write_text(job_path)
+    import glob as _glob
+    import tempfile
+    import uuid as _uuid
+    from nas_server import pi_broker, pi_owner
 
-    env = os.environ.copy()
-    env.update(PI_ENV_OVERLAY)
-
-    pi_flags = ["--automation-mode"] if use_automation_mode else []
-    pi_cmd = [PI_BIN] + pi_flags + ["-n", f"-r={script_path}", "--force-exit"]
-    if use_xvfb or _PI_FORCE_XVFB:
-        # Use a real virtual framebuffer instead of Qt offscreen
-        env.pop("QT_QPA_PLATFORM", None)
-        cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1280x1024x24"] + pi_cmd
-    else:
-        cmd = pi_cmd
-    log.info(f"[pi] running: {' '.join(cmd)}")
+    tag = _uuid.uuid4().hex[:12]
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=env, preexec_fn=_pi_preexec)
-    except FileNotFoundError:
-        log.warning(f"[pi] binary not found: {cmd[0]}")
-        return False, f"PI binary not found: {cmd[0]}"
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        # Always write PI's raw stdout+stderr for debugging
-        raw = f"exit_code={proc.returncode}\n---STDOUT---\n{stdout}\n---STDERR---\n{stderr}"
-        Path("/tmp/pi_last_stdout_stderr.log").write_text(raw)
-        if proc.returncode != 0 or stderr.strip():
-            log.warning(f"[pi] exit={proc.returncode} stderr={stderr[:500].strip()!r}")
-        log_path = Path("/tmp/pi_postprocess_last.log")
-        log_text = log_path.read_text() if log_path.exists() else (stdout + stderr)
-        return True, log_text
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()  # drain buffers and wait for full process death
-        time.sleep(2)       # extra margin for PI lock file cleanup by kernel
-        return False, "PI subprocess timed out"
+        job = json.loads(Path(job_path).read_text())
     except Exception as e:
-        try:
-            proc.kill()
-            proc.communicate()
-        except Exception:
-            pass
+        return False, f"unreadable job file {job_path}: {e}"
+    run_dir = Path(tempfile.mkdtemp(prefix=f"nova-pi-run-{tag}-"))
+    staged: list = []
+    r = {"valid": False, "end": "not_run", "exit_code": None}
+    try:
+        staged = _stage_outputs(job, outputs or {}, tag)
+        job["log_path"] = str(run_dir / "pi.log")
+        run_job = run_dir / "job.json"
+        run_job.write_text(json.dumps(job))
+
+        env = dict(PI_ENV_OVERLAY)
+        pi_flags = ["--automation-mode"] if use_automation_mode else []
+        pi_cmd = [PI_BIN] + pi_flags + ["-n", f"-r={script_path},{run_job}", "--force-exit"]
+        if use_xvfb or _PI_FORCE_XVFB:
+            env["QT_QPA_PLATFORM"] = "xcb"          # real virtual framebuffer instead of offscreen
+            pi_cmd = ["xvfb-run", "-a", "--server-args=-screen 0 1280x1024x24"] + pi_cmd
+        # PI opens one fd per input frame during ImageIntegration: raise the soft limit.
+        cmd = ["sh", "-c", 'ulimit -n "$(ulimit -Hn)"; exec "$@"', "sh"] + pi_cmd
+        log.info(f"[pi] broker run: {' '.join(pi_cmd)}")
+
+        with pi_broker.EngineSession(caller, admission_timeout=max(60.0, float(timeout))) as s:
+            # Engine owned and no unknown PI (broker refuses otherwise), so stale Qt IPC from a
+            # previously killed run can be cleared without touching anyone else's PixInsight.
+            s.delete([p for g in _QT_IPC_GLOBS for p in _glob.glob(g)])
+            r = s.run(cmd, timeout=timeout, env=env, stdout_path=run_dir / "stdout.log")
+            # Collect diagnostics before any post-run fenced operation can refuse the
+            # token. Invalid runs still return the JS result, but never publish files.
+            log_file = run_dir / "pi.log"
+            if log_file.exists():
+                log_text = log_file.read_text(errors="replace")
+            else:
+                out = run_dir / "stdout.log"
+                log_text = out.read_text(errors="replace") if out.exists() else ""
+            try:
+                result = json.loads(run_job.read_text())
+            except Exception:
+                result = dict(job)
+            result.pop("log_path", None)
+            if not r["valid"]:
+                log.warning(f"[pi] run not valid: end={r['end']} exit={r['exit_code']}")
+                result["ok"] = False
+                result["error"] = f"PI run not valid ({r['end']}, exit {r['exit_code']})"
+            Path(job_path).write_text(json.dumps(_unstage_paths(result, staged)))
+            if r["valid"]:
+                for _key, stage, dest_dir, _kind in staged:
+                    for f in sorted(stage.iterdir()):
+                        if f.is_file() and not _is_junk(f.name):
+                            s.commit(f, dest_dir / f.name)
+                s.delete([str(p) for p in PI_CACHE_DIR.glob("ImageIntegration-*.cache")])
+
+        if not r["valid"]:
+            return False, f"PI run not valid ({r['end']}, exit {r['exit_code']})\n{log_text}"
+        pi_broker.record_generation(s.token)     # final publication will present this generation
+        return True, log_text
+    except pi_owner.OwnershipError as e:
+        log.warning(f"[pi] ownership refused: {type(e).__name__}: {e}")
+        return False, f"PI ownership refused: {type(e).__name__}: {e}"
+    except Exception as e:
+        log.warning(f"[pi] run failed: {e}")
         return False, str(e)
+    finally:
+        for _k, stage, _d, _kind in staged:
+            shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def run_postprocess(
@@ -396,15 +394,16 @@ def run_postprocess(
     }
 
     proc_dir = Path(input_fits).parent
-    job_path = str(proc_dir / "pi_job.json")
+    import uuid as _uuid
+    job_path = str(proc_dir / f"pi_job_{_uuid.uuid4().hex[:12]}.json")   # #1020: per-run, never shared
     Path(job_path).write_text(json.dumps(job))
 
     enabled = [k for k, v in job.items()
                if isinstance(v, bool) and v and k not in ("bxt_auto_psf", "bxt_adjust_halos")]
     log.info(f"[pi] {target}: enabled={enabled} → {output_path}")
 
-    ok, log_text = _run_pi(PI_JS, job_path, timeout=timeout)
-    _cleanup_pi_workspace(str(Path(input_fits).parent))
+    ok, log_text = _run_pi(PI_JS, job_path, timeout=timeout,
+                           outputs={"output": "file", "starxt_stars_output": "file"})
 
     # Re-read job file (PI writes per-step status back)
     result_job = job.copy()
@@ -456,7 +455,7 @@ def run_postprocess(
             "ihdr_mask_strength":  ihdr_mask_strength,
         }
         Path(job_path).write_text(json.dumps(ihdr_job))
-        ihdr_ok, ihdr_log = _run_pi(PI_IHDR_JS, job_path, timeout=300)
+        ihdr_ok, ihdr_log = _run_pi(PI_IHDR_JS, job_path, timeout=300, outputs={"output": "file"})
         try:
             ihdr_result = json.loads(Path(job_path).read_text())
             if not ihdr_result.get("ihdr_output_exists") or not ihdr_ok:
@@ -560,9 +559,8 @@ def run_stack(
 
     t0 = _time.time()
     log.info(f"[pi] stack: {len(input_files)} frames → {output_path}")
-    pi_ok, log_text = _run_pi(PI_STACK_JS, job_path, timeout=timeout)
+    pi_ok, log_text = _run_pi(PI_STACK_JS, job_path, timeout=timeout, outputs={"output_path": "file"})
     elapsed = _time.time() - t0
-    _cleanup_pi_workspace(str(Path(output_path).parent))
 
     try:
         result = json.loads(Path(job_path).read_text())
@@ -618,7 +616,9 @@ def run_solve(
 
     t0 = _time.time()
     log.info(f"[pi] solve: {input_fits}")
-    pi_ok, log_text = _run_pi(PI_SOLVE_JS, job_path, timeout=timeout)
+    # The solved WCS is written into a staged copy, then renamed over input_fits by the
+    # broker's fenced commit (no in-place header mutation by PI).
+    pi_ok, log_text = _run_pi(PI_SOLVE_JS, job_path, timeout=timeout, outputs={"input_fits": "inplace"})
     elapsed = _time.time() - t0
 
     try:
@@ -731,7 +731,7 @@ def run_drizzle(
 
     t0 = _time.time()
     log.info(f"[pi] drizzle: {len(xdrz_files)} .xdrz files → {output_xisf}")
-    pi_ok, log_text = _run_pi(PI_DRIZZLE_JS, job_path, timeout=timeout)
+    pi_ok, log_text = _run_pi(PI_DRIZZLE_JS, job_path, timeout=timeout, outputs={"output_xisf": "file"})
     elapsed = _time.time() - t0
 
     try:
@@ -745,7 +745,6 @@ def run_drizzle(
     if drizzle_log.exists():
         log_text = drizzle_log.read_text()
 
-    _cleanup_pi_workspace(str(Path(output_xisf).parent))
 
     actual_xisf = result.get("output_xisf") or output_xisf
     ok = pi_ok and result.get("ok", False) and Path(actual_xisf).exists()
@@ -807,8 +806,11 @@ def run_register_and_drizzle(
     # in automation mode when the result window is retrieved via
     # DI.integrationImageId (the old "DI fails in automation mode" note predates
     # that fix — the real failure was a guessed window id returning null).
+    # output_dir is per-stack scratch whose .xdrz files embed absolute frame paths, so it is
+    # not staged; the published artifact is output_xisf.
     pi_ok, log_text = _run_pi(PI_REGISTER_AND_DRIZZLE_JS, job_path, timeout=timeout,
-                               use_xvfb=True, use_automation_mode=True)
+                               use_xvfb=True, use_automation_mode=True,
+                               outputs={"output_xisf": "file"})
     elapsed = _time.time() - t0
 
     try:
@@ -822,7 +824,6 @@ def run_register_and_drizzle(
     if rad_log.exists():
         log_text = rad_log.read_text()
 
-    _cleanup_pi_workspace(str(Path(output_xisf).parent))
 
     actual_xisf = result.get("output_xisf") or output_xisf
     ok = pi_ok and result.get("ok", False) and Path(actual_xisf).exists()

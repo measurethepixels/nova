@@ -170,6 +170,10 @@ button{{font:inherit;padding:.5rem .8rem}}@media(max-width:600px){{.viewer{{heig
  }};
  status.forEach(input=>input.addEventListener('change',update));update();
 }});
+const form=document.querySelector('form');
+if(form)form.addEventListener('submit',()=>{{
+ form.querySelector('button[type="submit"]').disabled=true;
+}});
 const button=document.getElementById('zoom');if(button)button.onclick=()=>{{
  const viewer=document.querySelector('.viewer');viewer.classList.toggle('actual');
  button.textContent=viewer.classList.contains('actual')?'Fit to window':'1:1 view';
@@ -188,6 +192,7 @@ def save_answers(anchor_id: str, fields: dict[str, list[str]]) -> None:
     """Validate a whole visible image before appending each dimension's answer."""
     from nas_server.database import get_conn
     with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         items, _ = queue(conn)
         selected = next((item for item in items if item["anchor_id"] == anchor_id), None)
         current = next((item for item in items if item["pending"]), None)
@@ -245,20 +250,19 @@ def save_answers(anchor_id: str, fields: dict[str, list[str]]) -> None:
             if (current is None or current["anchor_id"] != anchor_id
                     or {dimension for dimension, _, _ in planned} != set(selected["pending"])):
                 raise ValueError("image is not current or answers are incomplete")
-    # The corpus recorder owns its own short transaction. If a later write fails,
-    # the queue resumes at the first still-pending dimension for this image.
-    for dimension, key, payload in planned:
-        if payload["kind"] == "cannot_judge":
-            grading_corpus.record_cannot_judge(operation_key=key, anchor_id=anchor_id,
-                dimension=dimension, pass_id="A", epoch=EPOCH, reason=payload["reason"])
-        else:
-            grading_corpus.record_label(operation_key=key, anchor_id=anchor_id,
-                dimension=dimension, label_kind="independent_label", labeler="henry",
-                model_version=None, prompt_schema_version=EPOCH,
-                presentation_sha256=presentation_sha256,
-                response_sha256=payload["response_sha256"], status=payload["status"],
-                ordinal=payload["ordinal"], confidence=payload["confidence"],
-                defects=payload["defects"], blind_to=list(BLIND_TO))
+        # Keep validation, duplicate comparison and all writes under one lock.
+        for dimension, key, payload in planned:
+            if payload["kind"] == "cannot_judge":
+                grading_corpus.record_cannot_judge(operation_key=key, anchor_id=anchor_id,
+                    dimension=dimension, pass_id="A", epoch=EPOCH, reason=payload["reason"], conn=conn)
+            else:
+                grading_corpus.record_label(operation_key=key, anchor_id=anchor_id,
+                    dimension=dimension, label_kind="independent_label", labeler="henry",
+                    model_version=None, prompt_schema_version=EPOCH,
+                    presentation_sha256=presentation_sha256,
+                    response_sha256=payload["response_sha256"], status=payload["status"],
+                    ordinal=payload["ordinal"], confidence=payload["confidence"],
+                    defects=payload["defects"], blind_to=list(BLIND_TO), conn=conn)
 
 
 def install_routes(app) -> None:
@@ -296,5 +300,14 @@ def install_routes(app) -> None:
                 raise ValueError("invalid image")
             save_answers(anchor_ids[0], fields)
         except (UnicodeError, ValueError, KeyError) as exc:
+            if str(exc) == 'contradictory resubmission':
+                return HTMLResponse(
+                    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>Judgment already saved</title></head><body><main>'
+                    '<h1>This image was already judged.</h1>'
+                    '<p>Your saved judgment has not been changed.</p>'
+                    '<a href="/grading/pass-a">Continue →</a></main></body></html>',
+                    status_code=400, headers={"Cache-Control": "no-store"})
             raise HTTPException(status_code=400, detail="Invalid or stale labeling submission") from exc
         return RedirectResponse("/grading/pass-a", status_code=303)

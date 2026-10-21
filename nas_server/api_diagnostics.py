@@ -31,12 +31,19 @@ class CallRecord:
     ts: float
     cache_creation_tokens: int = 0   # written to cache (billed at cache-write rate)
     cache_read_tokens: int = 0       # served from cache (billed at cache-hit rate)
+    requested_model: str | None = None
+    fallback_used: bool = False
+    refusal_category: str | None = None
+    effort: str | None = None
+    stop_reason: str | None = None
 
 
 # USD per million tokens, keyed by a substring of the model id.
 # Order matters: first matching key wins, so list longer/more-specific keys first.
 # Ephemeral cache_control defaults to the 5-minute TTL → use the 5m write rate.
 _PRICING: list[tuple[str, dict]] = [
+    ("claude-opus-5-5", {"input": 4.0, "cache_write": 5.0, "cache_read": 0.20, "output": 20.0}),
+    ("claude-sonnet-5-5", {"input": 2.0, "cache_write": 2.50, "cache_read": 0.20, "output": 10.0}),
     ("opus",   {"input": 5.0,  "cache_write": 6.25, "cache_read": 0.50, "output": 25.0}),
     ("sonnet", {"input": 3.0,  "cache_write": 3.75, "cache_read": 0.30, "output": 15.0}),
     ("haiku",  {"input": 0.80, "cache_write": 1.0,  "cache_read": 0.08, "output": 4.0}),
@@ -87,7 +94,9 @@ def mark() -> int:
 def record(label: str, model: str, backend: str, input_tokens: int,
            output_tokens: int, latency_s: float, ok: bool,
            error: str | None = None, cache_creation_tokens: int = 0,
-           cache_read_tokens: int = 0) -> None:
+           cache_read_tokens: int = 0, *, requested_model: str | None = None,
+           fallback_used: bool = False, refusal_category: str | None = None,
+           effort: str | None = None, stop_reason: str | None = None) -> None:
     _records().append(CallRecord(
         label=label or "?",
         model=model or "?",
@@ -100,6 +109,8 @@ def record(label: str, model: str, backend: str, input_tokens: int,
         ts=time.time(),
         cache_creation_tokens=int(cache_creation_tokens or 0),
         cache_read_tokens=int(cache_read_tokens or 0),
+        requested_model=requested_model, fallback_used=fallback_used,
+        refusal_category=refusal_category, effort=effort, stop_reason=stop_reason,
     ))
 
 

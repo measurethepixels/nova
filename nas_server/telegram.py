@@ -1,4 +1,6 @@
 import base64
+import html
+import re
 import threading
 import time
 import urllib.request
@@ -54,6 +56,52 @@ def set_approve_command_handler(handler: Callable[[str], str | None] | None) -> 
     _approve_command_handler = handler
 
 
+# Strip only Telegram formatting tags: scientific comparisons and unknown tags
+# are literal text. Match quoted attributes without stopping at an embedded >.
+_TELEGRAM_HTML_TAG = re.compile(
+    r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|a|tg-spoiler|span|blockquote)"
+    r"(?=[\s/>])(?:[^<>\"']|\"[^\"]*\"|'[^']*')*>",
+    re.IGNORECASE,
+)
+
+
+def _post_html_text(url: str, body: dict, operation: str) -> bool:
+    """Retry a rejected HTML message once as plain text; never retry delivery
+    ambiguity (network/timeout) or other HTTP errors.
+    """
+    def post(payload: dict) -> None:
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+
+    try:
+        post(body)
+        return True
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            logger.warning("Telegram %s failed: %s", operation, exc)
+            return False
+        logger.warning("Telegram %s HTTP 400; retrying with plain-text fallback", operation)
+    except Exception as exc:
+        logger.warning("Telegram %s failed: %s", operation, exc)
+        return False
+
+    plain_body = dict(body)
+    plain_body.pop("parse_mode", None)
+    # Decode after stripping so escaped literal tags remain visible. Decode
+    # once: &amp;amp; represents the literal text &amp;, not an ampersand.
+    plain_body["text"] = html.unescape(_TELEGRAM_HTML_TAG.sub("", body["text"]))
+    try:
+        post(plain_body)
+        return True
+    except Exception as exc:
+        logger.warning("Telegram %s plain-text fallback failed: %s", operation, exc)
+        return False
+
+
 def send(message: str, reply_markup: dict | None = None) -> bool:
     if not _token or not _chat_id:
         return False
@@ -61,14 +109,7 @@ def send(message: str, reply_markup: dict | None = None) -> bool:
     body = {"chat_id": _chat_id, "text": message, "parse_mode": "HTML"}
     if reply_markup is not None:
         body["reply_markup"] = reply_markup
-    payload = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req, timeout=10)
-        return True
-    except Exception as e:
-        logger.warning(f"Telegram send failed: {e}")
-        return False
+    return _post_html_text(url, body, "send")
 
 
 def answer_callback(callback_query_id: str, text: str = "") -> bool:
@@ -91,17 +132,11 @@ def edit_message_text(chat_id, message_id, text: str) -> bool:
     if not _token:
         return False
     url = f"https://api.telegram.org/bot{_token}/editMessageText"
-    payload = json.dumps({
+    body = {
         "chat_id": chat_id, "message_id": message_id,
         "text": text, "parse_mode": "HTML",
-    }).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req, timeout=10)
-        return True
-    except Exception as e:
-        logger.warning(f"Telegram editMessageText failed: {e}")
-        return False
+    }
+    return _post_html_text(url, body, "editMessageText")
 
 
 def send_photo_bytes(image_bytes: bytes, caption: str = "") -> bool:

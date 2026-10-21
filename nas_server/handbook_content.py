@@ -20,6 +20,7 @@ from .handbook_contract import (
     ProcessFamily,
     ProvenanceLabel,
     ToolGuidance,
+    WalkthroughStep,
 )
 from .handbook_content_b import (
     CROP_FRAMING,
@@ -112,6 +113,41 @@ NOVA_BACKGROUND_SOURCE = EvidenceReference(
         "graxpert_div, pi_gc, adbe_default, adbe_cubic, adbe_poly_only, none)"
     ),
     provenance=ProvenanceLabel.NOVA_SOURCE_CONFIRMED,
+)
+
+GRAXPERT_EP15_SCRIPT = EvidenceReference(
+    reference_id="graxpert-ep15-script",
+    title="EP15 GraXpert Handbook recorded-session script",
+    locator="docs/episodes/handbook_graxpert_episode.json @ 4af8ed0c47990e7aa585bed962826254757571f4",
+    provenance=ProvenanceLabel.ARTIFACT_CONFIRMED,
+)
+
+GRAXPERT_EP15_CAPTURE = EvidenceReference(
+    reference_id="graxpert-ep15-capture",
+    title="EP15 GraXpert screen capture log, recordings A and E",
+    locator="docs/episodes/handbook_graxpert_capture_log.md @ claude/graxpert-capture-e",
+    provenance=ProvenanceLabel.ARTIFACT_CONFIRMED,
+)
+
+M1_BACKGROUND_RUN = EvidenceReference(
+    reference_id="m1-background-run-20260722",
+    title="M1 Crab background extraction run and claim ledger",
+    locator="docs/episodes/m1_crab_evidence.md; run 20260722_063635_seestar_broadband, step_records/background_extraction",
+    provenance=ProvenanceLabel.NOVA_EXECUTION_RECORD,
+)
+
+M27_BACKGROUND_RUN = EvidenceReference(
+    reference_id="m27-background-run-20260911-044756",
+    title="M27 background extraction run (7.0 to 9.37)",
+    locator="run 20260911_044756_seestar_nebula, step_records/background_extraction",
+    provenance=ProvenanceLabel.NOVA_EXECUTION_RECORD,
+)
+
+NGC7000_BACKGROUND_RUN = EvidenceReference(
+    reference_id="ngc7000-background-run-20260906",
+    title="NGC 7000 background extraction run (skipped: no improvement)",
+    locator="run 20260906_175646_seestar_nebula, step_records/background_extraction",
+    provenance=ProvenanceLabel.NOVA_EXECUTION_RECORD,
 )
 
 NOVA_COLOR_SOURCE = EvidenceReference(
@@ -668,7 +704,7 @@ COSMETIC_CORRECTION = HandbookArticle(
 BACKGROUND_EXTRACTION = HandbookArticle(
     article_id="background-extraction",
     schema_version=SCHEMA_VERSION,
-    revision=3,
+    revision=4,
     process_family=ProcessFamily.BACKGROUND_EXTRACTION,
     purpose=(
         "Model and remove unwanted large-scale background variation while preserving "
@@ -1014,7 +1050,41 @@ BACKGROUND_EXTRACTION = HandbookArticle(
         SIRIL_GRAXPERT_144,
         SASPRO_SOURCE_118,
         SASPRO_SYNTHETIC_20260814,
+        GRAXPERT_EP15_SCRIPT,
+        GRAXPERT_EP15_CAPTURE,
+        M1_BACKGROUND_RUN,
+        M27_BACKGROUND_RUN,
+        NGC7000_BACKGROUND_RUN,
     ),
+    walkthrough_steps=(
+        WalkthroughStep(
+            title="Load",
+            body="Load the linear stacked image. It will look nearly black; the stretch dropdown changes only the display, not the pixels. On uncalibrated SeeStar M81 data, Channels linked made the preview green (one pixel read green about four times red). Unticking it changes the display only.",
+            source_ids=("graxpert-ep15-script", "graxpert-ep15-capture"),
+        ),
+        WalkthroughStep(
+            title="Model",
+            body="Set Interpolation to AI. A trained model estimates the smooth background from the whole frame without hand-placed samples. GraXpert downloads the model on first use.",
+            source_ids=("graxpert-ep15-script", "graxpert-ep15-capture"),
+        ),
+        WalkthroughStep(
+            title="Correction",
+            body="Choose Subtraction for additive light such as light pollution or moonlight; this is NOVA's default. Use Division only for multiplicative effects such as vignetting, which flats should fix first. Smoothing runs from 0.0 (aggressive; can follow real structure) to 1.0 (gentle; can leave a gradient). NOVA starts at 0.5, a starting value rather than a proven best.",
+            source_ids=("graxpert-ep15-script", "graxpert-ep15-capture", "nova-background-source"),
+        ),
+        WalkthroughStep(
+            title="Inspect",
+            body="Switch the view to Background. The model should be smooth and contain no target shape. For M45's reflection dust, look for a cluster or dust shape in the model before accepting the correction.",
+            source_ids=("graxpert-ep15-script", "graxpert-ep15-capture"),
+        ),
+        WalkthroughStep(
+            title="Measure",
+            body="Measure before and after. Skip background extraction entirely when a frame-filling nebula or dust field leaves no clean sky. In NGC 7000 run 20260906_175646_seestar_nebula, GraXpert was tried and measured but not kept. On the 0–10 gradient scale, M1 Crab improved from 9.3 to 9.75 and M27 from 7.0 to 9.37 in their recorded runs.",
+            source_ids=("graxpert-ep15-script", "ngc7000-background-run-20260906", "m1-background-run-20260722", "m27-background-run-20260911-044756"),
+        ),
+    ),
+    walkthrough_version_stamp="Recorded session: GraXpert 3.0.2 “Umbriel”; background AI model 1.0.1.",
+    walkthrough_version_source_ids=("graxpert-ep15-script", "graxpert-ep15-capture"),
 )
 
 

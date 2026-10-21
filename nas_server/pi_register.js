@@ -52,7 +52,12 @@ logln("pi_register.js starting — PI " + CoreApplication.versionLongString);
 var sentinelPath = "/tmp/pi_job_path.txt";
 var jobPath;
 try {
-    jobPath = File.readFile(sentinelPath).toString().trim();
+    // #1020: managed runs pass a per-run job path as jsArguments[0]. The shared
+    // /tmp sentinel is read only for manual/diagnostic launches (non-authoritative).
+    if (typeof jsArguments !== "undefined" && jsArguments.length > 0 && jsArguments[0])
+        jobPath = jsArguments[0];
+    else
+        jobPath = File.readFile(sentinelPath).toString().trim();
 } catch(e) {
     logln("ERROR reading sentinel: " + e.message);
     flushLog();
@@ -66,6 +71,7 @@ if (!jobPath || !File.exists(jobPath)) {
 }
 
 var job = JSON.parse(File.readFile(jobPath).toString());
+if (job.log_path) logPath = job.log_path;   // #1020: per-run log, no shared /tmp file
 var inputFiles = job.input_files || [];
 var outputDir  = job.output_dir  || null;
 

@@ -17,6 +17,8 @@ import time
 import uuid
 from pathlib import Path
 
+from nas_server.claude_client import MODEL
+
 log = logging.getLogger(__name__)
 
 _active: dict[str, dict] = {}
@@ -795,7 +797,7 @@ def pick_best_variant(
         return None
 
     import base64
-    from nas_server.claude_client import _client, SYSTEM_PROMPT, MODEL
+    from nas_server.claude_client import _messages_create, _response_text, SYSTEM_PROMPT
 
     content = []
 
@@ -906,15 +908,15 @@ def pick_best_variant(
     )})
 
     try:
-        client = _client()
-        resp = client.messages.create(
+        resp = _messages_create(
+            label="experiment_pick_best_variant",
             model=MODEL,
             max_tokens=512,
             system=[{"type": "text", "text": SYSTEM_PROMPT,
                      "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": content}],
         )
-        raw = resp.content[0].text
+        raw = _response_text(resp)
         result = json.loads(raw)
         result["input_tokens"] = resp.usage.input_tokens
         result["output_tokens"] = resp.usage.output_tokens
@@ -2170,7 +2172,9 @@ def run_experiment(
                               for key, value in (pick.get("scores") or {}).items()}
         record_evaluator_attempt(
             presentation_id=ai_presentation_id, provider="anthropic",
-            model="claude-sonnet-5", settings={"max_tokens": 512,
+            model=MODEL, settings={"max_tokens": 4096, "retry_max_tokens": 8192,
+                                                "effort": "high",
+                                                "fallbacks": "default",
                                                 "payload_policy": payload_policy},
             prompt_template_revision="pick-best-variant/1.1.0",
             status="succeeded" if pick else "failed", parsed_result=pick,
@@ -2190,7 +2194,9 @@ def run_experiment(
     else:
         record_evaluator_attempt(
             presentation_id=ai_presentation_id, provider="anthropic",
-            model="claude-sonnet-5", settings={"max_tokens": 512,
+            model=MODEL, settings={"max_tokens": 4096, "retry_max_tokens": 8192,
+                                                "effort": "high",
+                                                "fallbacks": "default",
                                                 "payload_policy": payload_policy},
             prompt_template_revision="pick-best-variant/1.0.0",
             status="comparison_not_performed",

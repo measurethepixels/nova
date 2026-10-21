@@ -7,6 +7,7 @@ Run on the Ubuntu NAS VM:
 Or use the systemd service file in nas_server/deploy/.
 """
 
+from nas_server.library_publication import accepted_stack_files
 import collections
 import logging
 import os
@@ -256,6 +257,8 @@ from nas_server.grading_labeling_page import install_routes as _install_grading_
 _install_grading_pass_a_routes(app)
 from nas_server.grading_adjudication_page import install_routes as _install_grading_adjudication_routes
 _install_grading_adjudication_routes(app)
+from nas_server.grading_pairwise_page import install_routes as _install_grading_pairwise_routes
+_install_grading_pairwise_routes(app)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +529,9 @@ def stack_target_endpoint(target: str, engine: str = "siril",
                           hero: bool = False, drizzle: bool = False,
                           exptime: int = None, eq_only: bool = True,
                           filter: str = "auto",
+                          feather_max_subs: str | None = None,
+                          overlap_norm: bool | None = None, feather: bool | None = None,
+                          mosaic_max_subs: str | None = None,
                           ecc_threshold: float = 0.66,
                           sky_level_factor: float = 3.0, gradient_threshold: float = 0.5,
                           post_autoprocess_workflow: str = None,
@@ -541,6 +547,9 @@ def stack_target_endpoint(target: str, engine: str = "siril",
     exptime: if set, only stack frames whose exposure_time rounds to this value (seconds).
     eq_only: if True, exclude frames captured in alt-az mode (EQMODE!=1 in FITS header).
              Prevents diagonal banding artifacts when mixing old alt-az and new EQ sessions.
+    mosaic_max_subs: explicit per-filter Siril/max cap; 0 unlimited, blank manual unlimited.
+    feather_max_subs: blank or 0 always feathers; positive explicit legacy threshold.
+                     Above the threshold max-framing Siril keeps all eligible subs unfeathered.
     ecc_threshold: eccentricity gate (default 0.66). Raise to 0.8 to recover EQ tracking
                    frames with moderate polar-alignment drift.
     sky_level_factor: reject frames where sky > median_sky × factor (default 3.0). 0 disables.
@@ -550,10 +559,19 @@ def stack_target_endpoint(target: str, engine: str = "siril",
            for this target (default False — rejects the duplicate with 409).
     """
     from nas_server.queue_manager import add_stack_job
+    from nas_server.stack_config import parse_feather_override
+    try:
+        feather_override = parse_feather_override(feather_max_subs)
+        from nas_server.mosaic_selection import parse_cap_override
+        mosaic_override = parse_cap_override(mosaic_max_subs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     item = add_stack_job(target, engine=engine, cull=cull,
                          bottom_pct=bottom_pct, min_stars=min_stars, fast=fast, framing=framing,
                          hero=hero, drizzle=drizzle, exptime=exptime, eq_only=eq_only,
-                         filter_name=filter,
+                         filter_name=filter, feather_max_subs=feather_override,
+                         overlap_norm=overlap_norm, feather=feather,
+                         mosaic_max_subs=mosaic_override,
                          ecc_threshold=ecc_threshold,
                          sky_level_factor=sky_level_factor, gradient_threshold=gradient_threshold,
                          post_autoprocess_workflow=post_autoprocess_workflow,
@@ -1356,7 +1374,7 @@ _story_regen_status: dict = {"running": False, "done": 0, "total": 0, "errors": 
 def _regen_narratives_bg(target: str | None):
     import time as _time
     from nas_server.database import get_story_data, get_conn
-    from nas_server.claude_client import write_story_entry
+    from nas_server.claude_client import write_story_entry, MODEL_EVAL
 
     data = get_story_data(target)
     _story_regen_status["running"] = True
@@ -1401,7 +1419,7 @@ def _regen_narratives_bg(target: str | None):
                         "INSERT INTO claude_assessments "
                         "(target, phase, model, scores, recommendation, created_at) "
                         "VALUES (?, 'story_narrative', ?, '{}', ?, datetime('now'))",
-                        (tname, "claude-sonnet-4-6", narrative)
+                        (tname, MODEL_EVAL, narrative)
                     )
         except Exception as e:
             log.warning(f"[story] narrative failed for {tname}: {e}")
@@ -1487,7 +1505,7 @@ def story_generate_previews(target: str = None):
             continue
         # Pick best FITS: largest file (most data integrated)
         fits_files = sorted(
-            [f for f in proc_dir.glob("*.fit")] + [f for f in proc_dir.glob("*.fits")],
+            accepted_stack_files(tname, proc_dir),
             key=lambda p: p.stat().st_size, reverse=True
         )
         if not fits_files:
@@ -1526,6 +1544,14 @@ def serve_image(target: str, filename: str):
         Path(settings["seestar_library_path"]), target, "_processed"
     )
     img_path = _safe_route_path(proc_dir, filename)
+    if Path(filename).name == filename and filename.startswith('auto_final') and filename.endswith('_preview.jpg'):
+        from nas_server.library_publication import read_final_pair
+        suffix = filename[len('auto_final'):-len('_preview.jpg')].lstrip('_')
+        pair = read_final_pair(target, proc_dir, suffix)
+        if pair:
+            img_path = pair[1]
+        else:
+            raise HTTPException(status_code=404, detail='No coherent accepted final')
     if not img_path.exists() or img_path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(str(img_path), media_type="image/jpeg")
@@ -2605,7 +2631,9 @@ async def planner_compute(body: dict):
     for r in results:
         r["scheduled"] = r.get("target") in scheduled_set
     narrative = await run_in_threadpool(get_narrative, results, date_from, date_to, schedule)
-    return {"results": results, "schedule": schedule, "narrative": narrative, "count": len(results)}
+    from nas_server.planner_display import stored_plan_slot
+    return {"results": results, "schedule": [stored_plan_slot(slot) for slot in schedule],
+            "narrative": narrative, "count": len(results)}
 
 
 _AUTOFLAGS_PATH = os.path.join(os.path.expanduser("~"), "seestar_database", "planner_autoflags.json")
@@ -2684,64 +2712,16 @@ def trigger_nightly_plan():
 
 @app.get("/planner/stored-plan")
 def get_stored_plan():
-    """Return the latest saved nightly plan enriched with live int_hours and folio rec_h."""
-    from nas_server.database import get_latest_planner_run, get_conn
-    from nas_server.folio_generator import load_folio
+    """Return the saved scoring snapshot without querying today's frame totals."""
+    from nas_server.database import get_latest_planner_run
+    from nas_server.planner_display import stored_plan_slot
 
     run = get_latest_planner_run()
     if not run:
         return {"plan": None}
-
     plan_date, slots = run
-    if not slots:
-        return {"plan": {"date": plan_date, "slots": []}}
-
-    targets = [s["target"] for s in slots]
-
-    # Bulk query integration hours
-    placeholders = ",".join("?" * len(targets))
-    with get_conn() as conn:
-        rows = conn.execute(
-            f"SELECT target, ROUND(SUM(exposure_time)/3600.0, 2) as int_hours "
-            f"FROM light_files WHERE target IN ({placeholders}) AND exclude=0 GROUP BY target",
-            targets,
-        ).fetchall()
-    int_hours_map = {r[0]: r[1] for r in rows}
-
-    enriched = []
-    for slot in slots:
-        target = slot["target"]
-        start = slot.get("start_hhmm")
-        end = slot.get("end_hhmm")
-
-        # planned_h from hhmm strings
-        planned_h = None
-        if start and end:
-            sh, sm = int(start[:2]), int(start[3:])
-            eh, em = int(end[:2]), int(end[3:])
-            s_frac = sh + sm / 60.0
-            e_frac = eh + em / 60.0
-            if e_frac < s_frac:
-                e_frac += 24
-            planned_h = round(e_frac - s_frac, 2)
-
-        # rec_h from folio
-        folio = load_folio(target)
-        rec_h = None
-        if folio:
-            rec_h = (folio.get("s50_achievability") or {}).get("recommended_integration_hours")
-
-        int_h = int_hours_map.get(target, 0.0) or 0.0
-        enriched.append({
-            "target": target,
-            "start_hhmm": start,
-            "end_hhmm": end,
-            "planned_h": planned_h,
-            "int_hours": int_h,
-            "rec_h": rec_h,
-        })
-
-    return {"plan": {"date": plan_date, "slots": enriched}}
+    return {"plan": {"date": plan_date,
+                     "slots": [stored_plan_slot(slot) for slot in slots]}}
 
 
 @app.post("/settings/horizon")
@@ -2798,6 +2778,14 @@ def crop_analysis_page(target: str, filename: str):
         Path(settings["seestar_library_path"]), target, "_processed"
     )
     img_path = _safe_route_path(proc_dir, filename)
+    if Path(filename).name == filename and filename.startswith('auto_final') and filename.endswith('_preview.jpg'):
+        from nas_server.library_publication import read_final_pair
+        suffix = filename[len('auto_final'):-len('_preview.jpg')].lstrip('_')
+        pair = read_final_pair(target, proc_dir, suffix)
+        if pair:
+            img_path = pair[1]
+        else:
+            raise HTTPException(status_code=404, detail='No coherent accepted final')
     if not img_path.exists():
         raise HTTPException(404, detail=f"Image not found: {filename}")
     crops = get_image_crops(target, filename)

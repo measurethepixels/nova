@@ -10,6 +10,8 @@ eligibility.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from itertools import chain
 from pathlib import Path
 import re
 from typing import Callable, Iterable
@@ -40,6 +42,8 @@ class FitsProduct:
     obs_date: str | None = None
     tool: str | None = None
     step: str | None = None
+    filter_name: str | None = None
+    sort_date: str = ""
 
     @property
     def filename(self) -> str:
@@ -76,18 +80,63 @@ def _target_is_mosaic(target: str) -> bool:
 
 
 def canonical_target_for_storage(
-    storage_target: str, *, mosaic_enabled: bool | None = None
+    storage_target: str, *, mosaic_enabled: bool | None = None,
+    library: Path | None = None,
 ) -> str:
     """Resolve a proven ``<canonical>_mosaic`` storage identity.
 
-    A suffix alone is never enough: the canonical DB target must explicitly be
-    marked mosaic.  False negatives are preferable to aliasing unrelated data.
+    A suffix alone is never enough: the DB flag, matching SeeStar filenames,
+    or already attributed light frames must prove the relationship.
     """
     if not storage_target.endswith("_mosaic"):
         return storage_target
     candidate = storage_target[: -len("_mosaic")]
     enabled = _target_is_mosaic(candidate) if mosaic_enabled is None else mosaic_enabled
+    if not enabled:
+        enabled = _mosaic_storage_proven(candidate, library)
     return candidate if enabled else storage_target
+
+
+def _mosaic_storage_proven(candidate: str, library: Path | None) -> bool:
+    if library is None:
+        from nas_server.config import settings
+        library = Path(settings["seestar_library_path"])
+    folder = Path(library) / f"{candidate}_mosaic"
+    if not folder.is_dir():
+        return False
+    subfolder = folder / f"{candidate}_mosaic_sub"
+    files = chain(folder.iterdir(), subfolder.iterdir() if subfolder.is_dir() else ())
+    for path in files:
+        if not path.is_file() or path.suffix.lower() not in {".fit", ".fits"}:
+            continue
+        name = path.name
+        if name.startswith(f"Light_mosaic_{candidate}_") or (
+            name.startswith("Stacked_")
+            and re.match(rf"^Stacked_\d+_mosaic_{re.escape(candidate)}_", name)
+        ):
+            return True
+    if subfolder.is_dir():
+        from nas_server.database import get_conn
+        with get_conn() as conn:
+            paths = conn.execute(
+                "SELECT file_path FROM light_files WHERE target=?", (candidate,)
+            )
+            if any(Path(row[0]).is_relative_to(subfolder) for row in paths):
+                return True
+    return False
+
+
+def _filename_metadata(filename: str) -> tuple[str | None, str | None, float | None]:
+    stem = Path(filename).stem
+    date_match = re.search(r"(?:^|_)(20\d{6})(?:-|_|$)", stem)
+    date = None
+    if date_match:
+        raw = date_match.group(1)
+        date = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    filter_match = re.search(r"_\d+(?:\.\d+)?s_([^_]+)_20\d{6}", stem, re.I)
+    integration_match = re.search(r"(?:^|_)(\d+(?:\.\d+)?)s(?:_|$)", stem, re.I)
+    return (date, filter_match.group(1) if filter_match else None,
+            float(integration_match.group(1)) if integration_match else None)
 
 
 def _native_metadata(filename: str) -> tuple[int | None, float | None, str | None]:
@@ -135,7 +184,7 @@ def list_fits_products(
     enabled = _target_is_mosaic(canonical_target) if mosaic_enabled is None else mosaic_enabled
     storage_targets = [canonical_target]
     mosaic_storage = f"{canonical_target}_mosaic"
-    if enabled and (library / mosaic_storage).is_dir():
+    if (enabled or _mosaic_storage_proven(canonical_target, library)) and (library / mosaic_storage).is_dir():
         storage_targets.append(mosaic_storage)
 
     rows = get_processed_files(canonical_target) if processed_rows is None else processed_rows
@@ -152,6 +201,7 @@ def list_fits_products(
         except ValueError:
             relative = f"_processed/{Path(str(row.get('filename') or '')).name}"
         filename = Path(relative).name
+        name_date, filter_name, name_integration = _filename_metadata(filename)
         raw = raw_stack_classifier(filename, row.get("step"))
         product = FitsProduct(
             canonical_target=canonical_target,
@@ -161,10 +211,12 @@ def list_fits_products(
             mosaic=storage_target != canonical_target,
             raw_input_eligible=raw and storage_target == canonical_target,
             frame_count=row.get("frame_count"),
-            total_integration=row.get("total_integration"),
-            obs_date=row.get("obs_date"),
+            total_integration=row.get("total_integration") or name_integration,
+            obs_date=row.get("obs_date") or name_date or (row.get("created_at") or "")[:10],
             tool=row.get("tool"),
             step=row.get("step"),
+            filter_name=filter_name,
+            sort_date=(row.get("created_at") or row.get("obs_date") or name_date or ""),
         )
         products[product.identity] = product
 
@@ -191,6 +243,7 @@ def list_fits_products(
                 count = integration = obs_date = None
                 raw = raw_stack_classifier(path.name, None)
                 provenance = PRODUCT_PIPELINE_STACK if raw else PRODUCT_PROCESSED_FINAL
+            name_date, filter_name, name_integration = _filename_metadata(path.name)
             products[identity] = FitsProduct(
                 canonical_target=canonical_target,
                 storage_target=storage_target,
@@ -199,8 +252,10 @@ def list_fits_products(
                 mosaic=storage_target != canonical_target,
                 raw_input_eligible=raw and storage_target == canonical_target,
                 frame_count=count,
-                total_integration=integration,
-                obs_date=obs_date,
+                total_integration=integration or name_integration,
+                obs_date=obs_date or name_date or datetime.fromtimestamp(path.stat().st_mtime).date().isoformat(),
+                filter_name=filter_name,
+                sort_date=obs_date or name_date or datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
             )
 
     order = {
@@ -212,7 +267,7 @@ def list_fits_products(
         products.values(),
         key=lambda product: (
             order[product.provenance],
-            -(product.frame_count or 0),
+            -(int(re.sub(r"\D", "", product.sort_date)[:14].ljust(14, "0") or 0)),
             product.storage_target.casefold(),
             product.relative_path.casefold(),
         ),
@@ -223,7 +278,7 @@ def find_fits_product(
     storage_target: str, relative_path: str, *, library: Path | None = None
 ) -> tuple[str, FitsProduct | None, list[FitsProduct]]:
     """Resolve the canonical target and selected product for an existing URL."""
-    canonical = canonical_target_for_storage(storage_target)
+    canonical = canonical_target_for_storage(storage_target, library=library)
     products = list_fits_products(canonical, library=library)
     normalized = Path(relative_path).as_posix()
     selected = next(

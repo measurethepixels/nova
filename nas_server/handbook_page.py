@@ -308,6 +308,21 @@ def render_handbook_article(
         source_rows.append(
             f"<li>{title_html} — {html.escape(source.provenance.value)}</li>"
         )
+    walkthrough = ""
+    if article.walkthrough_steps:
+        steps = "".join(
+            '<li>'
+            f'<h3>{html.escape(step.title)}</h3><p>{html.escape(step.body)}</p>'
+            f'<small>Sources: {html.escape(", ".join(step.source_ids))}</small>'
+            '</li>'
+            for step in article.walkthrough_steps
+        )
+        stamp = (
+            f'<p>{html.escape(article.walkthrough_version_stamp)} '
+            f'<small>Sources: {html.escape(", ".join(article.walkthrough_version_source_ids))}</small></p>'
+            if article.walkthrough_version_stamp else ""
+        )
+        walkthrough = f'<section><h2>GraXpert walkthrough</h2><ol>{steps}</ol>{stamp}</section>'
     title = _process_label(article.process_family)
     if article.validation_event_ids:
         validation = (
@@ -329,6 +344,7 @@ def render_handbook_article(
 <section><h2>Intended output</h2><p>{html.escape(article.intended_output)}</p></section>
 <section><h2>Required input state</h2>{_list(article.required_input_state)}</section>
 <section><h2>What NOVA does</h2><p>{html.escape(article.nova_action)}</p></section>
+{walkthrough}
 <section class="hb-two"><div><h2>Use when</h2>{_list(article.use_when)}</div>
 <div><h2>Skip when</h2>{_list(article.skip_when)}</div></section>
 <section class="hb-two"><div><h2>Limits</h2>{_list(article.limits)}</div>

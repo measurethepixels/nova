@@ -9,6 +9,6 @@ cd ../process
 seqplatesolve light -nocache -force -order=4 -radius=25
 seqapplyreg light -framing=max -interp=lanczos4
 
-stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -out=../result
+stack r_light rej 3 3 -norm=addscale -output_norm -weight=noise -maximize -overlap_norm -feather=100 -out=../result
 
 cd ..

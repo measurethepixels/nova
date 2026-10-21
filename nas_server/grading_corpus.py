@@ -4,6 +4,8 @@ This module is deliberately offline tooling.  It has no scoring/pipeline caller.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import hashlib
 import json
 import statistics
@@ -12,6 +14,11 @@ import uuid
 SPLITS = frozenset({"development", "calibration", "held_out"})
 LABEL_KINDS = frozenset({"independent_label", "expert_adjudicated_label"})
 STATUSES = ("bad", "poor", "fair", "good", "excellent")
+ADJUDICATION_REASON_CODES = (
+    "visible_clipping", "visible_cast", "overstretched", "understretched",
+    "noise_visible", "structure_lost", "target_expected", "presentation_limit",
+    "persuaded_by_other_label", "boundary_call",
+)
 
 
 def _json(value) -> str:
@@ -68,6 +75,12 @@ def migrate(conn) -> None:
         disagreement_id TEXT NOT NULL REFERENCES grading_disagreements(disagreement_id),
         label_id TEXT NOT NULL REFERENCES grading_labels(label_id), adjudicator TEXT NOT NULL,
         rationale TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT(datetime('now')));
+      CREATE TABLE IF NOT EXISTS grading_adjudication_reasons (
+        reason_id TEXT PRIMARY KEY,
+        adjudication_id TEXT NOT NULL REFERENCES grading_adjudications(adjudication_id),
+        reason_code TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT(datetime('now')),
+        UNIQUE(adjudication_id, reason_code));
       CREATE TABLE IF NOT EXISTS grading_calibration_models (
         model_id TEXT PRIMARY KEY, operation_key TEXT NOT NULL UNIQUE,
         dimension TEXT NOT NULL, metric TEXT NOT NULL, calibration_version TEXT NOT NULL UNIQUE,
@@ -83,9 +96,13 @@ def migrate(conn) -> None:
     """)
     for table in ("grading_corpus_imports", "grading_anchors", "grading_memberships",
                   "grading_labels", "grading_cannot_judge", "grading_disagreements", "grading_adjudications",
+                  "grading_adjudication_reasons",
                   "grading_calibration_models", "grading_acceptance_runs"):
         conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_append_only BEFORE UPDATE ON {table}
                          BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS grading_adjudication_reasons_no_delete
+        BEFORE DELETE ON grading_adjudication_reasons
+        BEGIN SELECT RAISE(ABORT, 'grading_adjudication_reasons is append-only'); END""")
 
 
 def import_manifest(manifest: dict) -> dict:
@@ -148,15 +165,19 @@ def import_manifest(manifest: dict) -> dict:
 def record_label(*, operation_key: str, anchor_id: str, dimension: str, label_kind: str,
                  labeler: str, model_version: str | None, prompt_schema_version: str,
                  presentation_sha256: str, response_sha256: str, status: str, ordinal: float,
-                 confidence: float, defects: list[str], blind_to: list[str]) -> str:
-    """Append one label and materialize disagreement against prior independent passes."""
+                 confidence: float, defects: list[str], blind_to: list[str], conn=None) -> str:
+    """Append one label and materialize disagreement against prior independent passes.
+
+    An optional connection keeps the write in the caller's transaction; the
+    caller then owns locking, commit and rollback.
+    """
     if label_kind not in LABEL_KINDS or status not in STATUSES:
         raise ValueError("invalid label kind or status")
     required_blinding = {"candidate_grade", "other_label", "calibration_thresholds"}
     if label_kind == "independent_label" and not required_blinding.issubset(blind_to):
         raise ValueError("independent labels require complete blinding provenance")
     from nas_server.database import get_conn
-    with get_conn() as conn:
+    with (get_conn() if conn is None else nullcontext(conn)) as conn:
         existing = conn.execute("SELECT label_id FROM grading_labels WHERE operation_key=?",
                                 (operation_key,)).fetchone()
         if existing:
@@ -185,12 +206,12 @@ def record_label(*, operation_key: str, anchor_id: str, dimension: str, label_ki
 
 
 def record_cannot_judge(*, operation_key: str, anchor_id: str, dimension: str,
-                        pass_id: str, epoch: str, reason: str) -> str:
-    """Record a reasoned non-label, append-only and idempotent for identical input."""
+                        pass_id: str, epoch: str, reason: str, conn=None) -> str:
+    """Record a reasoned non-label, using the caller's transaction if supplied."""
     if not reason.strip():
         raise ValueError("cannot_judge requires a reason")
     from nas_server.database import get_conn
-    with get_conn() as conn:
+    with (get_conn() if conn is None else nullcontext(conn)) as conn:
         prior = conn.execute("SELECT * FROM grading_cannot_judge WHERE operation_key=?",
                              (operation_key,)).fetchone()
         if prior:
@@ -208,23 +229,107 @@ def record_cannot_judge(*, operation_key: str, anchor_id: str, dimension: str,
 
 
 def adjudicate(*, operation_key: str, disagreement_id: str, label_id: str,
-               adjudicator: str, rationale: str) -> str:
-    """Append expert adjudication without changing either original label."""
+               adjudicator: str, reason_codes: list[str], rationale: str = "", conn=None) -> str:
+    """Append expert adjudication, using the caller's transaction if supplied."""
+    if (not isinstance(reason_codes, list) or not reason_codes or
+            any(not isinstance(code, str) or code not in ADJUDICATION_REASON_CODES
+                for code in reason_codes) or
+            len(reason_codes) != len(set(reason_codes))):
+        raise ValueError("at least one unique, valid adjudication reason code is required")
+    if not isinstance(rationale, str):
+        raise ValueError("rationale must be text")
+    codes = sorted(reason_codes)
     from nas_server.database import get_conn
-    with get_conn() as conn:
+    with (get_conn() if conn is None else nullcontext(conn)) as conn:
         label = conn.execute("SELECT label_kind FROM grading_labels WHERE label_id=?", (label_id,)).fetchone()
         if not label or label[0] != "expert_adjudicated_label":
             raise ValueError("adjudication must reference an expert_adjudicated_label")
-        row = conn.execute("SELECT adjudication_id FROM grading_adjudications WHERE operation_key=?",
+        row = conn.execute("SELECT * FROM grading_adjudications WHERE operation_key=?",
                            (operation_key,)).fetchone()
         if row:
-            return row[0]
+            existing_codes = sorted(r[0] for r in conn.execute(
+                "SELECT reason_code FROM grading_adjudication_reasons WHERE adjudication_id=?",
+                (row["adjudication_id"],)).fetchall())
+            if (row["disagreement_id"], row["label_id"], row["adjudicator"],
+                    row["rationale"], existing_codes) != (
+                    disagreement_id, label_id, adjudicator, rationale, codes):
+                raise ValueError("contradictory adjudication resubmission")
+            return row["adjudication_id"]
         aid = _id("adjudication_")
         conn.execute("""INSERT INTO grading_adjudications
           (adjudication_id,operation_key,disagreement_id,label_id,adjudicator,rationale)
           VALUES(?,?,?,?,?,?)""",
                      (aid, operation_key, disagreement_id, label_id, adjudicator, rationale))
+        conn.executemany("""INSERT INTO grading_adjudication_reasons
+          (reason_id,adjudication_id,reason_code) VALUES(?,?,?)""",
+          [(_id("reason_"), aid, code) for code in codes])
         return aid
+
+
+def reason_counts_by_final_status(conn) -> dict[str, dict[str, int]]:
+    """Count selected adjudication reasons under each final expert status."""
+    rows = conn.execute("""SELECT l.status, r.reason_code, COUNT(*) AS count
+        FROM grading_adjudication_reasons r
+        JOIN grading_adjudications a ON a.adjudication_id=r.adjudication_id
+        JOIN grading_labels l ON l.label_id=a.label_id
+        GROUP BY l.status,r.reason_code ORDER BY l.status,r.reason_code""").fetchall()
+    counts: dict[str, dict[str, int]] = {}
+    for status, code, count in rows:
+        counts.setdefault(status, {})[code] = count
+    return counts
+
+
+def reference_truth(conn, anchor_id: str, dimension: str):
+    """Return one resolved label for a two-pass pair, or None.
+
+    Disagreement resolution is the presence of an adjudication, not the
+    append-only disagreement row's original ``resolution_state`` value.
+    """
+    labels = conn.execute("""SELECT * FROM grading_labels
+        WHERE anchor_id=? AND dimension=? AND label_kind='independent_label'
+        ORDER BY created_at,operation_key""", (anchor_id, dimension)).fetchall()
+    if len(labels) != 2 or conn.execute("""SELECT 1 FROM grading_cannot_judge
+        WHERE anchor_id=? AND dimension=? LIMIT 1""", (anchor_id, dimension)).fetchone():
+        return None
+    disagreement = conn.execute("""SELECT d.disagreement_id FROM grading_disagreements d
+        WHERE (d.first_label_id=? AND d.second_label_id=?)
+           OR (d.first_label_id=? AND d.second_label_id=?)""",
+        (labels[0]["label_id"], labels[1]["label_id"],
+         labels[1]["label_id"], labels[0]["label_id"])).fetchone()
+    if disagreement:
+        adjudications = conn.execute("""SELECT l.* FROM grading_adjudications a
+            JOIN grading_labels l ON l.label_id=a.label_id
+            WHERE a.disagreement_id=? AND l.anchor_id=? AND l.dimension=?
+              AND l.label_kind='expert_adjudicated_label'
+            ORDER BY a.created_at,a.adjudication_id""",
+            (disagreement["disagreement_id"], anchor_id, dimension)).fetchall()
+        return adjudications[0] if len(adjudications) == 1 else None
+    if labels[0]["status"] != labels[1]["status"] or labels[0]["ordinal"] != labels[1]["ordinal"]:
+        return None
+    return labels[0]
+
+
+def _resolved_measurements(conn, *, corpus_revision: str, dimension: str,
+                           split: str, metric: str):
+    rows = conn.execute("""SELECT s.anchor_id,s.stratum,m.value_json
+        FROM grading_memberships s
+        JOIN grading_anchors a ON a.anchor_id=s.anchor_id
+        JOIN quality_measurements m ON m.artifact_sha256=a.artifact_sha256
+        WHERE s.corpus_revision=? AND s.dimension=? AND s.split=?
+          AND m.metric=? AND m.integrity='valid' AND m.value_json IS NOT NULL
+        ORDER BY s.anchor_id,m.measurement_id""",
+        (corpus_revision, dimension, split, metric)).fetchall()
+    result = []
+    seen = set()
+    for row in rows:
+        if row["anchor_id"] in seen:
+            raise ValueError("multiple valid measurements for one anchor and metric")
+        seen.add(row["anchor_id"])
+        label = reference_truth(conn, row["anchor_id"], dimension)
+        value = json.loads(row["value_json"])
+        if label is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+            result.append((row["stratum"], float(value), float(label["ordinal"]), label["label_id"]))
+    return result
 
 
 def derive_calibration(*, operation_key: str, dimension: str, metric: str,
@@ -235,18 +340,9 @@ def derive_calibration(*, operation_key: str, dimension: str, metric: str,
         raise ValueError("invalid direction")
     from nas_server.database import get_conn
     with get_conn() as conn:
-        rows = conn.execute("""SELECT l.label_id,l.status,l.ordinal,m.value_json
-          FROM grading_memberships s JOIN grading_anchors a ON a.anchor_id=s.anchor_id
-          JOIN quality_measurements m ON m.artifact_sha256=a.artifact_sha256
-          JOIN grading_labels l ON l.anchor_id=a.anchor_id AND l.dimension=s.dimension
-          WHERE s.corpus_revision=? AND s.dimension=? AND s.split='calibration'
-            AND m.metric=? AND m.integrity='valid' AND m.value_json IS NOT NULL
-            AND (l.label_kind='expert_adjudicated_label' OR NOT EXISTS(
-              SELECT 1 FROM grading_disagreements d WHERE d.resolution_state='open'
-              AND (d.first_label_id=l.label_id OR d.second_label_id=l.label_id)))
-          ORDER BY l.label_id""", (corpus_revision, dimension, metric)).fetchall()
-        samples = [(float(json.loads(r["value_json"])), float(r["ordinal"]), r["label_id"])
-                   for r in rows if isinstance(json.loads(r["value_json"]), (int, float))]
+        samples = [(value, ordinal, label_id) for _, value, ordinal, label_id in
+                   _resolved_measurements(conn, corpus_revision=corpus_revision,
+                                          dimension=dimension, split="calibration", metric=metric)]
         if len(samples) < 2:
             raise ValueError("at least two resolved scalar calibration samples are required")
         values = sorted(v for v, _, _ in samples)
@@ -277,18 +373,11 @@ def acceptance_report(*, operation_key: str, model_id: str, corpus_revision: str
         model = conn.execute("SELECT * FROM grading_calibration_models WHERE model_id=?", (model_id,)).fetchone()
         if not model:
             raise ValueError("unknown model")
-        rows = conn.execute("""SELECT s.stratum,l.ordinal,m.value_json FROM grading_memberships s
-          JOIN grading_anchors a ON a.anchor_id=s.anchor_id
-          JOIN grading_labels l ON l.anchor_id=a.anchor_id AND l.dimension=s.dimension
-          JOIN quality_measurements m ON m.artifact_sha256=a.artifact_sha256 AND m.metric=?
-          WHERE s.corpus_revision=? AND s.dimension=? AND s.split='held_out'
-            AND l.label_kind='expert_adjudicated_label' AND m.integrity='valid'
-          ORDER BY s.stratum,l.ordinal""", (model["metric"], corpus_revision, model["dimension"])).fetchall()
+        rows = _resolved_measurements(conn, corpus_revision=corpus_revision,
+            dimension=model["dimension"], split="held_out", metric=model["metric"])
         groups: dict[str, list[tuple[float, float]]] = {}
-        for row in rows:
-            value = json.loads(row["value_json"])
-            if isinstance(value, (int, float)):
-                groups.setdefault(row["stratum"], []).append((float(row["ordinal"]), float(value)))
+        for stratum, value, ordinal, _ in rows:
+            groups.setdefault(stratum, []).append((ordinal, value))
         report = {"model_id": model_id, "corpus_revision": corpus_revision,
                   "held_out_untuned": True, "authoritative": False, "strata": {}}
         sign = 1 if model["direction"] == "higher_is_better" else -1

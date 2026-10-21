@@ -47,7 +47,7 @@ def _round_field(value):
     return round(value, 3) if isinstance(value, float) else value
 
 
-def _target_forces_max_framing(target_name: str) -> bool:
+def _target_forces_max_framing(target_name: str, *, strict: bool = False) -> bool:
     """True if target_name has mosaic panels (separate panel targets listing
     this as their mosaic_association) or its own mosaic=1 flag — the two
     conditions stack_target() checks to force framing="max" regardless of
@@ -66,6 +66,8 @@ def _target_forces_max_framing(target_name: str) -> bool:
         if get_mosaic_panel_targets(target_name):
             return True
     except Exception as e:
+        if strict:
+            raise ValueError("Cannot freeze auto mosaic policy: panel lookup failed") from e
         logger.warning(f"[stack] {target_name}: mosaic panel lookup failed: {e}")
     try:
         from nas_server.database import get_conn
@@ -76,11 +78,13 @@ def _target_forces_max_framing(target_name: str) -> bool:
         if row and row[0]:
             return True
     except Exception as e:
+        if strict:
+            raise ValueError("Cannot freeze auto mosaic policy: mosaic lookup failed") from e
         logger.warning(f"[stack] {target_name}: mosaic flag lookup failed: {e}")
     return False
 
 
-def resolve_effective_framing(target_name: str, framing: str) -> str:
+def resolve_effective_framing(target_name: str, framing: str, *, strict: bool = False) -> str:
     """Resolve the framing stack_target() will actually run with once its own
     mosaic detection runs. Two stack requests that differ only in requested
     framing but resolve to the same effective value must be treated as
@@ -89,7 +93,7 @@ def resolve_effective_framing(target_name: str, framing: str) -> str:
     not just the raw requested framing (see PR #39 review, finding 3)."""
     if framing == "max":
         return "max"
-    return "max" if _target_forces_max_framing(target_name) else framing
+    return "max" if _target_forces_max_framing(target_name, strict=strict) else framing
 
 
 def _stack_config_tokens(cfg: dict) -> str:
@@ -102,12 +106,20 @@ def _stack_config_tokens(cfg: dict) -> str:
     so the filename stays bounded and phone-readable.
     """
     tokens = []
+    if cfg.get("mosaic_cap", 0):
+        tokens.append(f"cap{cfg['mosaic_cap']}")
     if cfg.get("drizzle", False):
         tokens.append("drz")
     if cfg.get("hero", False):
         tokens.append("hero")
     if cfg.get("framing", "min") == "max":
         tokens.append("mf")
+    if cfg.get("feather_px") == 0 and cfg.get("framing") == "max":
+        tokens.append("nofeather")
+    elif cfg.get("feather_px") not in (None, 0, 100) and cfg.get("framing") == "max":
+        tokens.append(f"feather{cfg['feather_px']}")
+    if cfg.get("overlap_norm") is False and cfg.get("framing") == "max":
+        tokens.append("nooverlap")
     if cfg.get("fast", False):
         tokens.append("fast")
     if not cfg.get("eq_only", True):
@@ -162,3 +174,97 @@ def _move_with_overwrite_warning(src: Path, dst: Path, target_name: str, kind: s
     if dst.exists():
         logger.warning(f"[stack] {target_name}: overwriting existing {kind} {dst}")
     shutil.move(str(src), str(dst))
+
+
+def parse_feather_override(value):
+    """Parse an HTTP/form override without lossy float/bool coercion."""
+    import re
+    if value is None or value == "":
+        return None
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value):
+        return int(value)
+    raise ValueError("feather_max_subs must be a non-negative integer (0 always feathers)")
+
+
+def resolve_feather_policy(override, settings, *, overlap_norm=None, feather=None):
+    """New jobs always feather by default; explicit legacy thresholds still work.
+
+    Existing persisted stack_feather snapshots remain authoritative. The retired
+    mosaic_feather_max_subs setting is never reinterpreted as a selection cap.
+    """
+    validate_stack_option(overlap_norm)
+    validate_stack_option(feather)
+    threshold = 0 if override is None else override
+    if type(threshold) is not int or threshold < 0:
+        raise ValueError("feather_max_subs must be a non-negative integer")
+    width = settings.get("max_framing_feather_px", 100)
+    if type(width) is not int or not 1 <= width <= 10000:
+        raise ValueError("max-framing feather must be 1..10000 pixels")
+    # Siril 1.4.3 itself clamps larger widths. Persist both values honestly.
+    return dict(threshold=threshold, override=override, configured_px=width,
+                feather_px=min(width, 2000), overlap_norm_requested=overlap_norm,
+                feather_requested=feather)
+
+
+def feather_decision(policy, count, framing, engine, fast=False):
+    """Eligible per-filter count controls feathering, never frame selection."""
+    # Follow the actual SSF selection in stacker, including max-framing fallbacks.
+    # The legacy fast argument does not change that selection.
+    applicable = engine == "siril" and framing == "max"
+    requested_off = policy.get("feather_requested") is False
+    off = applicable and (requested_off or (policy["threshold"] != 0 and count > policy["threshold"]))
+    reason = ("user_disabled" if applicable and requested_off else "threshold_exceeded" if off else
+              "always_feather" if applicable and policy["threshold"] == 0 else
+              "within_threshold" if applicable else "not_applicable")
+    overlap_request = policy.get("overlap_norm_requested")
+    feather_request = policy.get("feather_requested")
+    validate_stack_option(overlap_request)
+    validate_stack_option(feather_request)
+    overlap = applicable and overlap_request is not False
+    options = {
+        "overlap_norm": option_record(overlap_request, applicable, overlap, "enabled" if overlap else "user_disabled"),
+        "feather": option_record(feather_request, applicable, applicable and not off, reason),
+    }
+    return {**policy, "selected_frames": count, "applicable": applicable,
+            "overlap_norm": overlap if applicable else None, "options": options,
+            "feather_px": (0 if off else policy["feather_px"]) if applicable else 0,
+            "reason": reason}
+
+
+def feather_description(decision):
+    if not decision["applicable"]:
+        return "Feather threshold not applicable to this engine/framing"
+    source = "frozen default" if decision["override"] is None else "override: feather_max_subs"
+    n, threshold = decision["selected_frames"], decision["threshold"]
+    if decision["reason"] == "user_disabled":
+        return "Feathering off (user override); all selected frames retained"
+    if decision["reason"] == "threshold_exceeded":
+        return f"{n} subs > {threshold}: feathering off ({source}); all selected frames retained"
+    rule = "always feather" if threshold == 0 else f"{n} subs <= {threshold}"
+    width = decision["feather_px"]
+    capped = f" (configured {decision['configured_px']}, Siril cap 2000)" if decision["configured_px"] > 2000 else ""
+    return f"{rule}: feathering {width}px{capped} ({source})"
+
+
+def validate_stack_option(value):
+    if value is not None and type(value) is not bool:
+        raise ValueError("stack overlap_norm/feather must be booleans or omitted")
+
+
+def option_record(requested, applicable, effective, reason):
+    return {'requested': requested, 'applicable': applicable,
+            'effective': bool(effective) if applicable else None,
+            'source': 'default' if requested is None else 'user',
+            'reason': reason if applicable else 'not_applicable'}
+
+
+def stack_options_description(decision):
+    if not decision['applicable']:
+        return 'Overlap normalization / feathering: not applicable'
+    overlap = decision['options']['overlap_norm']
+    feather = decision['options']['feather']
+    return (f"Overlap normalization {'on' if overlap['effective'] else 'off'} ({overlap['source']}); "
+            f"feathering {str(decision['feather_px'])+'px' if feather['effective'] else 'off'} "
+            f"({feather['source']}, {feather['reason']})")

@@ -138,6 +138,10 @@ def scan_processed_folders(library_path: str, db_path: str) -> int:
         # doesn't exist → "Source FITS not found" (found 2026-07-03, M 42 round 4).
         if Path(root).name != "_processed":
             continue
+        # #1020: a broker publication transaction is in flight (or awaiting its DB
+        # acceptance marker) for this folder; never index a partially published final.
+        if any(f.startswith(".nova-pi-txn-") and f.endswith(".pending") for f in files):
+            continue
         # Determine target from path: library/TargetName/_processed/
         parts = Path(root).relative_to(library_path).parts
         target = parts[0] if parts else None
@@ -148,6 +152,14 @@ def scan_processed_folders(library_path: str, db_path: str) -> int:
             fpath = os.path.join(root, fname)
             ext = Path(fname).suffix.lower()
 
+            if ext not in _PROCESSABLE_EXTS:
+                continue
+            from nas_server.database import is_raw_stack
+            from nas_server.library_publication import stack_eligible
+            if is_raw_stack(fname) and not stack_eligible(fpath):
+                continue
+            if Path(fname).stem.endswith('_coverage'):
+                continue
             if ext in _PREVIEW_EXTS:
                 continue  # skip JPEG previews
             if ext in _SIDECAR_EXTS:
