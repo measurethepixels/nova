@@ -25,7 +25,7 @@ NINA / remote-worker integrations.
 Module map worth loading before you edit anything: `config.py` (settings loader —
 ALL personal/machine config lives in `settings.json`), `stacker.py`,
 `auto_process.py`, `seti_astro.py` (image ops), `image_analyzer.py` (the ruler),
-`main.py` (API), `workflow_version.py` (+ `critiques/WORKFLOW_CHANGELOG.md` — the
+`main.py` (API), `workflow_version.py` (+ `WORKFLOW_CHANGELOG.md` — the
 pipeline's versioned history; read it to understand why thresholds are what they
 are).
 
@@ -113,12 +113,19 @@ after the next reboot.
 | Telegram bot | optional | push notifications | log-only |
 | Anthropic API key | optional | final aesthetic eval, planner prose | physics-only grading (`physics_only`) |
 
-**Free core** = Siril + ASTAP + GraXpert + Seti Astro Suite Pro (pip) + Python: a
-complete, honest stack→process→grade path — including the pipeline's stretch
-arsenal and a second stacking engine, all free. Configure what exists; make missing-tool steps *skip
-cleanly* rather than crash. If you find a step that crashes on a missing optional
-binary, that is a bug worth fixing — but fix it as a capability gate, not by
-deleting the step.
+**Free core** = Siril + ASTAP + GraXpert + Seti Astro Suite Pro (pip) + Python.
+The public sample targets this stack→process→grade workflow, including stretch
+options and a second stacking engine. Do not infer that every capture/filter
+combination can produce an accepted final without optional tools. The sample's
+pending golden metrics and clean-machine evidence still limit what is verified.
+Configure what exists; handle missing optional tools with explicit capability
+gates rather than crashes or deleted steps. Skipping an optional operation is
+not evidence that a scientifically required calibration has been satisfied.
+
+**Newer development, not included in this snapshot:** publication may be refused
+when required calibration evidence is unavailable. This note describes a newer
+policy; it does not claim that policy is implemented by the October checkout or
+that the historical checkout has been newly validated.
 
 **Siril version requirement:** use Siril **1.4.3 or newer** and confirm with
 `siril-cli --version` before stacking. Siril 1.4.3 fixed the headless
@@ -221,7 +228,7 @@ paths, so rewrite those two after cloning if PixInsight is in play.
 
 **Forbidden without the human's explicit ask:** scoring/gating thresholds, guard
 logic, stretch-picker behavior, workflow step order — these encode months of
-measured iteration (see `critiques/WORKFLOW_CHANGELOG.md`; the version number is
+measured iteration (see `WORKFLOW_CHANGELOG.md`; the version number is
 stamped into every run). If a threshold seems wrong for the user's data, surface
 it, don't silently change it.
 
@@ -276,7 +283,7 @@ astronomy result.
 
 ## 8. Optional remote GPU execution
 
-See `docs/RUNPOD_GPU.md` for the current RunPod contract, referral disclosure,
+See [RUNPOD_GPU.md](RUNPOD_GPU.md) for the current RunPod contract, referral disclosure,
 validated RC Astro evidence, lossless FITS transfer policy, and the boundaries
 between RC Astro, GraXpert, Cosmic Clarity/SASpro, and SyQon worker images.
 
